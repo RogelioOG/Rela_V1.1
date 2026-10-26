@@ -1,0 +1,5 @@
+[functions.seed-master]
+verify_jwt = false
+
+[functions.create-user]
+verify_jwt = true
