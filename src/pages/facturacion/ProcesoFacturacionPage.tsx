@@ -146,9 +146,9 @@ export default function ProcesoFacturacionPage() {
       });
   }, [dues, units, interestRate, graceDays, effectiveCutoffDate]);
 
-  const totalBase = useMemo(() => computedLiquidation.reduce((s, r) => s + r.baseAmount, 0), [computedLiquidation]);
-  const totalInterest = useMemo(() => computedLiquidation.reduce((s, r) => s + r.interestAmount, 0), [computedLiquidation]);
-  const totalGeneral = useMemo(() => computedLiquidation.reduce((s, r) => s + r.totalWithInterest, 0), [computedLiquidation]);
+  const totalBase = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.baseAmount, 0), [reviewed, liquidation, computedLiquidation]);
+  const totalInterest = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.interestAmount, 0), [reviewed, liquidation, computedLiquidation]);
+  const totalGeneral = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.totalWithInterest, 0), [reviewed, liquidation, computedLiquidation]);
 
   function handleInterestRateChange(value: string) {
     const parsed = parseFloat(value);
@@ -382,12 +382,12 @@ export default function ProcesoFacturacionPage() {
               </div>
 
               <div className="mt-4 flex items-center gap-3">
-                <Button onClick={handleReviewLiquidation} disabled={reviewing || dues.length === 0}>
+                <Button onClick={handleReviewLiquidation} disabled={reviewing}>
                   {reviewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Calculator className="w-4 h-4" />}
                   Revisar Liquidación
                 </Button>
-                {dues.length === 0 && (
-                  <span className="text-sm text-gray-500">No hay cuotas pendientes para liquidar</span>
+                {dues.length === 0 && !reviewed && (
+                  <span className="text-sm text-gray-500">No hay cuotas pendientes — puede revisar y continuar</span>
                 )}
                 {reviewed && defaultedAgreements.length === 0 && (
                   <span className="text-sm text-green-600 flex items-center gap-1">
@@ -404,7 +404,7 @@ export default function ProcesoFacturacionPage() {
                 )}
               </div>
 
-              {reviewed && liquidation.length > 0 && (
+              {reviewed && (
                 <div className="mt-4 flex justify-end">
                   <Button onClick={() => setCurrentStep(2)}>
                     Continuar al Paso 2 <ChevronRight className="w-4 h-4" />
@@ -450,6 +450,7 @@ export default function ProcesoFacturacionPage() {
                     <Clock className="w-7 h-7 text-gray-400" />
                   </div>
                   <p className="text-gray-500">No hay cuotas pendientes para liquidar en este periodo</p>
+                  <p className="text-sm text-gray-400 mt-1">Puede continuar al Paso 2 sin saldos pendientes.</p>
                 </div>
               ) : (
                 <div className="overflow-x-auto">

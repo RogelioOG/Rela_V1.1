@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { Plus, Pencil, Trash2, Loader2, AlertTriangle, Upload, Filter, CheckSquare, Square, X, FileSpreadsheet, Bell, CheckCircle2 } from 'lucide-react';
+import { Plus, Pencil, Trash2, Loader2, AlertTriangle, Upload, Filter, CheckSquare, Square, X, FileSpreadsheet, Bell, CheckCircle2, Download, RefreshCw } from 'lucide-react';
 import { supabase, RevenuePeriod, BillingConcept, Unit, PeriodNovelty } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card } from '@/components/ui/Card';
@@ -42,6 +42,13 @@ const emptyForm: FormState = {
   group_calculation: 'fijo',
 };
 
+interface ImportRow {
+  unit_label: string;
+  tower: string;
+  description: string;
+  value: string;
+}
+
 export default function NovedadesPage() {
   const { activeOrg } = useOrg();
   const [periods, setPeriods] = useState<RevenuePeriod[]>([]);
@@ -59,10 +66,15 @@ export default function NovedadesPage() {
   const [filterConcept, setFilterConcept] = useState('');
   const [filterPeriod, setFilterPeriod] = useState('');
   const [importOpen, setImportOpen] = useState(false);
-  const [importData, setImportData] = useState<{ unit_label: string; tower: string; description: string; value: string }[]>([]);
+  const [importData, setImportData] = useState<ImportRow[]>([]);
   const [importError, setImportError] = useState('');
   const [importMsg, setImportMsg] = useState('');
+  const [importDuplicates, setImportDuplicates] = useState<{ row: ImportRow; existing: PeriodNovelty }[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Duplicate detection state for individual novelty creation
+  const [duplicateFound, setDuplicateFound] = useState<PeriodNovelty | null>(null);
+  const [pendingSubmit, setPendingSubmit] = useState(false);
 
   useEffect(() => { if (activeOrg) loadInitial(); }, [activeOrg]);
 
@@ -102,9 +114,24 @@ export default function NovedadesPage() {
     });
   }, [novelties, filterType, filterConcept, filterPeriod]);
 
+  function findDuplicate(unitId: string | null, conceptId: string, periodLabel: string, description: string, excludeId?: string): PeriodNovelty | null {
+    return novelties.find(n => {
+      if (excludeId && n.id === excludeId) return false;
+      if (n.billing_concept_id !== conceptId) return false;
+      if (n.period_label !== periodLabel) return false;
+      if (n.description.trim().toLowerCase() === description.trim().toLowerCase()) {
+        if (unitId === null && n.unit_id === null) return true;
+        if (unitId && n.unit_id === unitId) return true;
+      }
+      return false;
+    }) || null;
+  }
+
   function openCreate() {
     setForm({ ...emptyForm, billing_concept_id: concepts.find(c => c.is_default)?.id || concepts[0]?.id || '' });
     setError('');
+    setDuplicateFound(null);
+    setPendingSubmit(false);
     setModalOpen(true);
   }
 
@@ -120,6 +147,8 @@ export default function NovedadesPage() {
       group_calculation: n.group_calculation || 'fijo',
     });
     setError('');
+    setDuplicateFound(null);
+    setPendingSubmit(false);
     setModalOpen(true);
   }
 
@@ -137,6 +166,17 @@ export default function NovedadesPage() {
 
     const activePeriod = periods.find(p => p.id === periods[0]?.id);
     if (!activePeriod) { setError('No hay periodos de recaudo configurados.'); setSaving(false); return; }
+
+    // Duplicate check for individual and masivo types (not grupo since it applies to all units)
+    if (form.novelty_type !== 'grupo' && !form.id) {
+      const unitId = form.novelty_type === 'individual' ? form.unit_id : null;
+      const dup = findDuplicate(unitId, form.billing_concept_id, form.period_label, form.description);
+      if (dup && !pendingSubmit) {
+        setDuplicateFound(dup);
+        setSaving(false);
+        return;
+      }
+    }
 
     try {
       if (form.novelty_type === 'grupo') {
@@ -160,29 +200,43 @@ export default function NovedadesPage() {
         const { error: insErr } = await supabase.from('period_novelties').insert(groupRows);
         if (insErr) throw insErr;
       } else {
-        const payload = {
-          organization_id: activeOrg.id,
-          revenue_period_id: activePeriod.id,
-          billing_concept_id: form.billing_concept_id,
-          unit_id: form.novelty_type === 'individual' ? form.unit_id : null,
-          novelty_type: form.novelty_type,
-          period_label: form.period_label,
-          description: form.description,
-          value: parseFloat(form.value),
-          group_calculation: null,
-          is_invoiced: false,
-        };
-        if (form.id) {
-          const { error: err } = await supabase.from('period_novelties').update(payload).eq('id', form.id);
+        // If duplicate was confirmed, update the existing record instead of creating a new one
+        if (duplicateFound && pendingSubmit && !form.id) {
+          const payload = {
+            billing_concept_id: form.billing_concept_id,
+            unit_id: form.novelty_type === 'individual' ? form.unit_id : null,
+            description: form.description,
+            value: parseFloat(form.value),
+          };
+          const { error: err } = await supabase.from('period_novelties').update(payload).eq('id', duplicateFound.id);
           if (err) throw err;
         } else {
-          const { error: err } = await supabase.from('period_novelties').insert(payload);
-          if (err) throw err;
+          const payload = {
+            organization_id: activeOrg.id,
+            revenue_period_id: activePeriod.id,
+            billing_concept_id: form.billing_concept_id,
+            unit_id: form.novelty_type === 'individual' ? form.unit_id : null,
+            novelty_type: form.novelty_type,
+            period_label: form.period_label,
+            description: form.description,
+            value: parseFloat(form.value),
+            group_calculation: null,
+            is_invoiced: false,
+          };
+          if (form.id) {
+            const { error: err } = await supabase.from('period_novelties').update(payload).eq('id', form.id);
+            if (err) throw err;
+          } else {
+            const { error: err } = await supabase.from('period_novelties').insert(payload);
+            if (err) throw err;
+          }
         }
       }
 
       setSaving(false);
       setModalOpen(false);
+      setDuplicateFound(null);
+      setPendingSubmit(false);
       await loadNovelties();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Error al guardar la novedad';
@@ -223,11 +277,25 @@ export default function NovedadesPage() {
     }
   }
 
+  function downloadCsvTemplate() {
+    const csv = 'Unidad,Torre,Descripcion,Valor\n101,Torre A,Ejemplo de novedad,50000\n102,Torre A,Otro ejemplo de novedad,75000\n';
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'plantilla_novedades.csv';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
   function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     setImportError('');
     setImportMsg('');
+    setImportDuplicates([]);
     const reader = new FileReader();
     reader.onload = (ev) => {
       const text = ev.target?.result as string;
@@ -243,7 +311,7 @@ export default function NovedadesPage() {
         setImportError('El archivo debe contener columnas: Unidad, Descripcion, Valor (y opcionalmente Torre).');
         return;
       }
-      const rows: { unit_label: string; tower: string; description: string; value: string }[] = [];
+      const rows: ImportRow[] = [];
       for (let i = 1; i < lines.length; i++) {
         const cols = lines[i].split(',').map(c => c.trim());
         rows.push({
@@ -268,33 +336,75 @@ export default function NovedadesPage() {
     const defaultConcept = concepts.find(c => c.is_default) || concepts[0];
     if (!defaultConcept) { setImportError('No hay conceptos configurados.'); setSaving(false); return; }
 
+    const currentPeriodLabel = new Date().toISOString().slice(0, 7);
+
+    // Detect duplicates against existing novelties
+    const duplicates: { row: ImportRow; existing: PeriodNovelty }[] = [];
     const unmatched: string[] = [];
-    const toInsert: Record<string, unknown>[] = [];
+    const matchedUnits: { row: ImportRow; unitId: string }[] = [];
+
     for (const row of importData) {
       const unit = units.find(u => u.unit_label === row.unit_label && (row.tower === '' || u.tower === row.tower));
       if (!unit) { unmatched.push(row.unit_label); continue; }
-      toInsert.push({
-        organization_id: activeOrg.id,
-        revenue_period_id: activePeriod.id,
-        billing_concept_id: defaultConcept.id,
-        unit_id: unit.id,
-        novelty_type: 'masivo',
-        period_label: new Date().toISOString().slice(0, 7),
-        description: row.description,
-        value: parseFloat(row.value) || 0,
-        group_calculation: null,
-        is_invoiced: false,
-      });
+      const dup = findDuplicate(unit.id, defaultConcept.id, currentPeriodLabel, row.description);
+      if (dup) {
+        duplicates.push({ row, existing: dup });
+      }
+      matchedUnits.push({ row, unitId: unit.id });
     }
+
     if (unmatched.length > 0) {
       setImportError(`Unidades no encontradas: ${unmatched.join(', ')}. Corrija el archivo o registre las unidades primero.`);
       setSaving(false);
       return;
     }
-    const { error: insErr } = await supabase.from('period_novelties').insert(toInsert);
-    if (insErr) { setImportError(insErr.message); setSaving(false); return; }
-    setImportMsg(`${toInsert.length} novedades masivas registradas correctamente.`);
+
+    if (duplicates.length > 0 && importDuplicates.length === 0) {
+      // First pass: show duplicates, ask user to confirm
+      setImportDuplicates(duplicates);
+      setImportMsg(`Se detectaron ${duplicates.length} novedad(es) duplicada(s). Revise y decida si actualizar los registros existentes o cancelar.`);
+      setSaving(false);
+      return;
+    }
+
+    // Second pass (user confirmed): update duplicates and insert new ones
+    const toInsert: Record<string, unknown>[] = [];
+    const toUpdate: { id: string; description: string; value: number }[] = [];
+
+    for (const { row, unitId } of matchedUnits) {
+      const dup = duplicates.find(d => d.row === row);
+      if (dup) {
+        // Update existing
+        toUpdate.push({ id: dup.existing.id, description: row.description, value: parseFloat(row.value) || 0 });
+      } else {
+        toInsert.push({
+          organization_id: activeOrg.id,
+          revenue_period_id: activePeriod.id,
+          billing_concept_id: defaultConcept.id,
+          unit_id: unitId,
+          novelty_type: 'masivo',
+          period_label: currentPeriodLabel,
+          description: row.description,
+          value: parseFloat(row.value) || 0,
+          group_calculation: null,
+          is_invoiced: false,
+        });
+      }
+    }
+
+    if (toInsert.length > 0) {
+      const { error: insErr } = await supabase.from('period_novelties').insert(toInsert);
+      if (insErr) { setImportError(insErr.message); setSaving(false); return; }
+    }
+    for (const upd of toUpdate) {
+      await supabase.from('period_novelties').update({ description: upd.description, value: upd.value }).eq('id', upd.id);
+    }
+
+    const newCount = toInsert.length;
+    const updCount = toUpdate.length;
+    setImportMsg(`${newCount} novedad(es) nueva(s) registrada(s) y ${updCount} existente(s) actualizada(s).`);
     setImportData([]);
+    setImportDuplicates([]);
     setSaving(false);
     setImportOpen(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -313,7 +423,10 @@ export default function NovedadesPage() {
           <p className="text-gray-500 mt-1">Cargos individuales, grupales y masivos sobre cuotas de administración</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => { setImportData([]); setImportError(''); setImportMsg(''); setImportOpen(true); }}>
+          <Button variant="outline" onClick={downloadCsvTemplate}>
+            <Download className="w-4 h-4" /> Plantilla CSV
+          </Button>
+          <Button variant="outline" onClick={() => { setImportData([]); setImportError(''); setImportMsg(''); setImportDuplicates([]); setImportOpen(true); }}>
             <Upload className="w-4 h-4" /> Importar CSV
           </Button>
           <Button onClick={openCreate}><Plus className="w-4 h-4" /> Nueva Novedad</Button>
@@ -434,6 +547,33 @@ export default function NovedadesPage() {
         <form onSubmit={handleSubmit} className="space-y-4">
           {error && <div className="rounded-lg bg-red-50 border border-red-200 p-3 flex items-center gap-2"><AlertTriangle className="w-4 h-4 text-red-600" /><p className="text-sm text-red-700">{error}</p></div>}
 
+          {/* Duplicate alert */}
+          {duplicateFound && (
+            <div className="rounded-lg bg-amber-50 border border-amber-300 p-4">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-semibold text-amber-900">Novedad duplicada detectada</p>
+                  <p className="text-sm text-amber-700 mt-1">
+                    Ya existe una novedad para el mismo concepto, unidad, periodo y descripción:
+                  </p>
+                  <div className="mt-2 rounded bg-white p-2 border border-amber-200 text-xs text-gray-700">
+                    <strong>{duplicateFound.description}</strong> — Valor actual: {formatCOP(duplicateFound.value)}
+                  </div>
+                  <p className="text-sm text-amber-700 mt-2">¿Desea actualizar el registro existente con los nuevos valores?</p>
+                  <div className="flex gap-2 mt-3">
+                    <Button size="sm" onClick={() => { setPendingSubmit(true); setDuplicateFound(null); }}>
+                      <RefreshCw className="w-3.5 h-3.5" /> Sí, Actualizar Existente
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => { setDuplicateFound(null); setModalOpen(false); }}>
+                      Cancelar
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {(['individual', 'grupo', 'masivo'] as const).map(t => (
               <button
@@ -489,7 +629,9 @@ export default function NovedadesPage() {
 
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="outline" onClick={() => setModalOpen(false)}>Cancelar</Button>
-            <Button type="submit" disabled={saving}>{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} {form.id ? 'Actualizar' : 'Registrar'}</Button>
+            <Button type="submit" disabled={saving}>
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} {form.id ? 'Actualizar' : 'Registrar'}
+            </Button>
           </div>
         </form>
       </Modal>
@@ -510,7 +652,10 @@ export default function NovedadesPage() {
           {importMsg && <div className="rounded-lg bg-green-50 border border-green-200 p-3 flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-green-600" /><p className="text-sm text-green-700">{importMsg}</p></div>}
 
           <div className="rounded-lg bg-gray-50 border border-gray-200 p-4">
-            <p className="text-sm font-semibold text-gray-700 mb-2">Formato del archivo CSV:</p>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-sm font-semibold text-gray-700">Formato del archivo CSV:</p>
+              <Button size="sm" variant="outline" onClick={downloadCsvTemplate}><Download className="w-3.5 h-3.5" /> Descargar Plantilla</Button>
+            </div>
             <p className="text-xs text-gray-500 mb-2">Columnas requeridas: Unidad, Descripcion, Valor. Columna opcional: Torre.</p>
             <pre className="text-xs text-gray-600 bg-white rounded p-2 border border-gray-200">Unidad,Torre,Descripcion,Valor{'\n'}101,Torre A,Multa por ruido,50000{'\n'}102,Torre A,Reparación ascensor,75000</pre>
           </div>
@@ -520,6 +665,34 @@ export default function NovedadesPage() {
             <FileSpreadsheet className="w-5 h-5 text-gray-400" />
           </div>
 
+          {/* Duplicate alerts for CSV import */}
+          {importDuplicates.length > 0 && (
+            <div className="rounded-lg bg-amber-50 border border-amber-300 p-4">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-semibold text-amber-900">{importDuplicates.length} novedad(es) duplicada(s) detectada(s)</p>
+                  <p className="text-sm text-amber-700 mt-1">Las siguientes filas coinciden con novedades existentes (mismo concepto, unidad, periodo y descripción). Al confirmar, se actualizarán los registros existentes con los nuevos valores.</p>
+                  <div className="mt-2 max-h-32 overflow-y-auto rounded bg-white p-2 border border-amber-200">
+                    {importDuplicates.map((d, i) => (
+                      <div key={i} className="text-xs text-gray-700 py-1 border-b border-amber-100 last:border-0">
+                        <strong>{d.row.unit_label}</strong> — {d.row.description} (actual: {formatCOP(d.existing.value)} → nuevo: {formatCOP(parseFloat(d.row.value) || 0)})
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex gap-2 mt-3">
+                    <Button size="sm" onClick={() => { setImportDuplicates([]); setImportMsg(''); }}>
+                      <RefreshCw className="w-3.5 h-3.5" /> Confirmar y Actualizar Duplicadas
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => { setImportDuplicates([]); setImportData([]); setImportMsg(''); }}>
+                      Cancelar Importación
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {importData.length > 0 && (
             <div className="overflow-x-auto max-h-60 overflow-y-auto">
               <table className="w-full">
@@ -528,27 +701,36 @@ export default function NovedadesPage() {
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-3 py-2">Torre</th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-3 py-2">Descripción</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-3 py-2">Valor</th>
+                  <th className="text-center text-xs font-semibold text-gray-600 uppercase px-3 py-2">Estado</th>
                 </tr></thead>
                 <tbody className="divide-y divide-gray-100">
-                  {importData.map((row, i) => (
-                    <tr key={i} className="hover:bg-gray-50">
-                      <td className="px-3 py-2 text-sm text-gray-900">{row.unit_label}</td>
-                      <td className="px-3 py-2 text-sm text-gray-700">{row.tower}</td>
-                      <td className="px-3 py-2 text-sm text-gray-700">{row.description}</td>
-                      <td className="px-3 py-2 text-sm text-gray-900 text-right">{formatCOP(parseFloat(row.value) || 0)}</td>
-                    </tr>
-                  ))}
+                  {importData.map((row, i) => {
+                    const isDup = importDuplicates.some(d => d.row === row);
+                    return (
+                      <tr key={i} className={`hover:bg-gray-50 ${isDup ? 'bg-amber-50' : ''}`}>
+                        <td className="px-3 py-2 text-sm text-gray-900">{row.unit_label}</td>
+                        <td className="px-3 py-2 text-sm text-gray-700">{row.tower}</td>
+                        <td className="px-3 py-2 text-sm text-gray-700">{row.description}</td>
+                        <td className="px-3 py-2 text-sm text-gray-900 text-right">{formatCOP(parseFloat(row.value) || 0)}</td>
+                        <td className="px-3 py-2 text-center">
+                          {isDup ? <Badge variant="yellow">Duplicada</Badge> : <Badge variant="green">Nueva</Badge>}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           )}
 
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setImportOpen(false)}>Cancelar</Button>
-            <Button onClick={confirmImport} disabled={saving || importData.length === 0}>
-              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />} Confirmar Importación ({importData.length})
-            </Button>
-          </div>
+          {importDuplicates.length === 0 && (
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setImportOpen(false)}>Cancelar</Button>
+              <Button onClick={confirmImport} disabled={saving || importData.length === 0}>
+                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />} Confirmar Importación ({importData.length})
+              </Button>
+            </div>
+          )}
         </div>
       </Modal>
     </div>

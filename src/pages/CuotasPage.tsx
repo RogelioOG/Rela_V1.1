@@ -1,13 +1,14 @@
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import { Calculator, Plus, Trash2, Loader2, AlertTriangle, Save, Table, CheckCircle2, Home, Layers } from 'lucide-react';
+import { Calculator, Plus, Trash2, Loader2, AlertTriangle, Save, Table, CheckCircle2, Home, Layers, History, Clock } from 'lucide-react';
 import { supabase, RevenuePeriod, BillingConcept, Unit, AdminQuota, AdminQuotaLine } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input, Select } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
+import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
-import { formatCOP, revenueFrequencyLabels } from '@/lib/format';
+import { formatCOP, formatShortDate, revenueFrequencyLabels } from '@/lib/format';
 
 const calcMethodLabels: Record<string, string> = {
   presupuesto: 'Presupuesto / Coeficientes',
@@ -34,6 +35,7 @@ export default function CuotasPage() {
   const [selectedConceptId, setSelectedConceptId] = useState('');
   const [loading, setLoading] = useState(true);
   const [existingQuota, setExistingQuota] = useState<AdminQuota | null>(null);
+  const [history, setHistory] = useState<AdminQuota[]>([]);
   const [calcMethod, setCalcMethod] = useState<'presupuesto' | 'fijo' | 'manual'>('fijo');
   const [budgetAmount, setBudgetAmount] = useState('0');
   const [fixedAmount, setFixedAmount] = useState('0');
@@ -42,6 +44,7 @@ export default function CuotasPage() {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   useEffect(() => { if (activeOrg) loadInitial(); }, [activeOrg]);
 
@@ -68,21 +71,26 @@ export default function CuotasPage() {
 
   const loadExistingQuota = useCallback(async () => {
     if (!activeOrg || !selectedPeriodId || !selectedConceptId) return;
-    const { data } = await supabase
+    // Load all history records (both active and inactive) for this period+concept
+    const { data: allRecords } = await supabase
       .from('admin_quotas')
       .select('*, admin_quota_lines(*)')
       .eq('organization_id', activeOrg.id)
       .eq('revenue_period_id', selectedPeriodId)
       .eq('billing_concept_id', selectedConceptId)
-      .maybeSingle();
+      .order('created_at', { ascending: false });
 
-    if (data) {
-      setExistingQuota(data);
-      setCalcMethod(data.calculation_method);
-      setBudgetAmount(String(data.budget_amount));
-      setFixedAmount(String(data.fixed_amount));
-      setRoundingDecimals(String(data.rounding_decimals));
-      loadQuotaRows(data);
+    const allQuotas = (allRecords || []) as AdminQuota[];
+    setHistory(allQuotas);
+    const active = allQuotas.find(q => q.is_active) || null;
+
+    if (active) {
+      setExistingQuota(active);
+      setCalcMethod(active.calculation_method);
+      setBudgetAmount(String(active.budget_amount));
+      setFixedAmount(String(active.fixed_amount));
+      setRoundingDecimals(String(active.rounding_decimals));
+      loadQuotaRows(active);
     } else {
       setExistingQuota(null);
       setCalcMethod('fijo');
@@ -180,12 +188,20 @@ export default function CuotasPage() {
     return errors;
   }
 
-  async function handleSave() {
-    if (!activeOrg || !selectedPeriodId || !selectedConceptId) return;
+  function requestSave() {
     const errors = validateBeforeSave();
     setValidationErrors(errors);
     if (errors.length > 0) return;
+    if (existingQuota) {
+      setConfirmOpen(true);
+    } else {
+      executeSave();
+    }
+  }
 
+  async function executeSave() {
+    if (!activeOrg || !selectedPeriodId || !selectedConceptId) return;
+    setConfirmOpen(false);
     setSaving(true);
     setMsg('');
     try {
@@ -200,17 +216,22 @@ export default function CuotasPage() {
         is_active: true,
       };
 
-      let quotaId: string;
+      // Deactivate the previous active record (if any) to preserve it as history
       if (existingQuota) {
-        const { error } = await supabase.from('admin_quotas').update(payload).eq('id', existingQuota.id);
-        if (error) throw error;
-        quotaId = existingQuota.id;
-        await supabase.from('admin_quota_lines').delete().eq('admin_quota_id', quotaId);
-      } else {
-        const { data: created, error } = await supabase.from('admin_quotas').insert(payload).select().single();
-        if (error) throw error;
-        quotaId = created.id;
+        await supabase
+          .from('admin_quotas')
+          .update({ is_active: false })
+          .eq('id', existingQuota.id);
       }
+
+      // Insert a new active record
+      const { data: created, error: insertErr } = await supabase
+        .from('admin_quotas')
+        .insert(payload)
+        .select()
+        .single();
+      if (insertErr) throw insertErr;
+      const quotaId = created.id;
 
       if (calcMethod === 'manual' || quotaRows.some(r => r.is_override)) {
         const linesToInsert = quotaRows
@@ -226,11 +247,41 @@ export default function CuotasPage() {
         }
       }
 
-      setMsg('Cuotas de administración guardadas correctamente.');
+      setMsg('Cuotas de administración guardadas correctamente. El registro anterior se conservó en el historial.');
       setSaving(false);
       await loadExistingQuota();
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : 'Error al guardar las cuotas';
+      setMsg(`Error: ${errMsg}`);
+      setSaving(false);
+    }
+  }
+
+  async function handleRestoreHistory(quota: AdminQuota) {
+    if (!activeOrg) return;
+    setSaving(true);
+    setMsg('');
+    try {
+      // Deactivate all active records for this period+concept
+      await supabase
+        .from('admin_quotas')
+        .update({ is_active: false })
+        .eq('organization_id', activeOrg.id)
+        .eq('revenue_period_id', quota.revenue_period_id)
+        .eq('billing_concept_id', quota.billing_concept_id)
+        .eq('is_active', true);
+
+      // Activate the selected historical record
+      await supabase
+        .from('admin_quotas')
+        .update({ is_active: true })
+        .eq('id', quota.id);
+
+      setMsg('Registro restaurado como configuración activa.');
+      setSaving(false);
+      await loadExistingQuota();
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Error al restaurar el registro';
       setMsg(`Error: ${errMsg}`);
       setSaving(false);
     }
@@ -316,7 +367,7 @@ export default function CuotasPage() {
                 <Button variant="outline" onClick={regenerateRows} disabled={units.length === 0}>
                   <Table className="w-4 h-4" /> Generar / Recalcular
                 </Button>
-                {existingQuota && <Badge variant="blue">Configuración existente</Badge>}
+                {existingQuota && <Badge variant="blue">Configuración existente (registro activo)</Badge>}
               </div>
             </div>
           </Card>
@@ -343,7 +394,7 @@ export default function CuotasPage() {
                 <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2"><Home className="w-5 h-5 text-blue-600" /> Cuotas por Unidad</h2>
                 <div className="flex items-center gap-3">
                   <span className="text-sm text-gray-500">Total: <strong className="text-gray-900">{formatCOP(totalQuota)}</strong></span>
-                  <Button onClick={handleSave} disabled={saving}>
+                  <Button onClick={requestSave} disabled={saving}>
                     {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                     Guardar Cuotas
                   </Button>
@@ -400,6 +451,61 @@ export default function CuotasPage() {
             </Card>
           )}
 
+          {/* History Table */}
+          {history.length > 0 && (
+            <Card>
+              <div className="px-6 py-4 border-b border-gray-200">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2"><History className="w-5 h-5 text-blue-600" /> Historial de Configuraciones</h2>
+                <p className="text-sm text-gray-500 mt-1">Todos los registros guardados para este periodo y concepto. Solo el más reciente activo rige la facturación.</p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead><tr className="border-b border-gray-200 bg-gray-50">
+                    <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Fecha de Guardado</th>
+                    <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Método</th>
+                    <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden sm:table-cell">Presupuesto</th>
+                    <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden sm:table-cell">Valor Fijo</th>
+                    <th className="text-center text-xs font-semibold text-gray-600 uppercase px-6 py-3">Estado</th>
+                    <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Acciones</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {history.map((q) => (
+                      <tr key={q.id} className={`hover:bg-gray-50 ${q.is_active ? 'bg-green-50' : ''}`}>
+                        <td className="px-6 py-3 text-sm text-gray-700">
+                          <div className="flex items-center gap-1.5">
+                            <Clock className="w-3.5 h-3.5 text-gray-400" />
+                            {formatShortDate(q.created_at)}
+                          </div>
+                        </td>
+                        <td className="px-6 py-3 text-sm font-medium text-gray-900">{calcMethodLabels[q.calculation_method]}</td>
+                        <td className="px-6 py-3 text-sm text-gray-700 text-right hidden sm:table-cell">
+                          {q.calculation_method === 'presupuesto' ? formatCOP(q.budget_amount) : '—'}
+                        </td>
+                        <td className="px-6 py-3 text-sm text-gray-700 text-right hidden sm:table-cell">
+                          {q.calculation_method === 'fijo' ? formatCOP(q.fixed_amount) : '—'}
+                        </td>
+                        <td className="px-6 py-3 text-center">
+                          {q.is_active ? <Badge variant="green">Activo</Badge> : <Badge variant="gray">Histórico</Badge>}
+                        </td>
+                        <td className="px-6 py-3 text-right">
+                          {!q.is_active && (
+                            <button
+                              onClick={() => handleRestoreHistory(q)}
+                              disabled={saving}
+                              className="text-xs text-blue-600 hover:text-blue-700 font-medium disabled:text-gray-400"
+                            >
+                              Restaurar
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+
           {/* Messages */}
           {msg && (
             <div className={`rounded-lg p-4 ${msg.startsWith('Error') ? 'bg-red-50 border border-red-200' : 'bg-green-50 border border-green-200'}`}>
@@ -414,11 +520,28 @@ export default function CuotasPage() {
           <div className="rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
             <p className="text-sm text-blue-800 flex items-start gap-2">
               <Layers className="w-4 h-4 mt-0.5 flex-shrink-0" />
-              Las cuotas de administración se calculan según el método seleccionado. No se puede generar facturación si hay unidades con coeficientes no asignados (método presupuesto) o valores en cero (método manual).
+              Cada vez que guarda, el registro anterior se conserva en el historial como inactivo y se crea un nuevo registro activo. Puede restaurar cualquier configuración histórica si lo necesita.
             </p>
           </div>
         </div>
       )}
+
+      {/* Confirmation Modal */}
+      <Modal open={confirmOpen} onClose={() => setConfirmOpen(false)} title="Confirmar Actualización de Cuotas" size="sm">
+        <p className="text-sm text-gray-600 mb-2">
+          Ya existe una configuración activa para este periodo y concepto.
+        </p>
+        <p className="text-sm text-gray-600 mb-4">
+          Al guardar, el registro actual se moverá al historial y se creará un nuevo registro activo con los nuevos valores. ¿Desea continuar?
+        </p>
+        <div className="flex justify-end gap-3">
+          <Button variant="outline" onClick={() => setConfirmOpen(false)}>Cancelar</Button>
+          <Button onClick={executeSave} disabled={saving}>
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            Sí, Guardar Nuevo
+          </Button>
+        </div>
+      </Modal>
     </div>
   );
 }

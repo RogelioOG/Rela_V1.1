@@ -1,13 +1,13 @@
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import { Percent, Plus, Trash2, Loader2, Layers, Table, Save, AlertTriangle, Calendar, Home } from 'lucide-react';
-import { supabase, RevenuePeriod, DiscountTier, Unit, BillingConcept } from '@/lib/supabase';
+import { Percent, Plus, Trash2, Loader2, Layers, Save, Calendar } from 'lucide-react';
+import { supabase, RevenuePeriod, DiscountTier } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input, Select } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { NoOrgSelected } from '@/components/shared';
-import { formatCOP, formatNumber, revenueFrequencyLabels } from '@/lib/format';
+import { formatCOP, revenueFrequencyLabels } from '@/lib/format';
 
 interface TierFormState {
   id?: string;
@@ -19,55 +19,28 @@ interface TierFormState {
   is_active: boolean;
 }
 
-interface PreBillRow {
-  unit_id: string;
-  unit_label: string;
-  tower: string;
-  coefficient: number;
-  base_amount: number;
-  applied_tier: DiscountTier | null;
-  discount_amount: number;
-  net_amount: number;
-  manual_override: boolean;
-  override_discount: string;
-}
-
 export default function DescuentosPage() {
   const { activeOrg } = useOrg();
   const [periods, setPeriods] = useState<RevenuePeriod[]>([]);
   const [selectedPeriodId, setSelectedPeriodId] = useState('');
   const [tiers, setTiers] = useState<DiscountTier[]>([]);
-  const [units, setUnits] = useState<Unit[]>([]);
-  const [concepts, setConcepts] = useState<BillingConcept[]>([]);
-  const [selectedConceptId, setSelectedConceptId] = useState('');
   const [loading, setLoading] = useState(true);
   const [tierForms, setTierForms] = useState<TierFormState[]>([]);
   const [savingTiers, setSavingTiers] = useState(false);
   const [tierMsg, setTierMsg] = useState('');
-  const [preBillRows, setPreBillRows] = useState<PreBillRow[]>([]);
-  const [totalBase, setTotalBase] = useState(0);
-  const [totalDiscount, setTotalDiscount] = useState(0);
-  const [totalNet, setTotalNet] = useState(0);
-  const [generating, setGenerating] = useState(false);
-  const [billingMsg, setBillingMsg] = useState('');
 
   useEffect(() => { if (activeOrg) loadInitial(); }, [activeOrg]);
 
   const loadInitial = useCallback(async () => {
     if (!activeOrg) return;
     setLoading(true);
-    const [{ data: periodData }, { data: unitData }, { data: conceptData }] = await Promise.all([
-      supabase.from('revenue_periods').select('*').eq('organization_id', activeOrg.id).order('start_date', { ascending: false }),
-      supabase.from('units').select('*').eq('organization_id', activeOrg.id).eq('is_active', true).order('tower').order('unit_label'),
-      supabase.from('billing_concepts').select('*').eq('organization_id', activeOrg.id).eq('is_active', true).order('is_default', { ascending: false }).order('name'),
-    ]);
+    const { data: periodData } = await supabase
+      .from('revenue_periods')
+      .select('*')
+      .eq('organization_id', activeOrg.id)
+      .order('start_date', { ascending: false });
     const pList = periodData || [];
     setPeriods(pList);
-    setUnits(unitData || []);
-    const cList = conceptData || [];
-    setConcepts(cList);
-    const defaultConcept = cList.find(c => c.is_default);
-    setSelectedConceptId(defaultConcept?.id || cList[0]?.id || '');
     if (pList.length > 0) setSelectedPeriodId(pList[0].id);
     setLoading(false);
   }, [activeOrg]);
@@ -158,101 +131,7 @@ export default function DescuentosPage() {
     }
   }
 
-  // Pre-billing discount calculation
   const activeTiers = useMemo(() => tiers.filter(t => t.is_active).sort((a, b) => a.valid_until_day - b.valid_until_day), [tiers]);
-
-  function generatePreBill() {
-    if (units.length === 0 || !selectedConceptId) {
-      setBillingMsg('No hay unidades o concepto seleccionado para generar el pre-facturación.');
-      return;
-    }
-    setGenerating(true);
-    const concept = concepts.find(c => c.id === selectedConceptId);
-    const conceptName = concept?.name || 'Concepto';
-
-    // Use period billing_day as reference. Base amount = coefficient * base fee.
-    // For demo, base fee = $500,000 COP per 1.0 coefficient
-    const baseFee = 500000;
-    const today = new Date().getDate();
-
-    const rows: PreBillRow[] = units.map(u => {
-      const base_amount = u.coefficient * baseFee;
-      let appliedTier: DiscountTier | null = null;
-      for (const tier of activeTiers) {
-        if (today <= tier.valid_until_day) {
-          appliedTier = tier;
-          break;
-        }
-      }
-      let discount_amount = 0;
-      if (appliedTier) {
-        if (appliedTier.discount_type === 'porcentaje') {
-          discount_amount = base_amount * (appliedTier.discount_value / 100);
-        } else {
-          discount_amount = Math.min(appliedTier.discount_value, base_amount);
-        }
-      }
-      return {
-        unit_id: u.id,
-        unit_label: u.unit_label,
-        tower: u.tower,
-        coefficient: u.coefficient,
-        base_amount,
-        applied_tier: appliedTier,
-        discount_amount,
-        net_amount: base_amount - discount_amount,
-        manual_override: false,
-        override_discount: '',
-      };
-    });
-
-    setPreBillRows(rows);
-    setBillingMsg(`Pre-facturación generada para ${rows.length} unidades — Concepto: ${conceptName}. Ajuste los descuentos manualmente si lo desea.`);
-    setGenerating(false);
-  }
-
-  function applyManualDiscount(idx: number, discountStr: string) {
-    setPreBillRows(prev => {
-      const updated = [...prev];
-      const row = updated[idx];
-      const overrideVal = parseFloat(discountStr) || 0;
-      let newDiscount: number;
-      if (discountStr === '') {
-        // Revert to auto
-        newDiscount = row.applied_tier
-          ? row.applied_tier.discount_type === 'porcentaje'
-            ? row.base_amount * (row.applied_tier.discount_value / 100)
-            : Math.min(row.applied_tier.discount_value, row.base_amount)
-          : 0;
-        updated[idx] = {
-          ...row,
-          discount_amount: newDiscount,
-          net_amount: row.base_amount - newDiscount,
-          manual_override: false,
-          override_discount: '',
-        };
-      } else {
-        newDiscount = Math.min(overrideVal, row.base_amount);
-        updated[idx] = {
-          ...row,
-          discount_amount: newDiscount,
-          net_amount: row.base_amount - newDiscount,
-          manual_override: true,
-          override_discount: discountStr,
-        };
-      }
-      return updated;
-    });
-  }
-
-  // Recalculate totals when preBillRows change
-  useEffect(() => {
-    const base = preBillRows.reduce((s, r) => s + r.base_amount, 0);
-    const disc = preBillRows.reduce((s, r) => s + r.discount_amount, 0);
-    setTotalBase(base);
-    setTotalDiscount(disc);
-    setTotalNet(base - disc);
-  }, [preBillRows]);
 
   if (!activeOrg) return <NoOrgSelected />;
 
@@ -262,7 +141,7 @@ export default function DescuentosPage() {
     <div className="max-w-7xl mx-auto">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Descuentos por Pronto Pago</h1>
-        <p className="text-gray-500 mt-1">Descuentos escalonados configurables por periodo y pre-facturación interactiva</p>
+        <p className="text-gray-500 mt-1">Configuración de escalones de descuento por periodo</p>
       </div>
 
       {loading ? (
@@ -349,7 +228,7 @@ export default function DescuentosPage() {
               </div>
               <div className="p-5">
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {activeTiers.map((tier, idx) => (
+                  {activeTiers.map((tier) => (
                     <div key={tier.id} className="rounded-lg border border-blue-200 bg-blue-50 p-4">
                       <div className="flex items-center justify-between mb-2">
                         <span className="text-sm font-semibold text-blue-900">Escalón {tier.tier_order}</span>
@@ -366,102 +245,13 @@ export default function DescuentosPage() {
             </Card>
           )}
 
-          {/* Pre-billing Adjustment Table */}
-          <Card>
-            <div className="px-6 py-4 border-b border-gray-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2"><Table className="w-5 h-5 text-blue-600" /> Pre-Facturación con Descuentos</h2>
-              <div className="flex items-end gap-3">
-                <Select label="Concepto" value={selectedConceptId} onChange={(e) => setSelectedConceptId(e.target.value)} className="sm:max-w-xs">
-                  {concepts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </Select>
-                <Button onClick={generatePreBill} disabled={generating || units.length === 0}>
-                  {generating ? <><Loader2 className="w-4 h-4 animate-spin" /> Generando...</> : <><Table className="w-4 h-4" /> Generar Pre-Facturación</>}
-                </Button>
-              </div>
-            </div>
-            <div className="p-5">
-              {units.length === 0 ? (
-                <div className="text-center py-8">
-                  <Home className="w-10 h-10 text-gray-300 mx-auto mb-2" />
-                  <p className="text-sm text-gray-500">No hay unidades activas. Registre inmuebles para generar pre-facturación.</p>
-                </div>
-              ) : preBillRows.length === 0 ? (
-                <div className="text-center py-8">
-                  <Table className="w-10 h-10 text-gray-300 mx-auto mb-2" />
-                  <p className="text-sm text-gray-500">Haga clic en "Generar Pre-Facturación" para calcular los descuentos por unidad.</p>
-                </div>
-              ) : (
-                <>
-                  {billingMsg && (
-                    <div className="mb-4 rounded-lg bg-blue-50 border border-blue-200 px-4 py-3 flex items-start gap-2">
-                      <AlertTriangle className="w-4 h-4 text-blue-600 mt-0.5 flex-shrink-0" />
-                      <p className="text-sm text-blue-800">{billingMsg}</p>
-                    </div>
-                  )}
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead><tr className="border-b border-gray-200 bg-gray-50">
-                        <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Unidad</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Coeficiente</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Base</th>
-                        <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3 hidden md:table-cell">Escalón</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Descuento</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Neto a Pagar</th>
-                      </tr></thead>
-                      <tbody className="divide-y divide-gray-100">
-                        {preBillRows.map((row, idx) => (
-                          <tr key={row.unit_id} className={`hover:bg-gray-50 ${row.manual_override ? 'bg-amber-50' : ''}`}>
-                            <td className="px-4 py-3">
-                              <p className="font-medium text-gray-900">{row.unit_label}</p>
-                              <p className="text-xs text-gray-500">{row.tower || 'Sin torre'}</p>
-                            </td>
-                            <td className="px-4 py-3 text-right text-gray-700">{formatNumber(row.coefficient, 4)}</td>
-                            <td className="px-4 py-3 text-right text-gray-700">{formatCOP(row.base_amount)}</td>
-                            <td className="px-4 py-3 hidden md:table-cell">
-                              {row.applied_tier ? (
-                                <Badge variant="blue">{row.applied_tier.name} (día {row.applied_tier.valid_until_day})</Badge>
-                              ) : <Badge variant="gray">Sin descuento</Badge>}
-                              {row.manual_override && <div><Badge variant="yellow">Manual</Badge></div>}
-                            </td>
-                            <td className="px-4 py-3 text-right">
-                              <div className="flex items-center justify-end gap-1">
-                                <input
-                                  type="number"
-                                  step="0.01"
-                                  value={row.manual_override ? row.override_discount : ''}
-                                  onChange={(e) => applyManualDiscount(idx, e.target.value)}
-                                  placeholder={formatNumber(row.discount_amount, 0)}
-                                  className="w-24 rounded border border-gray-300 px-2 py-1 text-xs text-right focus:outline-none focus:ring-1 focus:ring-blue-500"
-                                />
-                                <span className="text-xs text-gray-400">COP</span>
-                              </div>
-                            </td>
-                            <td className="px-4 py-3 text-right font-semibold text-gray-900">{formatCOP(row.net_amount)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                      <tfoot>
-                        <tr className="border-t-2 border-gray-300 bg-gray-50 font-bold">
-                          <td colSpan={2} className="px-4 py-3 text-gray-700">Totales ({preBillRows.length} unidades)</td>
-                          <td className="px-4 py-3 text-right text-gray-900">{formatCOP(totalBase)}</td>
-                          <td className="px-4 py-3 hidden md:table-cell"></td>
-                          <td className="px-4 py-3 text-right text-red-600">-{formatCOP(totalDiscount)}</td>
-                          <td className="px-4 py-3 text-right text-green-700">{formatCOP(totalNet)}</td>
-                        </tr>
-                      </tfoot>
-                    </table>
-                  </div>
-                  <div className="mt-4 rounded-lg bg-gray-50 border border-gray-200 px-4 py-3">
-                    <p className="text-xs text-gray-600">
-                      <strong>Instrucciones:</strong> Los descuentos se calculan automáticamente según el día actual y los escalones configurados.
-                      Para anular el descuento automático, ingrese un valor manual en la columna "Descuento".
-                      Deje el campo vacío para revertir al cálculo automático.
-                    </p>
-                  </div>
-                </>
-              )}
-            </div>
-          </Card>
+          {/* Info banner */}
+          <div className="rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
+            <p className="text-sm text-blue-800">
+              Los escalones de descuento se aplican automáticamente durante el proceso de facturación (Paso 2: Formatos y Envío).
+              Configure los niveles y días límite aquí; la tabla interactiva de descuentos por propiedad se muestra durante la facturación cuando hay escalones activos.
+            </p>
+          </div>
         </div>
       )}
     </div>
