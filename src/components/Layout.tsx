@@ -22,6 +22,8 @@ import {
   Calendar,
   Layers,
   Percent,
+  Calculator,
+  Bell,
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useOrg } from '@/contexts/OrganizationContext';
@@ -92,6 +94,8 @@ export default function Layout({ children }: { children: ReactNode }) {
           { to: '/inmuebles', label: 'Inmuebles', icon: Home },
           { to: '/conceptos', label: 'Conceptos de Cobro', icon: Layers },
           { to: '/calendario', label: 'Calendario de Recaudo', icon: Calendar },
+          { to: '/cuotas', label: 'Cuotas de Administración', icon: Calculator },
+          { to: '/novedades', label: 'Novedades del Periodo', icon: Bell },
           { to: '/descuentos', label: 'Descuentos por Pronto Pago', icon: Percent },
           { to: '/cartera', label: 'Cartera y Cuotas', icon: FileText },
           { to: '/recaudos', label: 'Recaudos', icon: Landmark },

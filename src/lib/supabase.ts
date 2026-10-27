@@ -321,3 +321,50 @@ export interface AccountMapping {
   created_at: string;
   accounts?: Account;
 }
+
+export interface AdminQuota {
+  id: string;
+  organization_id: string;
+  revenue_period_id: string;
+  billing_concept_id: string;
+  calculation_method: 'presupuesto' | 'fijo' | 'manual';
+  budget_amount: number;
+  fixed_amount: number;
+  rounding_decimals: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  billing_concept?: BillingConcept;
+  revenue_period?: RevenuePeriod;
+  admin_quota_lines?: AdminQuotaLine[];
+}
+
+export interface AdminQuotaLine {
+  id: string;
+  organization_id: string;
+  admin_quota_id: string;
+  unit_id: string;
+  amount: number;
+  created_at: string;
+  updated_at: string;
+  units?: Unit;
+}
+
+export interface PeriodNovelty {
+  id: string;
+  organization_id: string;
+  revenue_period_id: string;
+  billing_concept_id: string;
+  unit_id: string | null;
+  novelty_type: 'individual' | 'grupo' | 'masivo';
+  period_label: string;
+  description: string;
+  value: number;
+  group_calculation: 'fijo' | 'coeficiente' | null;
+  is_invoiced: boolean;
+  created_at: string;
+  updated_at: string;
+  billing_concept?: BillingConcept;
+  units?: Unit;
+  revenue_period?: RevenuePeriod;
+}

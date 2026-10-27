@@ -17,6 +17,8 @@ import RecaudosPage from '@/pages/RecaudosPage';
 import CalendarioPage from '@/pages/CalendarioPage';
 import ConceptosPage from '@/pages/ConceptosPage';
 import DescuentosPage from '@/pages/DescuentosPage';
+import CuotasPage from '@/pages/CuotasPage';
+import NovedadesPage from '@/pages/NovedadesPage';
 import CuentasPage from '@/pages/CuentasPage';
 import AsientosPage from '@/pages/AsientosPage';
 import ReportesPage from '@/pages/ReportesPage';
@@ -115,6 +117,8 @@ function App() {
           <Route path="/calendario" element={<ProtectedRoute><OrgMemberRoute><CalendarioPage /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/conceptos" element={<ProtectedRoute><OrgMemberRoute><ConceptosPage /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/descuentos" element={<ProtectedRoute><OrgMemberRoute><DescuentosPage /></OrgMemberRoute></ProtectedRoute>} />
+          <Route path="/cuotas" element={<ProtectedRoute><OrgMemberRoute><CuotasPage /></OrgMemberRoute></ProtectedRoute>} />
+          <Route path="/novedades" element={<ProtectedRoute><OrgMemberRoute><NovedadesPage /></OrgMemberRoute></ProtectedRoute>} />
 
           {/* Org admin-only: accounting and financial reports */}
           <Route path="/cuentas" element={<ProtectedRoute><OrgAdminRoute><CuentasPage /></OrgAdminRoute></ProtectedRoute>} />

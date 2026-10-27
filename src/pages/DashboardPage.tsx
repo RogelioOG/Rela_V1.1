@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Building2, Users, Store, Home, TrendingUp, ShoppingCart, Wallet, FileText, Landmark, Calendar, Database, Layers, Percent, ChevronRight } from 'lucide-react';
+import { Building2, Users, Store, Home, TrendingUp, ShoppingCart, Wallet, FileText, Landmark, Calendar, Database, Layers, Percent, ChevronRight, Calculator, Bell } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { useOrg } from '@/contexts/OrganizationContext';
@@ -363,11 +363,13 @@ export default function DashboardPage() {
                   <Layers className="w-5 h-5 text-blue-600" />
                   <h2 className="text-lg font-semibold text-gray-900">Módulos de Propiedad Horizontal</h2>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
                   {[
                     { to: '/inmuebles', label: 'Inmuebles y Copropietarios', desc: 'Gestión de unidades y propietarios', icon: Home, color: 'blue' },
                     { to: '/calendario', label: 'Calendario de Recaudo y Periodos', desc: 'Configuración de periodos y fechas', icon: Calendar, color: 'green' },
                     { to: '/conceptos', label: 'Conceptos de Cobro y Cuentas PUC', desc: 'Conceptos y mapeo contable NIIF', icon: Layers, color: 'yellow' },
+                    { to: '/cuotas', label: 'Cuotas de Administración', desc: 'Generación de cuotas base mensuales', icon: Calculator, color: 'blue' },
+                    { to: '/novedades', label: 'Novedades del Periodo', desc: 'Cargos individuales, grupales y masivos', icon: Bell, color: 'green' },
                     { to: '/descuentos', label: 'Descuentos por Pronto Pago', desc: 'Descuentos escalonados y pre-facturación', icon: Percent, color: 'purple' },
                   ].map((mod) => {
                     const Icon = mod.icon;
