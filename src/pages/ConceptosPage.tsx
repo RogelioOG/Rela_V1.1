@@ -19,10 +19,13 @@ interface FormState {
   income_account_id: string;
   counterpart_account_id: string;
   is_active: boolean;
+  causa_intereses: boolean;
+  maneja_descuento: boolean;
 }
 const emptyForm: FormState = {
   code: '', name: '', description: '', category: 'administracion',
   account_class: 'real', income_account_id: '', counterpart_account_id: '', is_active: true,
+  causa_intereses: true, maneja_descuento: false,
 };
 
 export default function ConceptosPage() {
@@ -85,6 +88,8 @@ export default function ConceptosPage() {
       income_account_id: c.income_account_id || '',
       counterpart_account_id: c.counterpart_account_id || '',
       is_active: c.is_active,
+      causa_intereses: c.causa_intereses ?? true,
+      maneja_descuento: c.maneja_descuento ?? false,
     });
     setError('');
     setModalOpen(true);
@@ -112,6 +117,8 @@ export default function ConceptosPage() {
       income_account_id: form.income_account_id || null,
       counterpart_account_id: form.counterpart_account_id || null,
       is_active: form.is_active,
+      causa_intereses: form.causa_intereses,
+      maneja_descuento: form.maneja_descuento,
     };
 
     try {
@@ -154,6 +161,8 @@ export default function ConceptosPage() {
             is_late_interest: true,
             is_default: false,
             is_active: true,
+            causa_intereses: false,
+            maneja_descuento: false,
           });
         } else {
           // Update name in case parent concept name changed
@@ -224,6 +233,7 @@ export default function ConceptosPage() {
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden lg:table-cell">Clasificación</th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden lg:table-cell">Cuenta Ingreso</th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden xl:table-cell">Cuenta Contrapartida</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden lg:table-cell">Comportamiento</th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Estado</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Acciones</th>
                 </tr></thead>
@@ -250,6 +260,13 @@ export default function ConceptosPage() {
                       <td className="px-6 py-4 text-sm text-gray-700 hidden xl:table-cell">
                         {c.counterpart_account ? `${c.counterpart_account.code} — ${c.counterpart_account.name}` : 'No asignada'}
                       </td>
+                      <td className="px-6 py-4 hidden lg:table-cell">
+                        <div className="flex flex-wrap gap-1">
+                          {c.causa_intereses && <Badge variant="yellow">Causa intereses</Badge>}
+                          {c.maneja_descuento && <Badge variant="green">Con descuento</Badge>}
+                          {!c.causa_intereses && !c.maneja_descuento && <span className="text-xs text-gray-400">—</span>}
+                        </div>
+                      </td>
                       <td className="px-6 py-4"><Badge variant={c.is_active ? 'green' : 'gray'}>{c.is_active ? 'Activo' : 'Inactivo'}</Badge></td>
                       <td className="px-6 py-4"><div className="flex justify-end gap-2">
                         <button onClick={() => openEdit(c)} className="p-2 rounded-lg text-gray-500 hover:bg-blue-50 hover:text-blue-600"><Pencil className="w-4 h-4" /></button>
@@ -267,6 +284,7 @@ export default function ConceptosPage() {
       {lateInterestConcepts.length > 0 && (
         <div>
           <h2 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><AlertTriangle className="w-4 h-4" /> Sub-conceptos de Intereses de Mora (Auto-generados)</h2>
+          <p className="text-xs text-gray-500 mb-3">Los sub-conceptos son totalmente editables: seleccione las cuentas contables de ingreso y contrapartida para que otros módulos puedan leerlas.</p>
           <Card>
             <div className="overflow-x-auto">
               <table className="w-full">
@@ -274,8 +292,10 @@ export default function ConceptosPage() {
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Código</th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Sub-concepto</th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden md:table-cell">Concepto Padre</th>
-                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden lg:table-cell">Clasificación</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden lg:table-cell">Cuenta Ingreso</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden xl:table-cell">Cuenta Contrapartida</th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Estado</th>
+                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Acciones</th>
                 </tr></thead>
                 <tbody className="divide-y divide-gray-100">
                   {lateInterestConcepts.map(c => (
@@ -285,12 +305,16 @@ export default function ConceptosPage() {
                       <td className="px-6 py-4 text-sm text-gray-700 hidden md:table-cell">
                         {c.parent_concept ? c.parent_concept.name : 'N/A'}
                       </td>
-                      <td className="px-6 py-4 hidden lg:table-cell">
-                        <Badge variant={c.account_class === 'real' ? 'blue' : 'purple'}>
-                          {c.account_class === 'real' ? 'Real (1-6)' : 'Orden (8-9)'}
-                        </Badge>
+                      <td className="px-6 py-4 text-sm text-gray-700 hidden lg:table-cell">
+                        {c.income_account ? `${c.income_account.code} — ${c.income_account.name}` : <span className="text-gray-400 italic">Sin asignar</span>}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-700 hidden xl:table-cell">
+                        {c.counterpart_account ? `${c.counterpart_account.code} — ${c.counterpart_account.name}` : <span className="text-gray-400 italic">Sin asignar</span>}
                       </td>
                       <td className="px-6 py-4"><Badge variant={c.is_active ? 'green' : 'gray'}>{c.is_active ? 'Activo' : 'Inactivo'}</Badge></td>
+                      <td className="px-6 py-4"><div className="flex justify-end gap-2">
+                        <button onClick={() => openEdit(c)} className="p-2 rounded-lg text-gray-500 hover:bg-blue-50 hover:text-blue-600" title="Editar sub-concepto"><Pencil className="w-4 h-4" /></button>
+                      </div></td>
                     </tr>
                   ))}
                 </tbody>
@@ -352,6 +376,23 @@ export default function ConceptosPage() {
               </p>
             </div>
           )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
+              <input type="checkbox" checked={form.causa_intereses} onChange={(e) => setForm({ ...form, causa_intereses: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+              <div>
+                <span className="text-sm font-medium text-gray-900">Causa Intereses de Mora</span>
+                <p className="text-xs text-gray-500">Genera interés sobre saldos vencidos de este concepto.</p>
+              </div>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
+              <input type="checkbox" checked={form.maneja_descuento} onChange={(e) => setForm({ ...form, maneja_descuento: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+              <div>
+                <span className="text-sm font-medium text-gray-900">Maneja Descuento</span>
+                <p className="text-xs text-gray-500">Aplica descuento por pronto pago en este concepto.</p>
+              </div>
+            </label>
+          </div>
 
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />

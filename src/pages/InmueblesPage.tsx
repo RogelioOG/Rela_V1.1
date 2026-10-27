@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { Home, Plus, Pencil, Trash2, Search, Loader2, Upload, FileSpreadsheet, AlertTriangle, CheckCircle2, X, Users } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { supabase, Unit, UnitOwner } from '@/lib/supabase';
@@ -82,6 +82,9 @@ export default function InmueblesPage() {
   const [items, setItems] = useState<Unit[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [filterType, setFilterType] = useState('all');
+  const [filterStatus, setFilterStatus] = useState('all');
+  const [filterTower, setFilterTower] = useState('all');
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Unit | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
@@ -112,12 +115,46 @@ export default function InmueblesPage() {
     setLoading(false);
   }, [activeOrg]);
 
-  const filtered = items.filter(u =>
-    !search ||
-    u.unit_label.toLowerCase().includes(search.toLowerCase()) ||
-    u.tower.toLowerCase().includes(search.toLowerCase()) ||
-    (u.owner_name || '').toLowerCase().includes(search.toLowerCase())
-  );
+  const towers = useMemo(() => {
+    const set = new Set<string>();
+    items.forEach(u => { if (u.tower) set.add(u.tower); });
+    return Array.from(set).sort();
+  }, [items]);
+
+  const filtered = items.filter(u => {
+    if (!search ||
+      u.unit_label.toLowerCase().includes(search.toLowerCase()) ||
+      u.tower.toLowerCase().includes(search.toLowerCase()) ||
+      (u.owner_name || '').toLowerCase().includes(search.toLowerCase())
+    ) {
+      // passes search
+    } else return false;
+    if (filterType !== 'all' && u.type !== filterType) return false;
+    if (filterStatus === 'active' && !u.is_active) return false;
+    if (filterStatus === 'inactive' && u.is_active) return false;
+    if (filterTower !== 'all' && u.tower !== filterTower) return false;
+    return true;
+  });
+
+  function buildUniqueIdentifier(tower: string, unitLabel: string): string {
+    const t = tower.trim().toUpperCase();
+    const u = unitLabel.trim().toUpperCase();
+    return t ? `${t}-${u}` : u;
+  }
+
+  async function checkDuplicateIdentifier(tower: string, unitLabel: string, excludeId?: string): Promise<boolean> {
+    if (!activeOrg || !unitLabel.trim()) return false;
+    const identifier = buildUniqueIdentifier(tower, unitLabel);
+    let query = supabase
+      .from('units')
+      .select('id')
+      .eq('organization_id', activeOrg.id)
+      .eq('unique_identifier', identifier)
+      .eq('is_active', true);
+    if (excludeId) query = query.neq('id', excludeId);
+    const { data } = await query.maybeSingle();
+    return !!data;
+  }
 
   function openCreate() {
     setEditing(null);
@@ -195,6 +232,15 @@ export default function InmueblesPage() {
     }
     if (!form.unit_label.trim()) {
       setError('La identificación de la unidad es obligatoria.');
+      setSaving(false);
+      return;
+    }
+
+    // Unique identifier check (Torre + Unidad)
+    const isDuplicate = await checkDuplicateIdentifier(form.tower, form.unit_label, editing?.id);
+    if (isDuplicate) {
+      const identifier = buildUniqueIdentifier(form.tower, form.unit_label);
+      setError(`Ya existe una unidad activa con el identificador "${identifier}". La combinación de Torre + Unidad debe ser única.`);
       setSaving(false);
       return;
     }
@@ -414,6 +460,26 @@ export default function InmueblesPage() {
       parsed.push({ rowIndex: rowNum, data: rowData, errors: rowErrors });
     }
 
+    // Check for duplicate identifiers within the uploaded file itself
+    const seenIdentifiers = new Set<string>();
+    for (const r of parsed) {
+      const identifier = buildUniqueIdentifier(r.data['Torre'] || '', r.data['Unidad']);
+      if (seenIdentifiers.has(identifier)) {
+        allErrors.push({
+          row: r.rowIndex, col: colMap['Unidad'] ?? 1,
+          cellRef: `${colLetter(colMap['Unidad'] ?? 1)}${r.rowIndex}`,
+          message: `Identificador duplicado dentro del archivo: "${identifier}". La combinación Torre + Unidad debe ser única.`,
+        });
+        r.errors.push({
+          row: r.rowIndex, col: colMap['Unidad'] ?? 1,
+          cellRef: `${colLetter(colMap['Unidad'] ?? 1)}${r.rowIndex}`,
+          message: `Identificador duplicado dentro del archivo: "${identifier}"`,
+        });
+      } else {
+        seenIdentifiers.add(identifier);
+      }
+    }
+
     setParsedRows(parsed);
     setUploadErrors(allErrors);
     setUploadValid(allErrors.length === 0 && parsed.length > 0);
@@ -439,6 +505,22 @@ export default function InmueblesPage() {
     setUploadMsg('');
 
     try {
+      // Check for duplicates against existing units in DB
+      const incomingIdentifiers = parsedRows.map(r => buildUniqueIdentifier(r.data['Torre'] || '', r.data['Unidad']));
+      const { data: existingUnits } = await supabase
+        .from('units')
+        .select('unique_identifier')
+        .eq('organization_id', activeOrg.id)
+        .eq('is_active', true)
+        .in('unique_identifier', incomingIdentifiers);
+
+      if (existingUnits && existingUnits.length > 0) {
+        const dupes = existingUnits.map(u => u.unique_identifier).join(', ');
+        setUploadMsg(`Identificadores duplicados contra unidades existentes: ${dupes}. Corrija el archivo e intente de nuevo.`);
+        setUploadValid(false);
+        setUploading(false);
+        return;
+      }
       const unitInserts = parsedRows.map(r => {
         const d = r.data;
         const tipo = d['Tipo'].toLowerCase() || 'apartamento';
@@ -557,11 +639,28 @@ export default function InmueblesPage() {
         </div>
       )}
 
-      <div className="relative mb-5">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-        <input type="text" placeholder="Buscar por torre, unidad o propietario..." value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="w-full rounded-lg border border-gray-300 pl-10 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+      <div className="mb-5 space-y-3">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <input type="text" placeholder="Buscar por torre, unidad o propietario..." value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full rounded-lg border border-gray-300 pl-10 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <div className="flex flex-wrap gap-3">
+          <Select value={filterType} onChange={(e) => setFilterType(e.target.value)} className="w-auto">
+            <option value="all">Todos los tipos</option>
+            {Object.entries(unitTypeLabels).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </Select>
+          <Select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="w-auto">
+            <option value="all">Todos los estados</option>
+            <option value="active">Activas</option>
+            <option value="inactive">Inactivas</option>
+          </Select>
+          <Select value={filterTower} onChange={(e) => setFilterTower(e.target.value)} className="w-auto">
+            <option value="all">Todas las torres</option>
+            {towers.map(t => <option key={t} value={t}>{t}</option>)}
+          </Select>
+        </div>
       </div>
 
       <Card>
@@ -587,6 +686,7 @@ export default function InmueblesPage() {
                     <td className="px-6 py-4">
                       <p className="text-sm font-medium text-gray-900">{u.unit_label}</p>
                       <p className="text-xs text-gray-500">Torre: {u.tower || 'N/A'}</p>
+                      <p className="text-xs text-gray-400 font-mono">ID: {u.unique_identifier || `${u.tower || ''}-${u.unit_label}`.toUpperCase()}</p>
                     </td>
                     <td className="px-6 py-4 hidden md:table-cell"><Badge variant="blue">{unitTypeLabels[u.type]}</Badge></td>
                     <td className="px-6 py-4 text-right text-sm text-gray-700">{formatNumber(u.coefficient, 4)}</td>

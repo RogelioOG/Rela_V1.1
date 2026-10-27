@@ -150,6 +150,7 @@ export interface Unit {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  unique_identifier?: string;
   unit_owners?: UnitOwner[];
 }
 
@@ -188,6 +189,9 @@ export interface RevenuePeriod {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  work_month: number | null;
+  work_year: number | null;
+  is_work_period_active: boolean;
 }
 
 export interface DiscountTier {
@@ -218,6 +222,8 @@ export interface BillingConcept {
   is_late_interest: boolean;
   is_default: boolean;
   is_active: boolean;
+  causa_intereses: boolean;
+  maneja_descuento: boolean;
   created_at: string;
   updated_at: string;
   income_account?: Account;
