@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
 import { formatCOP, formatShortDate } from '@/lib/format';
+import Paso2FormatoEnvio from '@/components/facturacion/Paso2FormatoEnvio';
 
 interface LiquidationRow {
   due: Due;
@@ -278,6 +279,9 @@ export default function ProcesoFacturacionPage() {
         </div>
       ) : (
         <>
+          {/* Step 1 content — only visible on step 1 */}
+          {currentStep === 1 && (
+            <>
           {/* Step 1: Configuration */}
           <Card className="mb-6">
             <div className="px-6 py-4 border-b border-gray-200">
@@ -395,7 +399,18 @@ export default function ProcesoFacturacionPage() {
                     <AlertTriangle className="w-4 h-4" /> {defaultedAgreements.length} acuerdo(s) incumplido(s) detectado(s)
                   </span>
                 )}
+                {reviewed && liquidation.length > 0 && (
+                  <div className="flex-1" />
+                )}
               </div>
+
+              {reviewed && liquidation.length > 0 && (
+                <div className="mt-4 flex justify-end">
+                  <Button onClick={() => setCurrentStep(2)}>
+                    Continuar al Paso 2 <ChevronRight className="w-4 h-4" />
+                  </Button>
+                </div>
+              )}
             </CardBody>
           </Card>
 
@@ -499,6 +514,36 @@ export default function ProcesoFacturacionPage() {
                   </table>
                 </div>
               )}
+            </Card>
+          )}
+          </>
+          )}
+
+          {/* Step 2: Formats, PDF & Email */}
+          {currentStep === 2 && (
+            <Paso2FormatoEnvio
+              liquidation={liquidation}
+              agreements={[...agreements, ...defaultedAgreements]}
+              org={activeOrg}
+              billingPeriod={billingPeriod}
+              onBack={() => setCurrentStep(1)}
+              onComplete={() => setCurrentStep(3)}
+            />
+          )}
+
+          {/* Step 3 placeholder */}
+          {currentStep === 3 && (
+            <Card>
+              <div className="text-center py-16">
+                <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-green-100 mb-4">
+                  <CheckCircle2 className="w-8 h-8 text-green-600" />
+                </div>
+                <h2 className="text-xl font-bold text-gray-900 mb-2">Proceso de Facturación Completado</h2>
+                <p className="text-gray-500 mb-6">Las cuentas de cobro han sido generadas y el envío simulado ha finalizado.</p>
+                <Button onClick={() => { setCurrentStep(1); setReviewed(false); setLiquidation([]); }}>
+                  <RefreshCw className="w-4 h-4" /> Iniciar Nuevo Proceso
+                </Button>
+              </div>
             </Card>
           )}
         </>
