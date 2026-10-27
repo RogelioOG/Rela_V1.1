@@ -350,6 +350,23 @@ export interface AdminQuotaLine {
   units?: Unit;
 }
 
+export interface PaymentAgreement {
+  id: string;
+  organization_id: string;
+  unit_id: string;
+  start_period: string;
+  end_period: string;
+  months: number;
+  monthly_amount: number;
+  total_amount: number;
+  status: 'en_cumplimiento' | 'incumplido' | 'finalizado';
+  notes: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  units?: Unit;
+}
+
 export interface PeriodNovelty {
   id: string;
   organization_id: string;

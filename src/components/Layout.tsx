@@ -24,6 +24,7 @@ import {
   Percent,
   Calculator,
   Bell,
+  Handshake,
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useOrg } from '@/contexts/OrganizationContext';
@@ -98,6 +99,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           { to: '/novedades', label: 'Novedades del Periodo', icon: Bell },
           { to: '/descuentos', label: 'Descuentos por Pronto Pago', icon: Percent },
           { to: '/cartera', label: 'Cartera y Cuotas', icon: FileText },
+          { to: '/acuerdos-pago', label: 'Acuerdos de Pago', icon: Handshake },
           { to: '/recaudos', label: 'Recaudos', icon: Landmark },
         ],
       });
