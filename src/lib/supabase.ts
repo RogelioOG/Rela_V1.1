@@ -204,6 +204,7 @@ export interface DiscountTier {
   discount_value: number;
   valid_until_day: number;
   is_active: boolean;
+  calculation_base_concept_ids: string[] | null;
   created_at: string;
   updated_at: string;
 }

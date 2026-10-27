@@ -1,13 +1,13 @@
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import { Percent, Plus, Trash2, Loader2, Layers, Save, Calendar } from 'lucide-react';
-import { supabase, RevenuePeriod, DiscountTier } from '@/lib/supabase';
+import { Percent, Plus, Trash2, Loader2, Layers, Save, CheckSquare, Square } from 'lucide-react';
+import { supabase, DiscountTier, BillingConcept } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input, Select } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { NoOrgSelected } from '@/components/shared';
-import { formatCOP, revenueFrequencyLabels } from '@/lib/format';
+import { formatCOP } from '@/lib/format';
 
 interface TierFormState {
   id?: string;
@@ -17,13 +17,13 @@ interface TierFormState {
   discount_value: string;
   valid_until_day: string;
   is_active: boolean;
+  calculation_base_concept_ids: string[];
 }
 
 export default function DescuentosPage() {
   const { activeOrg } = useOrg();
-  const [periods, setPeriods] = useState<RevenuePeriod[]>([]);
-  const [selectedPeriodId, setSelectedPeriodId] = useState('');
   const [tiers, setTiers] = useState<DiscountTier[]>([]);
+  const [concepts, setConcepts] = useState<BillingConcept[]>([]);
   const [loading, setLoading] = useState(true);
   const [tierForms, setTierForms] = useState<TierFormState[]>([]);
   const [savingTiers, setSavingTiers] = useState(false);
@@ -34,27 +34,22 @@ export default function DescuentosPage() {
   const loadInitial = useCallback(async () => {
     if (!activeOrg) return;
     setLoading(true);
-    const { data: periodData } = await supabase
-      .from('revenue_periods')
-      .select('*')
-      .eq('organization_id', activeOrg.id)
-      .order('start_date', { ascending: false });
-    const pList = periodData || [];
-    setPeriods(pList);
-    if (pList.length > 0) setSelectedPeriodId(pList[0].id);
-    setLoading(false);
-  }, [activeOrg]);
-
-  useEffect(() => { if (selectedPeriodId) loadTiers(); }, [selectedPeriodId]);
-
-  const loadTiers = useCallback(async () => {
-    if (!selectedPeriodId) { setTiers([]); setTierForms([]); return; }
-    const { data } = await supabase
-      .from('discount_tiers')
-      .select('*')
-      .eq('revenue_period_id', selectedPeriodId)
-      .order('tier_order', { ascending: true });
-    const list = data || [];
+    const [{ data: tierData }, { data: conceptData }] = await Promise.all([
+      supabase
+        .from('discount_tiers')
+        .select('*')
+        .eq('organization_id', activeOrg.id)
+        .order('tier_order', { ascending: true }),
+      supabase
+        .from('billing_concepts')
+        .select('*')
+        .eq('organization_id', activeOrg.id)
+        .eq('is_active', true)
+        .order('is_default', { ascending: false })
+        .order('name'),
+    ]);
+    setConcepts(conceptData || []);
+    const list = (tierData || []) as DiscountTier[];
     setTiers(list);
     setTierForms(list.map(t => ({
       id: t.id,
@@ -64,8 +59,10 @@ export default function DescuentosPage() {
       discount_value: String(t.discount_value),
       valid_until_day: String(t.valid_until_day),
       is_active: t.is_active,
+      calculation_base_concept_ids: t.calculation_base_concept_ids || [],
     })));
-  }, [selectedPeriodId]);
+    setLoading(false);
+  }, [activeOrg]);
 
   function addTier() {
     const nextOrder = tierForms.length > 0 ? Math.max(...tierForms.map(t => t.tier_order)) + 1 : 1;
@@ -76,13 +73,27 @@ export default function DescuentosPage() {
       discount_value: '0',
       valid_until_day: '5',
       is_active: true,
+      calculation_base_concept_ids: [],
     }]);
   }
 
-  function updateTier(idx: number, field: keyof TierFormState, value: string | boolean | number) {
+  function updateTier(idx: number, field: keyof TierFormState, value: string | boolean | number | string[]) {
     setTierForms(prev => {
       const updated = [...prev];
       updated[idx] = { ...updated[idx], [field]: value };
+      return updated;
+    });
+  }
+
+  function toggleConceptInTier(idx: number, conceptId: string) {
+    setTierForms(prev => {
+      const updated = [...prev];
+      const current = updated[idx].calculation_base_concept_ids;
+      if (current.includes(conceptId)) {
+        updated[idx] = { ...updated[idx], calculation_base_concept_ids: current.filter(id => id !== conceptId) };
+      } else {
+        updated[idx] = { ...updated[idx], calculation_base_concept_ids: [...current, conceptId] };
+      }
       return updated;
     });
   }
@@ -92,7 +103,7 @@ export default function DescuentosPage() {
   }
 
   async function saveTiers() {
-    if (!activeOrg || !selectedPeriodId) return;
+    if (!activeOrg) return;
     setSavingTiers(true);
     setTierMsg('');
     try {
@@ -105,13 +116,15 @@ export default function DescuentosPage() {
       for (const form of tierForms) {
         const payload = {
           organization_id: activeOrg.id,
-          revenue_period_id: selectedPeriodId,
           tier_order: form.tier_order,
           name: form.name,
           discount_type: form.discount_type,
           discount_value: parseFloat(form.discount_value) || 0,
           valid_until_day: parseInt(form.valid_until_day) || 1,
           is_active: form.is_active,
+          calculation_base_concept_ids: form.discount_type === 'porcentaje'
+            ? form.calculation_base_concept_ids
+            : [],
         };
         if (form.id) {
           const { error } = await supabase.from('discount_tiers').update(payload).eq('id', form.id);
@@ -121,7 +134,7 @@ export default function DescuentosPage() {
           if (error) throw error;
         }
       }
-      await loadTiers();
+      await loadInitial();
       setTierMsg('Descuentos guardados correctamente.');
       setSavingTiers(false);
     } catch (err) {
@@ -133,41 +146,24 @@ export default function DescuentosPage() {
 
   const activeTiers = useMemo(() => tiers.filter(t => t.is_active).sort((a, b) => a.valid_until_day - b.valid_until_day), [tiers]);
 
-  if (!activeOrg) return <NoOrgSelected />;
+  function conceptLabel(id: string): string {
+    const c = concepts.find(con => con.id === id);
+    return c ? `${c.code} — ${c.name}` : 'N/A';
+  }
 
-  const selectedPeriod = periods.find(p => p.id === selectedPeriodId);
+  if (!activeOrg) return <NoOrgSelected />;
 
   return (
     <div className="max-w-7xl mx-auto">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Descuentos por Pronto Pago</h1>
-        <p className="text-gray-500 mt-1">Configuración de escalones de descuento por periodo</p>
+        <p className="text-gray-500 mt-1">Configuración de escalones de descuento y base de cálculo</p>
       </div>
 
       {loading ? (
         <div className="flex items-center justify-center py-20"><Loader2 className="w-6 h-6 text-blue-600 animate-spin" /></div>
-      ) : periods.length === 0 ? (
-        <Card><div className="text-center py-16">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gray-100 mb-4"><Calendar className="w-8 h-8 text-gray-400" /></div>
-          <p className="text-gray-500">No hay periodos de recaudo configurados.</p>
-          <p className="text-sm text-gray-400 mt-1">Primero cree un periodo en Calendario de Recaudo para configurar descuentos.</p>
-        </div></Card>
       ) : (
         <div className="space-y-6">
-          {/* Period selector */}
-          <Card>
-            <div className="p-5 flex flex-col sm:flex-row sm:items-end gap-4">
-              <Select label="Periodo de Recaudo" value={selectedPeriodId} onChange={(e) => setSelectedPeriodId(e.target.value)} className="sm:max-w-xs">
-                {periods.map(p => <option key={p.id} value={p.id}>{p.name} ({revenueFrequencyLabels[p.frequency]})</option>)}
-              </Select>
-              {selectedPeriod && (
-                <div className="text-sm text-gray-500">
-                  Vencimiento día <strong>{selectedPeriod.due_day}</strong> · Gracia: {selectedPeriod.grace_days} días
-                </div>
-              )}
-            </div>
-          </Card>
-
           {/* Tier Configuration */}
           <Card>
             <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
@@ -197,6 +193,41 @@ export default function DescuentosPage() {
                         <Input label="Valor" type="number" step="0.01" value={tier.discount_value} onChange={(e) => updateTier(idx, 'discount_value', e.target.value)} placeholder="Ej: 15" />
                         <Input label="Válido Hasta el Día" type="number" min="1" max="31" value={tier.valid_until_day} onChange={(e) => updateTier(idx, 'valid_until_day', e.target.value)} />
                       </div>
+
+                      {/* Calculation base multi-select — only for percentage type */}
+                      {tier.discount_type === 'porcentaje' && (
+                        <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50/50 p-3">
+                          <p className="text-xs font-semibold text-gray-700 mb-2">Base de Cálculo — Conceptos a los que aplica el porcentaje:</p>
+                          <p className="text-xs text-gray-500 mb-2">Deje sin seleccionar para usar "Valor Total" (todos los conceptos). Seleccione conceptos específicos para aplicar el descuento solo sobre esos valores.</p>
+                          <div className="flex flex-wrap gap-2">
+                            {concepts.map(c => {
+                              const checked = tier.calculation_base_concept_ids.includes(c.id);
+                              return (
+                                <button
+                                  key={c.id}
+                                  type="button"
+                                  onClick={() => toggleConceptInTier(idx, c.id)}
+                                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-all ${
+                                    checked
+                                      ? 'border-blue-500 bg-blue-100 text-blue-800'
+                                      : 'border-gray-300 bg-white text-gray-600 hover:border-gray-400'
+                                  }`}
+                                >
+                                  {checked ? <CheckSquare className="w-3.5 h-3.5" /> : <Square className="w-3.5 h-3.5" />}
+                                  {c.code} — {c.name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {tier.calculation_base_concept_ids.length === 0 && (
+                            <p className="text-xs text-blue-600 mt-2 font-medium">Base: Valor Total (todos los conceptos)</p>
+                          )}
+                          {tier.calculation_base_concept_ids.length > 0 && (
+                            <p className="text-xs text-blue-600 mt-2 font-medium">{tier.calculation_base_concept_ids.length} concepto(s) seleccionado(s)</p>
+                          )}
+                        </div>
+                      )}
+
                       <label className="flex items-center gap-2 cursor-pointer mt-2">
                         <input type="checkbox" checked={tier.is_active} onChange={(e) => updateTier(idx, 'is_active', e.target.checked)} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
                         <span className="text-xs text-gray-700">Escalón activo</span>
@@ -238,20 +269,24 @@ export default function DescuentosPage() {
                         {tier.discount_type === 'porcentaje' ? `${tier.discount_value}%` : formatCOP(tier.discount_value)}
                       </p>
                       <p className="text-xs text-blue-600 mt-1">{tier.name}</p>
+                      {tier.discount_type === 'porcentaje' && (
+                        <div className="mt-2 pt-2 border-t border-blue-200">
+                          <p className="text-xs text-blue-600 font-medium">Base de cálculo:</p>
+                          {tier.calculation_base_concept_ids && tier.calculation_base_concept_ids.length > 0 ? (
+                            <ul className="text-xs text-blue-700 mt-1 space-y-0.5">
+                              {tier.calculation_base_concept_ids.map(id => <li key={id}>• {conceptLabel(id)}</li>)}
+                            </ul>
+                          ) : (
+                            <p className="text-xs text-blue-700 mt-1">Valor Total (todos los conceptos)</p>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
               </div>
             </Card>
           )}
-
-          {/* Info banner */}
-          <div className="rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
-            <p className="text-sm text-blue-800">
-              Los escalones de descuento se aplican automáticamente durante el proceso de facturación (Paso 2: Formatos y Envío).
-              Configure los niveles y días límite aquí; la tabla interactiva de descuentos por propiedad se muestra durante la facturación cuando hay escalones activos.
-            </p>
-          </div>
         </div>
       )}
     </div>

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { FileText, Plus, Pencil, Trash2, Loader2, Layers, BookOpen, AlertTriangle, Sparkles } from 'lucide-react';
+import { FileText, Plus, Pencil, Trash2, Loader2, Layers, BookOpen, AlertTriangle, Sparkles, Percent } from 'lucide-react';
 import { supabase, BillingConcept, Account } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card } from '@/components/ui/Card';
@@ -195,6 +195,7 @@ export default function ConceptosPage() {
 
   const mainConcepts = items.filter(c => !c.is_late_interest);
   const lateInterestConcepts = items.filter(c => c.is_late_interest);
+  const discountConcepts = items.filter(c => !c.is_late_interest && c.maneja_descuento);
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -280,6 +281,45 @@ export default function ConceptosPage() {
           )}
         </Card>
       </div>
+
+      {discountConcepts.length > 0 && (
+        <div className="mb-6">
+          <h2 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><Percent className="w-4 h-4" /> Conceptos con Descuento (Configuración Contable)</h2>
+          <p className="text-xs text-gray-500 mb-3">Estos conceptos tienen habilitada la opción "Maneja Descuento". Asigne las cuentas contables de ingreso y contrapartida para el registro de descuentos por pronto pago.</p>
+          <Card>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead><tr className="border-b border-gray-200 bg-gray-50">
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Código</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Concepto</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden lg:table-cell">Cuenta Ingreso</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden xl:table-cell">Cuenta Contrapartida</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Estado</th>
+                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Acciones</th>
+                </tr></thead>
+                <tbody className="divide-y divide-gray-100">
+                  {discountConcepts.map(c => (
+                    <tr key={c.id} className="hover:bg-gray-50">
+                      <td className="px-6 py-4"><span className="text-sm font-mono font-medium text-gray-900">{c.code}</span></td>
+                      <td className="px-6 py-4 text-sm font-medium text-gray-900">{c.name}</td>
+                      <td className="px-6 py-4 text-sm text-gray-700 hidden lg:table-cell">
+                        {c.income_account ? `${c.income_account.code} — ${c.income_account.name}` : <span className="text-gray-400 italic">Sin asignar</span>}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-700 hidden xl:table-cell">
+                        {c.counterpart_account ? `${c.counterpart_account.code} — ${c.counterpart_account.name}` : <span className="text-gray-400 italic">Sin asignar</span>}
+                      </td>
+                      <td className="px-6 py-4"><Badge variant={c.is_active ? 'green' : 'gray'}>{c.is_active ? 'Activo' : 'Inactivo'}</Badge></td>
+                      <td className="px-6 py-4"><div className="flex justify-end gap-2">
+                        <button onClick={() => openEdit(c)} className="p-2 rounded-lg text-gray-500 hover:bg-blue-50 hover:text-blue-600" title="Editar concepto"><Pencil className="w-4 h-4" /></button>
+                      </div></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        </div>
+      )}
 
       {lateInterestConcepts.length > 0 && (
         <div>

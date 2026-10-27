@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { Calculator, Loader2, AlertTriangle, CheckCircle2, Info, Clock, Percent, RefreshCw, ChevronRight, Calendar } from 'lucide-react';
-import { supabase, Unit, Due, PaymentAgreement } from '@/lib/supabase';
+import { Calculator, Loader2, AlertTriangle, CheckCircle2, Info, Clock, Percent, RefreshCw, ChevronRight, Calendar, Layers, Table, Save } from 'lucide-react';
+import { supabase, Unit, Due, PaymentAgreement, AdminQuota, AdminQuotaLine, PeriodNovelty, DiscountTier, BillingConcept } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card, CardBody } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -12,13 +12,18 @@ import { formatCOP, formatShortDate } from '@/lib/format';
 import Paso2FormatoEnvio from '@/components/facturacion/Paso2FormatoEnvio';
 
 interface LiquidationRow {
-  due: Due;
+  due: Due | null;
   unit: Unit;
   daysLate: number;
   baseAmount: number;
   interestRate: number;
   interestAmount: number;
   totalWithInterest: number;
+  quotaAmount: number;
+  noveltiesAmount: number;
+  discountAmount: number;
+  netTotal: number;
+  rowId: string;
 }
 
 function round2(value: number): number {
@@ -50,7 +55,7 @@ function getCutoffDate(period: string, rule: CutoffRule): Date {
   if (rule === 'inicio_mes_facturar') {
     return new Date(y, m - 1, 1);
   }
-  return new Date(y, m - 2 + 1, 0); // último día del mes anterior: día 0 del mes actual
+  return new Date(y, m - 2 + 1, 0);
 }
 
 function isEligibleDue(dueDate: string, cutoffDate: Date): boolean {
@@ -60,9 +65,21 @@ function isEligibleDue(dueDate: string, cutoffDate: Date): boolean {
 
 const STEPS = [
   { num: 1, label: 'Configuración de Intereses' },
-  { num: 2, label: 'Revisión de Liquidación' },
-  { num: 3, label: 'Generación de Facturación' },
+  { num: 2, label: 'Descuentos por Propiedad' },
+  { num: 3, label: 'Formatos y Envío' },
+  { num: 4, label: 'Finalización' },
 ];
+
+interface DiscountRow {
+  unitId: string;
+  unitLabel: string;
+  tower: string;
+  baseAmount: number;
+  discountAmount: number;
+  netAmount: number;
+  manualOverride: boolean;
+  overrideDiscount: string;
+}
 
 export default function ProcesoFacturacionPage() {
   const { activeOrg } = useOrg();
@@ -79,6 +96,10 @@ export default function ProcesoFacturacionPage() {
   const [units, setUnits] = useState<Unit[]>([]);
   const [agreements, setAgreements] = useState<PaymentAgreement[]>([]);
   const [defaultedAgreements, setDefaultedAgreements] = useState<PaymentAgreement[]>([]);
+  const [adminQuotas, setAdminQuotas] = useState<AdminQuota[]>([]);
+  const [novelties, setNovelties] = useState<PeriodNovelty[]>([]);
+  const [discountTiers, setDiscountTiers] = useState<DiscountTier[]>([]);
+  const [concepts, setConcepts] = useState<BillingConcept[]>([]);
 
   const [reviewing, setReviewing] = useState(false);
   const [warningOpen, setWarningOpen] = useState(false);
@@ -86,10 +107,21 @@ export default function ProcesoFacturacionPage() {
   const [reviewed, setReviewed] = useState(false);
   const [error, setError] = useState('');
 
+  // Discount step state
+  const [discountRows, setDiscountRows] = useState<DiscountRow[]>([]);
+
   const loadData = useCallback(async () => {
     if (!activeOrg) return;
     setLoading(true);
-    const [{ data: duesData }, { data: unitsData }, { data: agrData }] = await Promise.all([
+    const [
+      { data: duesData },
+      { data: unitsData },
+      { data: agrData },
+      { data: quotaData },
+      { data: noveltyData },
+      { data: tierData },
+      { data: conceptData },
+    ] = await Promise.all([
       supabase
         .from('dues')
         .select('*, units(*)')
@@ -108,10 +140,37 @@ export default function ProcesoFacturacionPage() {
         .eq('organization_id', activeOrg.id)
         .eq('is_active', true)
         .eq('status', 'incumplido'),
+      supabase
+        .from('admin_quotas')
+        .select('*, admin_quota_lines(*)')
+        .eq('organization_id', activeOrg.id)
+        .eq('is_active', true),
+      supabase
+        .from('period_novelties')
+        .select('*, billing_concept:billing_concepts(*), units:units(*)')
+        .eq('organization_id', activeOrg.id)
+        .eq('is_invoiced', false),
+      supabase
+        .from('discount_tiers')
+        .select('*')
+        .eq('organization_id', activeOrg.id)
+        .eq('is_active', true)
+        .order('tier_order', { ascending: true }),
+      supabase
+        .from('billing_concepts')
+        .select('*')
+        .eq('organization_id', activeOrg.id)
+        .eq('is_active', true)
+        .order('is_default', { ascending: false })
+        .order('name'),
     ]);
     setDues((duesData || []) as Due[]);
     setUnits((unitsData || []) as Unit[]);
     setAgreements((agrData || []) as PaymentAgreement[]);
+    setAdminQuotas((quotaData || []) as AdminQuota[]);
+    setNovelties((noveltyData || []) as PeriodNovelty[]);
+    setDiscountTiers((tierData || []) as DiscountTier[]);
+    setConcepts((conceptData || []) as BillingConcept[]);
     setLoading(false);
   }, [activeOrg]);
 
@@ -123,28 +182,92 @@ export default function ProcesoFacturacionPage() {
     return getCutoffDate(billingPeriod, cutoffRule);
   }, [customStartDate, billingPeriod, cutoffRule]);
 
+  const activeTiers = useMemo(() => discountTiers.sort((a, b) => a.valid_until_day - b.valid_until_day), [discountTiers]);
+  const hasDiscounts = activeTiers.length > 0;
+
+  // Compute per-unit quota amount from admin quotas
+  const unitQuotaMap = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const quota of adminQuotas) {
+      const lines = quota.admin_quota_lines || [];
+      for (const line of lines) {
+        const existing = map.get(line.unit_id) || 0;
+        map.set(line.unit_id, existing + line.amount);
+      }
+      if (lines.length === 0 && quota.calculation_method === 'fijo') {
+        // fijo method: every active unit gets the fixed amount
+        for (const u of units) {
+          const existing = map.get(u.id) || 0;
+          map.set(u.id, existing + quota.fixed_amount);
+        }
+      }
+      if (lines.length === 0 && quota.calculation_method === 'presupuesto') {
+        // presupuesto: distribute by coefficient
+        const totalCoeff = units.reduce((s, u) => s + u.coefficient, 0) || 1;
+        for (const u of units) {
+          const amt = round2(quota.budget_amount * u.coefficient / totalCoeff);
+          const existing = map.get(u.id) || 0;
+          map.set(u.id, existing + amt);
+        }
+      }
+    }
+    return map;
+  }, [adminQuotas, units]);
+
+  // Compute per-unit novelties amount
+  const unitNoveltiesMap = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const n of novelties) {
+      if (n.unit_id) {
+        const existing = map.get(n.unit_id) || 0;
+        map.set(n.unit_id, existing + n.value);
+      }
+    }
+    return map;
+  }, [novelties]);
+
+  // Compute per-unit past-due interest from eligible dues
+  const unitInterestMap = useMemo(() => {
+    const rate = parseFloat(interestRate) || 0;
+    const grace = parseInt(graceDays) || 0;
+    const map = new Map<string, number>();
+    const unitMap = new Map(units.map(u => [u.id, u]));
+    for (const due of dues) {
+      if (!isEligibleDue(due.due_date, effectiveCutoffDate)) continue;
+      const unit = unitMap.get(due.unit_id) || due.units;
+      if (!unit) continue;
+      const days = getDaysLate(due.due_date, grace, effectiveCutoffDate);
+      const interest = round2(due.balance * (rate / 100) * days);
+      const existing = map.get(due.unit_id) || 0;
+      map.set(due.unit_id, existing + interest);
+    }
+    return map;
+  }, [dues, units, interestRate, graceDays, effectiveCutoffDate]);
+
   const computedLiquidation: LiquidationRow[] = useMemo(() => {
     const rate = parseFloat(interestRate) || 0;
     const grace = parseInt(graceDays) || 0;
-    const unitMap = new Map(units.map(u => [u.id, u]));
-    return dues
-      .filter(due => isEligibleDue(due.due_date, effectiveCutoffDate))
-      .map(due => {
-        const unit = unitMap.get(due.unit_id) || due.units || ({} as Unit);
-        const days = getDaysLate(due.due_date, grace, effectiveCutoffDate);
-        const base = due.balance;
-        const interest = round2(base * (rate / 100) * days);
-        return {
-          due,
-          unit,
-          daysLate: days,
-          baseAmount: base,
-          interestRate: rate,
-          interestAmount: interest,
-          totalWithInterest: round2(base + interest),
-        };
-      });
-  }, [dues, units, interestRate, graceDays, effectiveCutoffDate]);
+    return units.map(unit => {
+      const quotaAmount = unitQuotaMap.get(unit.id) || 0;
+      const noveltiesAmount = unitNoveltiesMap.get(unit.id) || 0;
+      const interestAmount = unitInterestMap.get(unit.id) || 0;
+      const baseAmount = quotaAmount + noveltiesAmount;
+      return {
+        due: null,
+        unit,
+        daysLate: 0,
+        baseAmount,
+        interestRate: rate,
+        interestAmount,
+        totalWithInterest: round2(baseAmount + interestAmount),
+        quotaAmount,
+        noveltiesAmount,
+        discountAmount: 0,
+        netTotal: round2(baseAmount + interestAmount),
+        rowId: unit.id,
+      };
+    }).filter(r => r.baseAmount > 0 || r.interestAmount > 0);
+  }, [units, unitQuotaMap, unitNoveltiesMap, unitInterestMap, interestRate, graceDays]);
 
   const totalBase = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.baseAmount, 0), [reviewed, liquidation, computedLiquidation]);
   const totalInterest = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.interestAmount, 0), [reviewed, liquidation, computedLiquidation]);
@@ -169,36 +292,47 @@ export default function ProcesoFacturacionPage() {
         .eq('is_active', true)
         .eq('status', 'incumplido');
       if (agrErr) throw new Error(agrErr.message);
-      const defaultedAgreements = (defaulted || []) as PaymentAgreement[];
-      setDefaultedAgreements(defaultedAgreements);
+      const defaultedAgrs = (defaulted || []) as PaymentAgreement[];
+      setDefaultedAgreements(defaultedAgrs);
 
-      const cutoff = customStartDate
-        ? new Date(customStartDate + 'T00:00:00')
-        : getCutoffDate(billingPeriod, cutoffRule);
-      const rate = parseFloat(interestRate) || 0;
-      const grace = parseInt(graceDays) || 0;
-      const unitMap = new Map(units.map(u => [u.id, u]));
-      const rows: LiquidationRow[] = dues
-        .filter(due => isEligibleDue(due.due_date, cutoff))
-        .map(due => {
-          const unit = unitMap.get(due.unit_id) || due.units || ({} as Unit);
-          const days = getDaysLate(due.due_date, grace, cutoff);
-          const base = due.balance;
-          const interest = round2(base * (rate / 100) * days);
+      const rows = computedLiquidation;
+      setLiquidation(rows);
+
+      // Build discount rows for step 2 if discounts are active
+      if (hasDiscounts) {
+        const today = new Date().getDate();
+        const dRows: DiscountRow[] = rows.map(r => {
+          let appliedDiscount = 0;
+          for (const tier of activeTiers) {
+            if (today <= tier.valid_until_day) {
+              if (tier.discount_type === 'porcentaje') {
+                const baseForDiscount = tier.calculation_base_concept_ids && tier.calculation_base_concept_ids.length > 0
+                  ? r.quotaAmount
+                  : r.baseAmount;
+                appliedDiscount = round2(baseForDiscount * tier.discount_value / 100);
+              } else {
+                appliedDiscount = Math.min(tier.discount_value, r.baseAmount);
+              }
+              break;
+            }
+          }
           return {
-            due,
-            unit,
-            daysLate: days,
-            baseAmount: base,
-            interestRate: rate,
-            interestAmount: interest,
-            totalWithInterest: round2(base + interest),
+            unitId: r.unit.id,
+            unitLabel: r.unit.unit_label,
+            tower: r.unit.tower,
+            baseAmount: r.totalWithInterest,
+            discountAmount: appliedDiscount,
+            netAmount: round2(r.totalWithInterest - appliedDiscount),
+            manualOverride: false,
+            overrideDiscount: '',
           };
         });
-      setLiquidation(rows);
+        setDiscountRows(dRows);
+      }
+
       setReviewed(true);
 
-      if (defaultedAgreements.length > 0) {
+      if (defaultedAgrs.length > 0) {
         setWarningOpen(true);
       }
       setReviewing(false);
@@ -209,20 +343,79 @@ export default function ProcesoFacturacionPage() {
     }
   }
 
-  function handleRowInterestChange(dueId: string, newRate: number) {
+  function handleRowInterestChange(unitId: string, newRate: number) {
     setLiquidation(prev =>
       prev.map(row => {
-        if (row.due.id !== dueId) return row;
-        const interest = round2(row.baseAmount * (newRate / 100) * row.daysLate);
+        if (row.unit.id !== unitId) return row;
+        const interest = round2(row.interestAmount * (newRate / (row.interestRate || 1)));
         return {
           ...row,
           interestRate: newRate,
           interestAmount: interest,
           totalWithInterest: round2(row.baseAmount + interest),
+          netTotal: round2(row.baseAmount + interest - row.discountAmount),
         };
       })
     );
   }
+
+  function applyManualDiscount(idx: number, discountStr: string) {
+    setDiscountRows(prev => {
+      const updated = [...prev];
+      const row = updated[idx];
+      const overrideVal = parseFloat(discountStr) || 0;
+      if (discountStr === '') {
+        // Revert to auto — recompute from tiers
+        const today = new Date().getDate();
+        let autoDiscount = 0;
+        for (const tier of activeTiers) {
+          if (today <= tier.valid_until_day) {
+            if (tier.discount_type === 'porcentaje') {
+              autoDiscount = round2(row.baseAmount * tier.discount_value / 100);
+            } else {
+              autoDiscount = Math.min(tier.discount_value, row.baseAmount);
+            }
+            break;
+          }
+        }
+        updated[idx] = {
+          ...row,
+          discountAmount: autoDiscount,
+          netAmount: round2(row.baseAmount - autoDiscount),
+          manualOverride: false,
+          overrideDiscount: '',
+        };
+      } else {
+        const newDiscount = Math.min(overrideVal, row.baseAmount);
+        updated[idx] = {
+          ...row,
+          discountAmount: newDiscount,
+          netAmount: round2(row.baseAmount - newDiscount),
+          manualOverride: true,
+          overrideDiscount: discountStr,
+        };
+      }
+      return updated;
+    });
+  }
+
+  // Apply discounts to liquidation when advancing from step 2 to step 3
+  function applyDiscountsAndAdvance() {
+    setLiquidation(prev => prev.map(row => {
+      const dRow = discountRows.find(d => d.unitId === row.unit.id);
+      if (!dRow) return row;
+      return {
+        ...row,
+        discountAmount: dRow.discountAmount,
+        netTotal: round2(row.totalWithInterest - dRow.discountAmount),
+      };
+    }));
+    setCurrentStep(3);
+  }
+
+  const totalDiscountBase = useMemo(() => discountRows.reduce((s, r) => s + r.baseAmount, 0), [discountRows]);
+  const totalDiscountAmount = useMemo(() => discountRows.reduce((s, r) => s + r.discountAmount, 0), [discountRows]);
+  const totalDiscountNet = useMemo(() => discountRows.reduce((s, r) => s + r.netAmount, 0), [discountRows]);
 
   if (!activeOrg) return <NoOrgSelected />;
 
@@ -230,7 +423,7 @@ export default function ProcesoFacturacionPage() {
     <div className="max-w-7xl mx-auto">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Proceso de Facturación</h1>
-        <p className="text-gray-500 mt-1">Generación de facturación con cálculo de intereses de mora</p>
+        <p className="text-gray-500 mt-1">Generación de facturación con cuotas, novedades, intereses de mora y descuentos</p>
       </div>
 
       {/* Stepper */}
@@ -279,10 +472,9 @@ export default function ProcesoFacturacionPage() {
         </div>
       ) : (
         <>
-          {/* Step 1 content — only visible on step 1 */}
+          {/* Step 1: Configuration + Review */}
           {currentStep === 1 && (
             <>
-          {/* Step 1: Configuration */}
           <Card className="mb-6">
             <div className="px-6 py-4 border-b border-gray-200">
               <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
@@ -290,7 +482,7 @@ export default function ProcesoFacturacionPage() {
                 Paso 1: Configuración de Intereses
               </h2>
               <p className="text-sm text-gray-500 mt-1">
-                Defina los parámetros para el cálculo de intereses de mora sobre saldos pendientes.
+                Defina los parámetros para el cálculo de intereses de mora. El sistema carga automáticamente las cuotas de administración, novedades del periodo y saldos vencidos.
               </p>
             </div>
             <CardBody>
@@ -370,6 +562,26 @@ export default function ProcesoFacturacionPage() {
                 </div>
               </div>
 
+              {/* Data source summary */}
+              <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 text-center">
+                  <p className="text-xs text-gray-500">Cuotas activas</p>
+                  <p className="text-lg font-bold text-gray-900">{adminQuotas.length}</p>
+                </div>
+                <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 text-center">
+                  <p className="text-xs text-gray-500">Novedades pendientes</p>
+                  <p className="text-lg font-bold text-gray-900">{novelties.length}</p>
+                </div>
+                <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 text-center">
+                  <p className="text-xs text-gray-500">Saldos vencidos</p>
+                  <p className="text-lg font-bold text-gray-900">{dues.length}</p>
+                </div>
+                <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 text-center">
+                  <p className="text-xs text-gray-500">Escalones de descuento</p>
+                  <p className="text-lg font-bold text-gray-900">{activeTiers.length}</p>
+                </div>
+              </div>
+
               {/* Help tooltip for cutoff rule */}
               <div className="mt-3 flex items-start gap-2 px-3 py-2 rounded-lg bg-blue-50 border border-blue-200">
                 <Info className="w-4 h-4 text-blue-600 flex-shrink-0 mt-0.5" />
@@ -377,7 +589,7 @@ export default function ProcesoFacturacionPage() {
                   {customStartDate
                     ? 'Se utilizará la fecha personalizada como corte. Solo generan interés los saldos con vencimiento anterior a esa fecha.'
                     : cutoffRuleHelp[cutoffRule]}
-                  {' La tasa de interés se aplica diariamente sobre el saldo pendiente después de los días de gracia. Se detectarán acuerdos de pago incumplidos antes de continuar.'}
+                  {' El sistema suma automáticamente las cuotas de administración guardadas, las novedades del periodo no facturadas, y los intereses de mora calculados sobre saldos vencidos.'}
                 </p>
               </div>
 
@@ -386,9 +598,6 @@ export default function ProcesoFacturacionPage() {
                   {reviewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Calculator className="w-4 h-4" />}
                   Revisar Liquidación
                 </Button>
-                {dues.length === 0 && !reviewed && (
-                  <span className="text-sm text-gray-500">No hay cuotas pendientes — puede revisar y continuar</span>
-                )}
                 {reviewed && defaultedAgreements.length === 0 && (
                   <span className="text-sm text-green-600 flex items-center gap-1">
                     <CheckCircle2 className="w-4 h-4" /> Revisión completada sin incumplimientos
@@ -399,15 +608,12 @@ export default function ProcesoFacturacionPage() {
                     <AlertTriangle className="w-4 h-4" /> {defaultedAgreements.length} acuerdo(s) incumplido(s) detectado(s)
                   </span>
                 )}
-                {reviewed && liquidation.length > 0 && (
-                  <div className="flex-1" />
-                )}
               </div>
 
               {reviewed && (
                 <div className="mt-4 flex justify-end">
-                  <Button onClick={() => setCurrentStep(2)}>
-                    Continuar al Paso 2 <ChevronRight className="w-4 h-4" />
+                  <Button onClick={() => setCurrentStep(hasDiscounts ? 2 : 3)}>
+                    {hasDiscounts ? 'Continuar a Descuentos' : 'Continuar a Formatos'} <ChevronRight className="w-4 h-4" />
                   </Button>
                 </div>
               )}
@@ -416,18 +622,22 @@ export default function ProcesoFacturacionPage() {
 
           {/* Summary Cards */}
           {reviewed && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
               <Card><CardBody>
-                <p className="text-sm text-gray-500">Saldo Base</p>
+                <p className="text-sm text-gray-500">Cuotas + Novedades</p>
                 <p className="text-xl font-bold text-gray-900">{formatCOP(totalBase)}</p>
               </CardBody></Card>
               <Card><CardBody>
-                <p className="text-sm text-gray-500">Total Intereses</p>
+                <p className="text-sm text-gray-500">Intereses de Mora</p>
                 <p className="text-xl font-bold text-yellow-600">{formatCOP(totalInterest)}</p>
               </CardBody></Card>
               <Card><CardBody>
                 <p className="text-sm text-gray-500">Total a Facturar</p>
                 <p className="text-xl font-bold text-blue-700">{formatCOP(totalGeneral)}</p>
+              </CardBody></Card>
+              <Card><CardBody>
+                <p className="text-sm text-gray-500">Propiedades</p>
+                <p className="text-xl font-bold text-gray-900">{(reviewed ? liquidation : computedLiquidation).length}</p>
               </CardBody></Card>
             </div>
           )}
@@ -444,13 +654,13 @@ export default function ProcesoFacturacionPage() {
                   <RefreshCw className="w-4 h-4" /> Recalcular
                 </Button>
               </div>
-              {liquidation.length === 0 ? (
+              {(reviewed ? liquidation : computedLiquidation).length === 0 ? (
                 <div className="text-center py-12">
                   <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gray-100 mb-3">
                     <Clock className="w-7 h-7 text-gray-400" />
                   </div>
-                  <p className="text-gray-500">No hay cuotas pendientes para liquidar en este periodo</p>
-                  <p className="text-sm text-gray-400 mt-1">Puede continuar al Paso 2 sin saldos pendientes.</p>
+                  <p className="text-gray-500">No hay cuotas, novedades ni saldos pendientes para facturar en este periodo</p>
+                  <p className="text-sm text-gray-400 mt-1">Puede continuar al siguiente paso sin saldos pendientes.</p>
                 </div>
               ) : (
                 <div className="overflow-x-auto">
@@ -458,32 +668,24 @@ export default function ProcesoFacturacionPage() {
                     <thead>
                       <tr className="border-b border-gray-200 bg-gray-50">
                         <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Propiedad</th>
-                        <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden md:table-cell">Periodo</th>
-                        <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden lg:table-cell">Vencimiento</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Saldo Base</th>
-                        <th className="text-center text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden sm:table-cell">Días Mora</th>
+                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Cuota Admin</th>
+                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden sm:table-cell">Novedades</th>
+                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden sm:table-cell">Saldos Vencidos</th>
                         <th className="text-center text-xs font-semibold text-gray-600 uppercase px-6 py-3">Tasa (%)</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Interés</th>
+                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Interés Mora</th>
                         <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Total</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {liquidation.map((row) => (
-                        <tr key={row.due.id} className="hover:bg-gray-50">
+                        <tr key={row.rowId} className="hover:bg-gray-50">
                           <td className="px-6 py-3">
                             <p className="text-sm font-medium text-gray-900">{row.unit.tower} {row.unit.unit_label}</p>
                             <p className="text-xs text-gray-500">{row.unit.owner_name || ''}</p>
                           </td>
-                          <td className="px-6 py-3 text-sm text-gray-700 hidden md:table-cell">{row.due.period}</td>
-                          <td className="px-6 py-3 text-sm text-gray-700 hidden lg:table-cell">{formatShortDate(row.due.due_date)}</td>
-                          <td className="px-6 py-3 text-right text-sm text-gray-900">{formatCOP(row.baseAmount)}</td>
-                          <td className="px-6 py-3 text-center hidden sm:table-cell">
-                            {row.daysLate > 0 ? (
-                              <Badge variant="red">{row.daysLate}</Badge>
-                            ) : (
-                              <Badge variant="gray">0</Badge>
-                            )}
-                          </td>
+                          <td className="px-6 py-3 text-right text-sm text-gray-900">{formatCOP(row.quotaAmount)}</td>
+                          <td className="px-6 py-3 text-right text-sm text-gray-700 hidden sm:table-cell">{formatCOP(row.noveltiesAmount)}</td>
+                          <td className="px-6 py-3 text-right text-sm text-gray-700 hidden sm:table-cell">{formatCOP(row.interestAmount)}</td>
                           <td className="px-6 py-3 text-center">
                             <input
                               type="number"
@@ -492,7 +694,7 @@ export default function ProcesoFacturacionPage() {
                               value={row.interestRate}
                               onChange={(e) => {
                                 const val = Math.round((parseFloat(e.target.value) || 0) * 100) / 100;
-                                handleRowInterestChange(row.due.id, val);
+                                handleRowInterestChange(row.unit.id, val);
                               }}
                               className="w-20 text-center text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                             />
@@ -504,10 +706,10 @@ export default function ProcesoFacturacionPage() {
                     </tbody>
                     <tfoot>
                       <tr className="border-t-2 border-gray-200 bg-gray-50">
-                        <td colSpan={3} className="px-6 py-3 text-sm font-semibold text-gray-900 text-right hidden md:table-cell">Totales:</td>
-                        <td className="px-6 py-3 text-right text-sm font-bold text-gray-900 md:hidden">Totales:</td>
+                        <td className="px-6 py-3 text-sm font-semibold text-gray-900">Totales:</td>
                         <td className="px-6 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(totalBase)}</td>
-                        <td colSpan={2} className="px-6 py-3" />
+                        <td colSpan={2} className="px-6 py-3 hidden sm:table-cell" />
+                        <td className="px-6 py-3" />
                         <td className="px-6 py-3 text-right text-sm font-bold text-yellow-600">{formatCOP(totalInterest)}</td>
                         <td className="px-6 py-3 text-right text-sm font-bold text-blue-700">{formatCOP(totalGeneral)}</td>
                       </tr>
@@ -520,20 +722,113 @@ export default function ProcesoFacturacionPage() {
           </>
           )}
 
-          {/* Step 2: Formats, PDF & Email */}
-          {currentStep === 2 && (
+          {/* Step 2: Discount Configuration (only if discounts are active) */}
+          {currentStep === 2 && hasDiscounts && (
+            <Card>
+              <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                  <Layers className="w-5 h-5 text-blue-600" />
+                  Paso 2: Descuentos por Propiedad
+                </h2>
+                <div className="flex items-center gap-2">
+                  {activeTiers.map(t => (
+                    <Badge key={t.id} variant="blue">
+                      {t.discount_type === 'porcentaje' ? `${t.discount_value}%` : formatCOP(t.discount_value)} — {t.name} (día {t.valid_until_day})
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+              <div className="p-5">
+                <div className="mb-4 rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
+                  <p className="text-sm text-blue-800">
+                    Los descuentos se calcularon automáticamente según los escalones configurados y el día actual.
+                    Puede ajustar manualmente el descuento por propiedad ingresando un valor en la columna "Descuento".
+                    Deje el campo vacío para revertir al cálculo automático.
+                  </p>
+                </div>
+                {discountRows.length === 0 ? (
+                  <div className="text-center py-12">
+                    <p className="text-gray-500">No hay propiedades con saldos para aplicar descuentos.</p>
+                  </div>
+                ) : (
+                  <>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead><tr className="border-b border-gray-200 bg-gray-50">
+                        <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Propiedad</th>
+                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Base</th>
+                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Descuento</th>
+                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Neto a Pagar</th>
+                      </tr></thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {discountRows.map((row, idx) => (
+                          <tr key={row.unitId} className={`hover:bg-gray-50 ${row.manualOverride ? 'bg-amber-50' : ''}`}>
+                            <td className="px-4 py-3">
+                              <p className="font-medium text-gray-900">{row.tower} {row.unitLabel}</p>
+                              {row.manualOverride && <Badge variant="yellow">Manual</Badge>}
+                            </td>
+                            <td className="px-4 py-3 text-right text-gray-700">{formatCOP(row.baseAmount)}</td>
+                            <td className="px-4 py-3 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  value={row.manualOverride ? row.overrideDiscount : ''}
+                                  onChange={(e) => applyManualDiscount(idx, e.target.value)}
+                                  placeholder={formatCOP(row.discountAmount)}
+                                  className="w-28 rounded border border-gray-300 px-2 py-1 text-xs text-right focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                />
+                                <span className="text-xs text-gray-400">COP</span>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-right font-semibold text-gray-900">{formatCOP(row.netAmount)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr className="border-t-2 border-gray-300 bg-gray-50 font-bold">
+                          <td className="px-4 py-3 text-gray-700">Totales ({discountRows.length} propiedades)</td>
+                          <td className="px-4 py-3 text-right text-gray-900">{formatCOP(totalDiscountBase)}</td>
+                          <td className="px-4 py-3 text-right text-red-600">-{formatCOP(totalDiscountAmount)}</td>
+                          <td className="px-4 py-3 text-right text-green-700">{formatCOP(totalDiscountNet)}</td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                  <div className="mt-4 flex justify-between">
+                    <Button variant="outline" onClick={() => setCurrentStep(1)}>Volver al Paso 1</Button>
+                    <Button onClick={applyDiscountsAndAdvance}>
+                      Aplicar Descuentos y Continuar <ChevronRight className="w-4 h-4" />
+                    </Button>
+                  </div>
+                  </>
+                )}
+              </div>
+            </Card>
+          )}
+
+          {/* Step 3: Formats, PDF & Email */}
+          {currentStep === 3 && (
             <Paso2FormatoEnvio
-              liquidation={liquidation}
+              liquidation={liquidation.map(r => ({
+                due: r.due || ({ id: r.rowId, organization_id: activeOrg.id, unit_id: r.unit.id, type: 'ordinaria' as const, period: billingPeriod, due_date: new Date().toISOString().slice(0, 10), amount: r.baseAmount, interest_rate: r.interestRate, balance: r.baseAmount, status: 'pendiente' as const, created_at: '' }) as Due,
+                unit: r.unit,
+                daysLate: r.daysLate,
+                baseAmount: r.baseAmount,
+                interestRate: r.interestRate,
+                interestAmount: r.interestAmount,
+                totalWithInterest: r.netTotal,
+              }))}
               agreements={[...agreements, ...defaultedAgreements]}
               org={activeOrg}
               billingPeriod={billingPeriod}
-              onBack={() => setCurrentStep(1)}
-              onComplete={() => setCurrentStep(3)}
+              onBack={() => setCurrentStep(hasDiscounts ? 2 : 1)}
+              onComplete={() => setCurrentStep(4)}
             />
           )}
 
-          {/* Step 3 placeholder */}
-          {currentStep === 3 && (
+          {/* Step 4: Completion */}
+          {currentStep === 4 && (
             <Card>
               <div className="text-center py-16">
                 <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-green-100 mb-4">
@@ -541,7 +836,7 @@ export default function ProcesoFacturacionPage() {
                 </div>
                 <h2 className="text-xl font-bold text-gray-900 mb-2">Proceso de Facturación Completado</h2>
                 <p className="text-gray-500 mb-6">Las cuentas de cobro han sido generadas y el envío simulado ha finalizado.</p>
-                <Button onClick={() => { setCurrentStep(1); setReviewed(false); setLiquidation([]); }}>
+                <Button onClick={() => { setCurrentStep(1); setReviewed(false); setLiquidation([]); setDiscountRows([]); }}>
                   <RefreshCw className="w-4 h-4" /> Iniciar Nuevo Proceso
                 </Button>
               </div>
