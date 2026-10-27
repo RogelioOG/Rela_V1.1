@@ -1,0 +1,17 @@
+{
+  "projectId": "72413618",
+  "functions": {
+    "create-user": {
+      "hasChanged": false,
+      "hash": "0ab2506583a85c52cf3ad1322f9bbf2cfceb134f19a849175c799c6628613569"
+    },
+    "seed-demo-data": {
+      "hasChanged": false,
+      "hash": "d5270c97c254176ba9a2905d63317e4d13cce843e10a42f8701716c601ce610d"
+    },
+    "seed-master": {
+      "hasChanged": false,
+      "hash": "323f039205fc4c8bcc5ff4b23265bb926ab7b40362abe0585e7cfc7e378e1b3b"
+    }
+  }
+}

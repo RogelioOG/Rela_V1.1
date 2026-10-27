@@ -153,7 +153,8 @@ export default function AsientosPage() {
       setError('El asiento no está balanceado. Débitos y créditos deben ser iguales.');
       setSaving(false); return;
     }
-    if (lines.filter(l => l.account_id).length < 2) {
+    const validLines = lines.filter(l => l.account_id);
+    if (validLines.length < 2) {
       setError('Se requieren al menos 2 líneas con cuenta asignada.');
       setSaving(false); return;
     }
@@ -168,8 +169,6 @@ export default function AsientosPage() {
       setError('Debe seleccionar un tipo de documento contable autorizado.');
       setSaving(false); return;
     }
-
-    const validLines = lines.filter(l => l.account_id);
 
     if (editingId) {
       const { error: jeErr } = await supabase.from('journal_entries').update({
