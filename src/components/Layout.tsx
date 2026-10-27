@@ -98,7 +98,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           { to: '/cuotas', label: 'Cuotas de Administración', icon: Calculator },
           { to: '/novedades', label: 'Novedades del Periodo', icon: Bell },
           { to: '/descuentos', label: 'Descuentos por Pronto Pago', icon: Percent },
-          { to: '/cartera', label: 'Cartera y Cuotas', icon: FileText },
+          { to: '/facturacion', label: 'Proceso de Facturación', icon: FileText },
           { to: '/acuerdos-pago', label: 'Acuerdos de Pago', icon: Handshake },
           { to: '/recaudos', label: 'Recaudos', icon: Landmark },
         ],

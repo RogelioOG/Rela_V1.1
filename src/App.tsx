@@ -20,6 +20,7 @@ import DescuentosPage from '@/pages/DescuentosPage';
 import CuotasPage from '@/pages/CuotasPage';
 import NovedadesPage from '@/pages/NovedadesPage';
 import AcuerdosPagoPage from '@/pages/AcuerdosPagoPage';
+import ProcesoFacturacionPage from '@/pages/facturacion/ProcesoFacturacionPage';
 import CuentasPage from '@/pages/CuentasPage';
 import AsientosPage from '@/pages/AsientosPage';
 import ReportesPage from '@/pages/ReportesPage';
@@ -114,6 +115,7 @@ function App() {
           <Route path="/caja" element={<ProtectedRoute><OrgMemberRoute><CajaPage /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/inmuebles" element={<ProtectedRoute><OrgMemberRoute><InmueblesPage /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/cartera" element={<ProtectedRoute><OrgMemberRoute><CarteraPage /></OrgMemberRoute></ProtectedRoute>} />
+          <Route path="/facturacion" element={<ProtectedRoute><OrgMemberRoute><ProcesoFacturacionPage /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/acuerdos-pago" element={<ProtectedRoute><OrgMemberRoute><AcuerdosPagoPage /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/recaudos" element={<ProtectedRoute><OrgMemberRoute><RecaudosPage /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/calendario" element={<ProtectedRoute><OrgMemberRoute><CalendarioPage /></OrgMemberRoute></ProtectedRoute>} />
