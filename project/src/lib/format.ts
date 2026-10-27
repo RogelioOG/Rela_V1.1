@@ -168,6 +168,35 @@ export const movementTypeDescriptions: Record<string, string> = {
   venta_descuento: 'Cuenta de descuentos en ventas (contra-ingreso) que se debita al aplicar descuentos en facturas',
 };
 
+export const documentTypeLabelsPH: Record<string, string> = {
+  CC: 'Cédula de Ciudadanía',
+  NIT: 'NIT',
+  CE: 'Cédula de Extranjería',
+  Pasaporte: 'Pasaporte',
+};
+
+export const revenueFrequencyLabels: Record<string, string> = {
+  mensual: 'Mensual',
+  bimestral: 'Bimestral',
+  trimestral: 'Trimestral',
+  anual: 'Anual',
+};
+
+export const billingCategoryLabels: Record<string, string> = {
+  administracion: 'Administración',
+  extraordinaria: 'Extraordinaria',
+  penalizacion: 'Penalización',
+  reserva: 'Reserva',
+  fondo: 'Fondo',
+  servicio: 'Servicio',
+  otro: 'Otro',
+};
+
+export const accountClassLabels: Record<string, string> = {
+  real: 'Cuentas Reales (Clases 1-6)',
+  orden: 'Cuentas de Orden (Clases 8-9)',
+};
+
 export function isCommercial(type: string): boolean {
   return type === 'tienda' || type === 'supermercado';
 }

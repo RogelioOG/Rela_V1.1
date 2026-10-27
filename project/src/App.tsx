@@ -14,6 +14,8 @@ import CajaPage from '@/pages/CajaPage';
 import InmueblesPage from '@/pages/InmueblesPage';
 import CarteraPage from '@/pages/CarteraPage';
 import RecaudosPage from '@/pages/RecaudosPage';
+import CalendarioPage from '@/pages/CalendarioPage';
+import ConceptosPage from '@/pages/ConceptosPage';
 import CuentasPage from '@/pages/CuentasPage';
 import AsientosPage from '@/pages/AsientosPage';
 import ReportesPage from '@/pages/ReportesPage';
@@ -109,6 +111,8 @@ function App() {
           <Route path="/inmuebles" element={<ProtectedRoute><OrgMemberRoute><InmueblesPage /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/cartera" element={<ProtectedRoute><OrgMemberRoute><CarteraPage /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/recaudos" element={<ProtectedRoute><OrgMemberRoute><RecaudosPage /></OrgMemberRoute></ProtectedRoute>} />
+          <Route path="/calendario" element={<ProtectedRoute><OrgMemberRoute><CalendarioPage /></OrgMemberRoute></ProtectedRoute>} />
+          <Route path="/conceptos" element={<ProtectedRoute><OrgMemberRoute><ConceptosPage /></OrgMemberRoute></ProtectedRoute>} />
 
           {/* Org admin-only: accounting and financial reports */}
           <Route path="/cuentas" element={<ProtectedRoute><OrgAdminRoute><CuentasPage /></OrgAdminRoute></ProtectedRoute>} />

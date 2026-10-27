@@ -19,6 +19,8 @@ import {
   BookOpen,
   BarChart3,
   ChevronRight,
+  Calendar,
+  Layers,
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useOrg } from '@/contexts/OrganizationContext';
@@ -87,6 +89,8 @@ export default function Layout({ children }: { children: ReactNode }) {
         title: 'Propiedad Horizontal',
         items: [
           { to: '/inmuebles', label: 'Inmuebles', icon: Home },
+          { to: '/conceptos', label: 'Conceptos de Cobro', icon: Layers },
+          { to: '/calendario', label: 'Calendario de Recaudo', icon: Calendar },
           { to: '/cartera', label: 'Cartera y Cuotas', icon: FileText },
           { to: '/recaudos', label: 'Recaudos', icon: Landmark },
         ],

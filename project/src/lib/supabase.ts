@@ -145,9 +145,70 @@ export interface Unit {
   owner_name: string;
   owner_document: string;
   owner_phone: string;
+  payment_reference: string | null;
+  built_area: number | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  unit_owners?: UnitOwner[];
+}
+
+export interface UnitOwner {
+  id: string;
+  organization_id: string;
+  unit_id: string;
+  position: 1 | 2;
+  document_type: 'CC' | 'NIT' | 'CE' | 'Pasaporte';
+  document_number: string;
+  first_name: string;
+  last_name: string;
+  business_name: string;
+  email: string;
+  phone: string;
+  is_primary: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RevenuePeriod {
+  id: string;
+  organization_id: string;
+  name: string;
+  frequency: 'mensual' | 'bimestral' | 'trimestral' | 'anual';
+  start_date: string;
+  end_date: string;
+  billing_day: number;
+  due_day: number;
+  grace_days: number;
+  offset_days: number;
+  interest_start_date: string | null;
+  late_interest_rate: number;
+  discount_threshold_days: number;
+  discount_rate: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BillingConcept {
+  id: string;
+  organization_id: string;
+  code: string;
+  name: string;
+  description: string;
+  category: 'administracion' | 'extraordinaria' | 'penalizacion' | 'reserva' | 'fondo' | 'servicio' | 'otro';
+  account_class: 'real' | 'orden';
+  income_account_id: string | null;
+  counterpart_account_id: string | null;
+  parent_concept_id: string | null;
+  is_late_interest: boolean;
+  is_default: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  income_account?: Account;
+  counterpart_account?: Account;
+  parent_concept?: BillingConcept;
 }
 
 export interface Due {
