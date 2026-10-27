@@ -190,6 +190,20 @@ export interface RevenuePeriod {
   updated_at: string;
 }
 
+export interface DiscountTier {
+  id: string;
+  organization_id: string;
+  revenue_period_id: string;
+  tier_order: number;
+  name: string;
+  discount_type: 'porcentaje' | 'monto';
+  discount_value: number;
+  valid_until_day: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface BillingConcept {
   id: string;
   organization_id: string;

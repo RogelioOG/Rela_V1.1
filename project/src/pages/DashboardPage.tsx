@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Building2, Users, Store, Home, TrendingUp, ShoppingCart, Wallet, FileText, Landmark, Calendar, Database } from 'lucide-react';
+import { Building2, Users, Store, Home, TrendingUp, ShoppingCart, Wallet, FileText, Landmark, Calendar, Database, Layers, Percent, ChevronRight } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { supabase, Organization, Profile } from '@/lib/supabase';
@@ -338,22 +339,66 @@ export default function DashboardPage() {
 
           {/* PH Summary */}
           {ph && (
-            <div className="mb-8">
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-                <Card><CardBody className="flex items-center gap-4">
-                  <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-blue-100"><Home className="w-6 h-6 text-blue-600" /></div>
-                  <div><p className="text-sm text-gray-500">Unidades</p><p className="text-xl font-bold text-gray-900">{cumulative.units}</p></div>
-                </CardBody></Card>
-                <Card><CardBody className="flex items-center gap-4">
-                  <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-red-100"><FileText className="w-6 h-6 text-red-600" /></div>
-                  <div><p className="text-sm text-gray-500">Cartera Pendiente</p><p className="text-xl font-bold text-red-600">{formatCOP(cumulative.pendingDues)}</p></div>
-                </CardBody></Card>
-                <Card><CardBody className="flex items-center gap-4">
-                  <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-green-100"><Landmark className="w-6 h-6 text-green-600" /></div>
-                  <div><p className="text-sm text-gray-500">Recaudos</p><p className="text-xl font-bold text-gray-900">--</p></div>
-                </CardBody></Card>
+            <>
+              <div className="mb-8">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+                  <Card><CardBody className="flex items-center gap-4">
+                    <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-blue-100"><Home className="w-6 h-6 text-blue-600" /></div>
+                    <div><p className="text-sm text-gray-500">Unidades</p><p className="text-xl font-bold text-gray-900">{cumulative.units}</p></div>
+                  </CardBody></Card>
+                  <Card><CardBody className="flex items-center gap-4">
+                    <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-red-100"><FileText className="w-6 h-6 text-red-600" /></div>
+                    <div><p className="text-sm text-gray-500">Cartera Pendiente</p><p className="text-xl font-bold text-red-600">{formatCOP(cumulative.pendingDues)}</p></div>
+                  </CardBody></Card>
+                  <Card><CardBody className="flex items-center gap-4">
+                    <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-green-100"><Landmark className="w-6 h-6 text-green-600" /></div>
+                    <div><p className="text-sm text-gray-500">Recaudos</p><p className="text-xl font-bold text-gray-900">--</p></div>
+                  </CardBody></Card>
+                </div>
               </div>
-            </div>
+
+              {/* PH Module Quick Access */}
+              <div className="mb-8">
+                <div className="flex items-center gap-2 mb-4">
+                  <Layers className="w-5 h-5 text-blue-600" />
+                  <h2 className="text-lg font-semibold text-gray-900">Módulos de Propiedad Horizontal</h2>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+                  {[
+                    { to: '/inmuebles', label: 'Inmuebles y Copropietarios', desc: 'Gestión de unidades y propietarios', icon: Home, color: 'blue' },
+                    { to: '/calendario', label: 'Calendario de Recaudo y Periodos', desc: 'Configuración de periodos y fechas', icon: Calendar, color: 'green' },
+                    { to: '/conceptos', label: 'Conceptos de Cobro y Cuentas PUC', desc: 'Conceptos y mapeo contable NIIF', icon: Layers, color: 'yellow' },
+                    { to: '/descuentos', label: 'Descuentos por Pronto Pago', desc: 'Descuentos escalonados y pre-facturación', icon: Percent, color: 'purple' },
+                  ].map((mod) => {
+                    const Icon = mod.icon;
+                    const colorMap: Record<string, string> = {
+                      blue: 'bg-blue-100 text-blue-600',
+                      green: 'bg-green-100 text-green-600',
+                      yellow: 'bg-yellow-100 text-yellow-600',
+                      purple: 'bg-purple-100 text-purple-600',
+                    };
+                    return (
+                      <Link key={mod.to} to={mod.to} className="group">
+                        <Card className="h-full transition-all duration-200 hover:shadow-lg hover:border-blue-300">
+                          <CardBody className="flex flex-col gap-3">
+                            <div className="flex items-center justify-between">
+                              <div className={`flex items-center justify-center w-12 h-12 rounded-xl ${colorMap[mod.color]}`}>
+                                <Icon className="w-6 h-6" />
+                              </div>
+                              <ChevronRight className="w-5 h-5 text-gray-300 group-hover:text-blue-500 group-hover:translate-x-1 transition-all" />
+                            </div>
+                            <div>
+                              <p className="text-sm font-semibold text-gray-900">{mod.label}</p>
+                              <p className="text-xs text-gray-500 mt-1">{mod.desc}</p>
+                            </div>
+                          </CardBody>
+                        </Card>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
           )}
 
           {!isOrgAdmin && (
