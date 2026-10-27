@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { Calculator, Loader2, AlertTriangle, CheckCircle2, Info, Clock, Percent, RefreshCw, ChevronRight } from 'lucide-react';
+import { Calculator, Loader2, AlertTriangle, CheckCircle2, Info, Clock, Percent, RefreshCw, ChevronRight, Calendar } from 'lucide-react';
 import { supabase, Unit, Due, PaymentAgreement } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card, CardBody } from '@/components/ui/Card';
@@ -24,11 +24,37 @@ function round2(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
-function getDaysLate(dueDate: string, graceDays: number): number {
-  const today = new Date();
+type CutoffRule = 'inicio_mes_facturar' | 'cierre_mes_anterior';
+
+const cutoffRuleLabels: Record<CutoffRule, string> = {
+  inicio_mes_facturar: 'Día 1 del mes a facturar',
+  cierre_mes_anterior: 'Día de cierre del mes anterior',
+};
+
+const cutoffRuleHelp: Record<CutoffRule, string> = {
+  inicio_mes_facturar: 'El corte se toma al primer día del periodo a facturar. Solo generan interés los saldos vencidos con fecha de vencimiento anterior al primer día del mes que se está facturando.',
+  cierre_mes_anterior: 'El corte se toma al último día del mes inmediatamente anterior al periodo. Solo generan interés los saldos vencidos con fecha de vencimiento anterior o igual al cierre del mes previo.',
+};
+
+function getDaysLate(dueDate: string, graceDays: number, cutoffDate: Date): number {
   const due = new Date(dueDate);
-  const days = Math.floor((today.getTime() - due.getTime()) / (1000 * 60 * 60 * 24));
+  const ms = cutoffDate.getTime() - due.getTime();
+  if (ms <= 0) return 0;
+  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
   return Math.max(0, days - graceDays);
+}
+
+function getCutoffDate(period: string, rule: CutoffRule): Date {
+  const [y, m] = period.split('-').map(Number);
+  if (rule === 'inicio_mes_facturar') {
+    return new Date(y, m - 1, 1);
+  }
+  return new Date(y, m - 2 + 1, 0); // último día del mes anterior: día 0 del mes actual
+}
+
+function isEligibleDue(dueDate: string, cutoffDate: Date): boolean {
+  const due = new Date(dueDate);
+  return due.getTime() < cutoffDate.getTime();
 }
 
 const STEPS = [
@@ -45,6 +71,8 @@ export default function ProcesoFacturacionPage() {
   const [interestRate, setInterestRate] = useState('0.50');
   const [graceDays, setGraceDays] = useState('5');
   const [billingPeriod, setBillingPeriod] = useState(new Date().toISOString().slice(0, 7));
+  const [cutoffRule, setCutoffRule] = useState<CutoffRule>('cierre_mes_anterior');
+  const [customStartDate, setCustomStartDate] = useState('');
 
   const [dues, setDues] = useState<Due[]>([]);
   const [units, setUnits] = useState<Unit[]>([]);
@@ -88,26 +116,34 @@ export default function ProcesoFacturacionPage() {
 
   useEffect(() => { if (activeOrg) loadData(); }, [activeOrg, loadData]);
 
+  const effectiveCutoffDate = useMemo(() => {
+    if (customStartDate) return new Date(customStartDate + 'T00:00:00');
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(billingPeriod)) return new Date();
+    return getCutoffDate(billingPeriod, cutoffRule);
+  }, [customStartDate, billingPeriod, cutoffRule]);
+
   const computedLiquidation: LiquidationRow[] = useMemo(() => {
     const rate = parseFloat(interestRate) || 0;
     const grace = parseInt(graceDays) || 0;
     const unitMap = new Map(units.map(u => [u.id, u]));
-    return dues.map(due => {
-      const unit = unitMap.get(due.unit_id) || due.units || ({} as Unit);
-      const days = getDaysLate(due.due_date, grace);
-      const base = due.balance;
-      const interest = round2(base * (rate / 100) * days);
-      return {
-        due,
-        unit,
-        daysLate: days,
-        baseAmount: base,
-        interestRate: rate,
-        interestAmount: interest,
-        totalWithInterest: round2(base + interest),
-      };
-    });
-  }, [dues, units, interestRate, graceDays]);
+    return dues
+      .filter(due => isEligibleDue(due.due_date, effectiveCutoffDate))
+      .map(due => {
+        const unit = unitMap.get(due.unit_id) || due.units || ({} as Unit);
+        const days = getDaysLate(due.due_date, grace, effectiveCutoffDate);
+        const base = due.balance;
+        const interest = round2(base * (rate / 100) * days);
+        return {
+          due,
+          unit,
+          daysLate: days,
+          baseAmount: base,
+          interestRate: rate,
+          interestAmount: interest,
+          totalWithInterest: round2(base + interest),
+        };
+      });
+  }, [dues, units, interestRate, graceDays, effectiveCutoffDate]);
 
   const totalBase = useMemo(() => computedLiquidation.reduce((s, r) => s + r.baseAmount, 0), [computedLiquidation]);
   const totalInterest = useMemo(() => computedLiquidation.reduce((s, r) => s + r.interestAmount, 0), [computedLiquidation]);
@@ -135,24 +171,29 @@ export default function ProcesoFacturacionPage() {
       const defaultedAgreements = (defaulted || []) as PaymentAgreement[];
       setDefaultedAgreements(defaultedAgreements);
 
+      const cutoff = customStartDate
+        ? new Date(customStartDate + 'T00:00:00')
+        : getCutoffDate(billingPeriod, cutoffRule);
       const rate = parseFloat(interestRate) || 0;
       const grace = parseInt(graceDays) || 0;
       const unitMap = new Map(units.map(u => [u.id, u]));
-      const rows: LiquidationRow[] = dues.map(due => {
-        const unit = unitMap.get(due.unit_id) || due.units || ({} as Unit);
-        const days = getDaysLate(due.due_date, grace);
-        const base = due.balance;
-        const interest = round2(base * (rate / 100) * days);
-        return {
-          due,
-          unit,
-          daysLate: days,
-          baseAmount: base,
-          interestRate: rate,
-          interestAmount: interest,
-          totalWithInterest: round2(base + interest),
-        };
-      });
+      const rows: LiquidationRow[] = dues
+        .filter(due => isEligibleDue(due.due_date, cutoff))
+        .map(due => {
+          const unit = unitMap.get(due.unit_id) || due.units || ({} as Unit);
+          const days = getDaysLate(due.due_date, grace, cutoff);
+          const base = due.balance;
+          const interest = round2(base * (rate / 100) * days);
+          return {
+            due,
+            unit,
+            daysLate: days,
+            baseAmount: base,
+            interestRate: rate,
+            interestAmount: interest,
+            totalWithInterest: round2(base + interest),
+          };
+        });
       setLiquidation(rows);
       setReviewed(true);
 
@@ -249,39 +290,90 @@ export default function ProcesoFacturacionPage() {
               </p>
             </div>
             <CardBody>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <Input
-                  label="Tasa de Interés Diario (%)"
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  max="99.99"
-                  value={interestRate}
-                  onChange={(e) => handleInterestRateChange(e.target.value)}
-                  placeholder="Ej: 0.50"
-                />
-                <Input
-                  label="Días de Gracia"
-                  type="number"
-                  min="0"
-                  value={graceDays}
-                  onChange={(e) => setGraceDays(e.target.value)}
-                  placeholder="Ej: 5"
-                />
-                <Input
-                  label="Periodo de Facturación (YYYY-MM)"
-                  type="text"
-                  value={billingPeriod}
-                  onChange={(e) => setBillingPeriod(e.target.value)}
-                  placeholder="Ej: 2026-10"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div>
+                  <Input
+                    label="Tasa de Interés de Mora (%)"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="99.99"
+                    value={interestRate}
+                    onChange={(e) => handleInterestRateChange(e.target.value)}
+                    placeholder="Ej: 0.50"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">Máximo 2 decimales. Tasa diaria sobre saldo vencido.</p>
+                </div>
+                <div>
+                  <Input
+                    label="Días de Gracia"
+                    type="number"
+                    min="0"
+                    value={graceDays}
+                    onChange={(e) => setGraceDays(e.target.value)}
+                    placeholder="Ej: 5"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">Días posteriores al vencimiento sin interés.</p>
+                </div>
+                <div>
+                  <Input
+                    label="Periodo de Facturación (YYYY-MM)"
+                    type="text"
+                    value={billingPeriod}
+                    onChange={(e) => setBillingPeriod(e.target.value)}
+                    placeholder="Ej: 2026-10"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">Mes que se está facturando.</p>
+                </div>
+                <div>
+                  <Select
+                    label="Fecha de Corte / Inicio de Cobro"
+                    value={cutoffRule}
+                    onChange={(e) => { setCutoffRule(e.target.value as CutoffRule); setCustomStartDate(''); }}
+                  >
+                    <option value="cierre_mes_anterior">Día de cierre del mes anterior</option>
+                    <option value="inicio_mes_facturar">Día 1 del mes a facturar</option>
+                  </Select>
+                  <p className="text-xs text-gray-400 mt-1">Define el corte de saldos elegibles.</p>
+                </div>
               </div>
 
-              <div className="mt-4 flex items-start gap-2 px-3 py-2 rounded-lg bg-blue-50 border border-blue-200">
+              {/* Custom start date override + computed cutoff display */}
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <Input
+                    label="Fecha de Inicio de Cobro Personalizada (opcional)"
+                    type="date"
+                    value={customStartDate}
+                    onChange={(e) => setCustomStartDate(e.target.value)}
+                    placeholder="DD/MM/AAAA"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">
+                    Si se especifica, anula la regla de corte. Solo se liquidan saldos vencidos a esta fecha.
+                  </p>
+                </div>
+                <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3 flex items-center gap-3">
+                  <Calendar className="w-5 h-5 text-blue-600 flex-shrink-0" />
+                  <div>
+                    <p className="text-xs text-gray-500">Fecha de corte efectiva</p>
+                    <p className="text-sm font-semibold text-gray-900">
+                      {effectiveCutoffDate.toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric' })}
+                    </p>
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      {customStartDate ? 'Fecha personalizada' : cutoffRuleLabels[cutoffRule]}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Help tooltip for cutoff rule */}
+              <div className="mt-3 flex items-start gap-2 px-3 py-2 rounded-lg bg-blue-50 border border-blue-200">
                 <Info className="w-4 h-4 text-blue-600 flex-shrink-0 mt-0.5" />
                 <p className="text-xs text-blue-700">
-                  La tasa de interés se aplica diariamente sobre el saldo pendiente después de los días de gracia.
-                  Máximo 2 decimales. Se detectarán acuerdos de pago incumplidos antes de continuar.
+                  {customStartDate
+                    ? 'Se utilizará la fecha personalizada como corte. Solo generan interés los saldos con vencimiento anterior a esa fecha.'
+                    : cutoffRuleHelp[cutoffRule]}
+                  {' La tasa de interés se aplica diariamente sobre el saldo pendiente después de los días de gracia. Se detectarán acuerdos de pago incumplidos antes de continuar.'}
                 </p>
               </div>
 
