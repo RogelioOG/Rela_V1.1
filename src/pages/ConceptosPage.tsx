@@ -306,8 +306,7 @@ export default function ConceptosPage() {
                 <thead><tr className="border-b border-gray-200 bg-gray-50">
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Código</th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Concepto</th>
-                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Cuenta Ingreso Descuento</th>
-                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Cuenta Contrapartida Descuento</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Cuenta de Descuento</th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Estado</th>
                 </tr></thead>
                 <tbody className="divide-y divide-gray-100">
@@ -319,18 +318,6 @@ export default function ConceptosPage() {
                         <select
                           value={c.discount_income_account_id || ''}
                           onChange={(e) => updateDiscountAccount(c.id, 'discount_income_account_id', e.target.value)}
-                          className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
-                        >
-                          <option value="">— Seleccionar —</option>
-                          {filteredAccounts(c.account_class).map(a => (
-                            <option key={a.id} value={a.id}>{a.code} — {a.name}</option>
-                          ))}
-                        </select>
-                      </td>
-                      <td className="px-6 py-4">
-                        <select
-                          value={c.discount_counterpart_account_id || ''}
-                          onChange={(e) => updateDiscountAccount(c.id, 'discount_counterpart_account_id', e.target.value)}
                           className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
                         >
                           <option value="">— Seleccionar —</option>
@@ -466,20 +453,12 @@ export default function ConceptosPage() {
             <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-4 space-y-3">
               <p className="text-sm font-semibold text-green-800">Cuentas Contables para Descuentos</p>
               <p className="text-xs text-green-700">Parametrice las cuentas exclusivas para el registro de descuentos por pronto pago de este concepto.</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Select label="Cuenta Ingreso Descuento" value={form.discount_income_account_id} onChange={(e) => setForm({ ...form, discount_income_account_id: e.target.value })}>
-                  <option value="">— Seleccionar —</option>
-                  {filteredAccounts(form.account_class).map(a => (
-                    <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
-                  ))}
-                </Select>
-                <Select label="Cuenta Contrapartida Descuento" value={form.discount_counterpart_account_id} onChange={(e) => setForm({ ...form, discount_counterpart_account_id: e.target.value })}>
-                  <option value="">— Seleccionar —</option>
-                  {filteredAccounts(form.account_class).map(a => (
-                    <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
-                  ))}
-                </Select>
-              </div>
+              <Select label="Cuenta de Descuento" value={form.discount_income_account_id} onChange={(e) => setForm({ ...form, discount_income_account_id: e.target.value })}>
+                <option value="">— Seleccionar —</option>
+                {filteredAccounts(form.account_class).map(a => (
+                  <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
+                ))}
+              </Select>
             </div>
           )}
 

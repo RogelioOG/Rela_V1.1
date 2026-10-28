@@ -802,9 +802,9 @@ export default function ProcesoFacturacionPage() {
                                 <input
                                   type="number"
                                   step="0.01"
-                                  value={row.manualOverride ? row.overrideDiscount : ''}
+                                  value={row.manualOverride ? row.overrideDiscount : row.discountAmount > 0 ? String(row.discountAmount) : ''}
                                   onChange={(e) => applyManualDiscount(idx, e.target.value)}
-                                  placeholder={formatCOP(row.discountAmount)}
+                                  placeholder="0"
                                   className="w-28 rounded border border-gray-300 px-2 py-1 text-xs text-right focus:outline-none focus:ring-1 focus:ring-blue-500"
                                 />
                                 <span className="text-xs text-gray-400">COP</span>
