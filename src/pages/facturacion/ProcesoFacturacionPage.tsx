@@ -196,7 +196,6 @@ export default function ProcesoFacturacionPage() {
           .eq('period', billingPeriod);
 
         if (existingDues && existingDues.length > 0) {
-          // Reconstruir la liquidación a partir de los registros ya guardados en cartera
           const restoredRows: LiquidationRow[] = existingDues.map(d => ({
             due: d,
             unit: d.units || units.find(u => u.id === d.unit_id) || units[0],
@@ -213,7 +212,7 @@ export default function ProcesoFacturacionPage() {
 
           setLiquidation(restoredRows);
           setReviewed(true);
-          setCurrentStep(3); // Salta directamente al paso de Formatos y Envío si ya está facturado
+          setCurrentStep(3);
         }
       } catch (e) {
         console.warn('Error al hidratar el estado del periodo:', e);
@@ -966,7 +965,7 @@ export default function ProcesoFacturacionPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                defaultedAgreements.map((a) => (
+                {defaultedAgreements.map((a) => (
                   <tr key={a.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3">
                       <p className="text-sm font-medium text-gray-900">{a.units?.tower} {a.units?.unit_label}</p>
@@ -979,7 +978,7 @@ export default function ProcesoFacturacionPage() {
                       <Badge variant="red">Incumplido</Badge>
                     </td>
                   </tr>
-                ))
+                ))}
               </tbody>
             </table>
           </div>
