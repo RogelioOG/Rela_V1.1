@@ -21,11 +21,14 @@ interface FormState {
   is_active: boolean;
   causa_intereses: boolean;
   maneja_descuento: boolean;
+  discount_income_account_id: string;
+  discount_counterpart_account_id: string;
 }
 const emptyForm: FormState = {
   code: '', name: '', description: '', category: 'administracion',
   account_class: 'real', income_account_id: '', counterpart_account_id: '', is_active: true,
   causa_intereses: true, maneja_descuento: false,
+  discount_income_account_id: '', discount_counterpart_account_id: '',
 };
 
 export default function ConceptosPage() {
@@ -47,7 +50,7 @@ export default function ConceptosPage() {
     setLoading(true);
     const { data } = await supabase
       .from('billing_concepts')
-      .select('*, income_account:accounts!income_account_id(*), counterpart_account:accounts!counterpart_account_id(*), parent_concept:billing_concepts!parent_concept_id(*)')
+      .select('*, income_account:accounts!income_account_id(*), counterpart_account:accounts!counterpart_account_id(*), parent_concept:billing_concepts!parent_concept_id(*), discount_income_account:accounts!discount_income_account_id(*), discount_counterpart_account:accounts!discount_counterpart_account_id(*)')
       .eq('organization_id', activeOrg.id)
       .order('is_late_interest', { ascending: true })
       .order('name', { ascending: true });
@@ -90,6 +93,8 @@ export default function ConceptosPage() {
       is_active: c.is_active,
       causa_intereses: c.causa_intereses ?? true,
       maneja_descuento: c.maneja_descuento ?? false,
+      discount_income_account_id: c.discount_income_account_id || '',
+      discount_counterpart_account_id: c.discount_counterpart_account_id || '',
     });
     setError('');
     setModalOpen(true);
@@ -119,6 +124,8 @@ export default function ConceptosPage() {
       is_active: form.is_active,
       causa_intereses: form.causa_intereses,
       maneja_descuento: form.maneja_descuento,
+      discount_income_account_id: form.discount_income_account_id || null,
+      discount_counterpart_account_id: form.discount_counterpart_account_id || null,
     };
 
     try {
@@ -185,10 +192,17 @@ export default function ConceptosPage() {
 
   async function handleDelete() {
     if (!deleteTarget) return;
-    // Deleting a parent concept cascades to its late-interest sub-concept
     await supabase.from('billing_concepts').delete().eq('id', deleteTarget.id);
     setDeleteTarget(null);
     await loadItems();
+  }
+
+  async function updateDiscountAccount(conceptId: string, field: 'discount_income_account_id' | 'discount_counterpart_account_id', value: string) {
+    setItems(prev => prev.map(c => c.id === conceptId ? { ...c, [field]: value || null } : c));
+    await supabase
+      .from('billing_concepts')
+      .update({ [field]: value || null })
+      .eq('id', conceptId);
   }
 
   if (!activeOrg) return <NoOrgSelected />;
@@ -285,33 +299,47 @@ export default function ConceptosPage() {
       {discountConcepts.length > 0 && (
         <div className="mb-6">
           <h2 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><Percent className="w-4 h-4" /> Conceptos con Descuento (Configuración Contable)</h2>
-          <p className="text-xs text-gray-500 mb-3">Estos conceptos tienen habilitada la opción "Maneja Descuento". Asigne las cuentas contables de ingreso y contrapartida para el registro de descuentos por pronto pago.</p>
+          <p className="text-xs text-gray-500 mb-3">Estos conceptos tienen habilitada la opción "Maneja Descuento". Parametrice exclusivamente las cuentas contables para el registro de descuentos por pronto pago.</p>
           <Card>
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead><tr className="border-b border-gray-200 bg-gray-50">
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Código</th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Concepto</th>
-                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden lg:table-cell">Cuenta Ingreso</th>
-                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden xl:table-cell">Cuenta Contrapartida</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Cuenta Ingreso Descuento</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Cuenta Contrapartida Descuento</th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Estado</th>
-                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Acciones</th>
                 </tr></thead>
                 <tbody className="divide-y divide-gray-100">
                   {discountConcepts.map(c => (
                     <tr key={c.id} className="hover:bg-gray-50">
                       <td className="px-6 py-4"><span className="text-sm font-mono font-medium text-gray-900">{c.code}</span></td>
                       <td className="px-6 py-4 text-sm font-medium text-gray-900">{c.name}</td>
-                      <td className="px-6 py-4 text-sm text-gray-700 hidden lg:table-cell">
-                        {c.income_account ? `${c.income_account.code} — ${c.income_account.name}` : <span className="text-gray-400 italic">Sin asignar</span>}
+                      <td className="px-6 py-4">
+                        <select
+                          value={c.discount_income_account_id || ''}
+                          onChange={(e) => updateDiscountAccount(c.id, 'discount_income_account_id', e.target.value)}
+                          className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+                        >
+                          <option value="">— Seleccionar —</option>
+                          {filteredAccounts(c.account_class).map(a => (
+                            <option key={a.id} value={a.id}>{a.code} — {a.name}</option>
+                          ))}
+                        </select>
                       </td>
-                      <td className="px-6 py-4 text-sm text-gray-700 hidden xl:table-cell">
-                        {c.counterpart_account ? `${c.counterpart_account.code} — ${c.counterpart_account.name}` : <span className="text-gray-400 italic">Sin asignar</span>}
+                      <td className="px-6 py-4">
+                        <select
+                          value={c.discount_counterpart_account_id || ''}
+                          onChange={(e) => updateDiscountAccount(c.id, 'discount_counterpart_account_id', e.target.value)}
+                          className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+                        >
+                          <option value="">— Seleccionar —</option>
+                          {filteredAccounts(c.account_class).map(a => (
+                            <option key={a.id} value={a.id}>{a.code} — {a.name}</option>
+                          ))}
+                        </select>
                       </td>
                       <td className="px-6 py-4"><Badge variant={c.is_active ? 'green' : 'gray'}>{c.is_active ? 'Activo' : 'Inactivo'}</Badge></td>
-                      <td className="px-6 py-4"><div className="flex justify-end gap-2">
-                        <button onClick={() => openEdit(c)} className="p-2 rounded-lg text-gray-500 hover:bg-blue-50 hover:text-blue-600" title="Editar concepto"><Pencil className="w-4 h-4" /></button>
-                      </div></td>
                     </tr>
                   ))}
                 </tbody>
@@ -433,6 +461,27 @@ export default function ConceptosPage() {
               </div>
             </label>
           </div>
+
+          {form.maneja_descuento && (
+            <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-4 space-y-3">
+              <p className="text-sm font-semibold text-green-800">Cuentas Contables para Descuentos</p>
+              <p className="text-xs text-green-700">Parametrice las cuentas exclusivas para el registro de descuentos por pronto pago de este concepto.</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Select label="Cuenta Ingreso Descuento" value={form.discount_income_account_id} onChange={(e) => setForm({ ...form, discount_income_account_id: e.target.value })}>
+                  <option value="">— Seleccionar —</option>
+                  {filteredAccounts(form.account_class).map(a => (
+                    <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
+                  ))}
+                </Select>
+                <Select label="Cuenta Contrapartida Descuento" value={form.discount_counterpart_account_id} onChange={(e) => setForm({ ...form, discount_counterpart_account_id: e.target.value })}>
+                  <option value="">— Seleccionar —</option>
+                  {filteredAccounts(form.account_class).map(a => (
+                    <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
+                  ))}
+                </Select>
+              </div>
+            </div>
+          )}
 
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />

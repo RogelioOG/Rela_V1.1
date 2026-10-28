@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { Calculator, Loader2, AlertTriangle, CheckCircle2, Info, Clock, Percent, RefreshCw, ChevronRight, Calendar, Layers, Table, Save } from 'lucide-react';
+import { Calculator, Loader2, AlertTriangle, CheckCircle2, Info, Clock, Percent, RefreshCw, ChevronRight, Calendar, Layers } from 'lucide-react';
 import { supabase, Unit, Due, PaymentAgreement, AdminQuota, AdminQuotaLine, PeriodNovelty, DiscountTier, BillingConcept } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card, CardBody } from '@/components/ui/Card';
@@ -8,19 +8,27 @@ import { Input, Select } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
-import { formatCOP, formatShortDate } from '@/lib/format';
+import { formatCOP } from '@/lib/format';
 import Paso2FormatoEnvio from '@/components/facturacion/Paso2FormatoEnvio';
 
-interface LiquidationRow {
+export interface ChargeLine {
+  conceptId: string;
+  conceptName: string;
+  conceptCode: string;
+  amount: number;
+  isQuota: boolean;
+  isNovelty: boolean;
+}
+
+export interface LiquidationRow {
   due: Due | null;
   unit: Unit;
   daysLate: number;
-  baseAmount: number;
   interestRate: number;
+  priorBalance: number;
+  currentCharges: number;
+  chargeLines: ChargeLine[];
   interestAmount: number;
-  totalWithInterest: number;
-  quotaAmount: number;
-  noveltiesAmount: number;
   discountAmount: number;
   netTotal: number;
   rowId: string;
@@ -107,7 +115,6 @@ export default function ProcesoFacturacionPage() {
   const [reviewed, setReviewed] = useState(false);
   const [error, setError] = useState('');
 
-  // Discount step state
   const [discountRows, setDiscountRows] = useState<DiscountRow[]>([]);
 
   const loadData = useCallback(async () => {
@@ -142,7 +149,7 @@ export default function ProcesoFacturacionPage() {
         .eq('status', 'incumplido'),
       supabase
         .from('admin_quotas')
-        .select('*, admin_quota_lines(*)')
+        .select('*, admin_quota_lines(*), billing_concept:billing_concepts(*)')
         .eq('organization_id', activeOrg.id)
         .eq('is_active', true),
       supabase
@@ -182,102 +189,160 @@ export default function ProcesoFacturacionPage() {
     return getCutoffDate(billingPeriod, cutoffRule);
   }, [customStartDate, billingPeriod, cutoffRule]);
 
-  const activeTiers = useMemo(() => discountTiers.sort((a, b) => a.valid_until_day - b.valid_until_day), [discountTiers]);
+  const activeTiers = useMemo(() => [...discountTiers].sort((a, b) => a.valid_until_day - b.valid_until_day), [discountTiers]);
   const hasDiscounts = activeTiers.length > 0;
 
-  // Compute per-unit quota amount from admin quotas
-  const unitQuotaMap = useMemo(() => {
-    const map = new Map<string, number>();
+  const conceptMap = useMemo(() => {
+    const m = new Map<string, BillingConcept>();
+    for (const c of concepts) m.set(c.id, c);
+    return m;
+  }, [concepts]);
+
+  // Build per-unit charge lines from admin quotas and novelties
+  const unitChargeLinesMap = useMemo(() => {
+    const map = new Map<string, ChargeLine[]>();
+    const conceptById = (id: string) => conceptMap.get(id);
+
     for (const quota of adminQuotas) {
       const lines = quota.admin_quota_lines || [];
-      for (const line of lines) {
-        const existing = map.get(line.unit_id) || 0;
-        map.set(line.unit_id, existing + line.amount);
-      }
-      if (lines.length === 0 && quota.calculation_method === 'fijo') {
-        // fijo method: every active unit gets the fixed amount
-        for (const u of units) {
-          const existing = map.get(u.id) || 0;
-          map.set(u.id, existing + quota.fixed_amount);
+      const concept = quota.billing_concept_id ? conceptById(quota.billing_concept_id) : null;
+      if (lines.length > 0) {
+        for (const line of lines) {
+          const existing = map.get(line.unit_id) || [];
+          existing.push({
+            conceptId: quota.billing_concept_id,
+            conceptName: concept?.name || 'Cuota de Administración',
+            conceptCode: concept?.code || 'ADM',
+            amount: line.amount,
+            isQuota: true,
+            isNovelty: false,
+          });
+          map.set(line.unit_id, existing);
         }
-      }
-      if (lines.length === 0 && quota.calculation_method === 'presupuesto') {
-        // presupuesto: distribute by coefficient
+      } else if (quota.calculation_method === 'fijo') {
+        for (const u of units) {
+          const existing = map.get(u.id) || [];
+          existing.push({
+            conceptId: quota.billing_concept_id,
+            conceptName: concept?.name || 'Cuota de Administración',
+            conceptCode: concept?.code || 'ADM',
+            amount: quota.fixed_amount,
+            isQuota: true,
+            isNovelty: false,
+          });
+          map.set(u.id, existing);
+        }
+      } else if (quota.calculation_method === 'presupuesto') {
         const totalCoeff = units.reduce((s, u) => s + u.coefficient, 0) || 1;
         for (const u of units) {
           const amt = round2(quota.budget_amount * u.coefficient / totalCoeff);
-          const existing = map.get(u.id) || 0;
-          map.set(u.id, existing + amt);
+          const existing = map.get(u.id) || [];
+          existing.push({
+            conceptId: quota.billing_concept_id,
+            conceptName: concept?.name || 'Cuota de Administración',
+            conceptCode: concept?.code || 'ADM',
+            amount: amt,
+            isQuota: true,
+            isNovelty: false,
+          });
+          map.set(u.id, existing);
         }
       }
     }
-    return map;
-  }, [adminQuotas, units]);
 
-  // Compute per-unit novelties amount
-  const unitNoveltiesMap = useMemo(() => {
-    const map = new Map<string, number>();
     for (const n of novelties) {
       if (n.unit_id) {
-        const existing = map.get(n.unit_id) || 0;
-        map.set(n.unit_id, existing + n.value);
+        const concept = n.billing_concept_id ? conceptById(n.billing_concept_id) : null;
+        const existing = map.get(n.unit_id) || [];
+        existing.push({
+          conceptId: n.billing_concept_id,
+          conceptName: concept?.name || n.description || 'Novedad',
+          conceptCode: concept?.code || 'NOV',
+          amount: n.value,
+          isQuota: false,
+          isNovelty: true,
+        });
+        map.set(n.unit_id, existing);
       }
     }
-    return map;
-  }, [novelties]);
 
-  // Compute per-unit past-due interest from eligible dues
+    return map;
+  }, [adminQuotas, novelties, units, conceptMap]);
+
+  // Per-unit prior balance (sum of eligible past-due balances)
+  const unitPriorBalanceMap = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const due of dues) {
+      if (!isEligibleDue(due.due_date, effectiveCutoffDate)) continue;
+      const existing = map.get(due.unit_id) || 0;
+      map.set(due.unit_id, existing + due.balance);
+    }
+    return map;
+  }, [dues, effectiveCutoffDate]);
+
+  // Per-unit computed interest from eligible dues
   const unitInterestMap = useMemo(() => {
     const rate = parseFloat(interestRate) || 0;
     const grace = parseInt(graceDays) || 0;
     const map = new Map<string, number>();
-    const unitMap = new Map(units.map(u => [u.id, u]));
     for (const due of dues) {
       if (!isEligibleDue(due.due_date, effectiveCutoffDate)) continue;
-      const unit = unitMap.get(due.unit_id) || due.units;
-      if (!unit) continue;
       const days = getDaysLate(due.due_date, grace, effectiveCutoffDate);
       const interest = round2(due.balance * (rate / 100) * days);
       const existing = map.get(due.unit_id) || 0;
       map.set(due.unit_id, existing + interest);
     }
     return map;
-  }, [dues, units, interestRate, graceDays, effectiveCutoffDate]);
+  }, [dues, interestRate, graceDays, effectiveCutoffDate]);
 
   const computedLiquidation: LiquidationRow[] = useMemo(() => {
     const rate = parseFloat(interestRate) || 0;
-    const grace = parseInt(graceDays) || 0;
     return units.map(unit => {
-      const quotaAmount = unitQuotaMap.get(unit.id) || 0;
-      const noveltiesAmount = unitNoveltiesMap.get(unit.id) || 0;
+      const chargeLines = unitChargeLinesMap.get(unit.id) || [];
+      const currentCharges = round2(chargeLines.reduce((s, l) => s + l.amount, 0));
+      const priorBalance = unitPriorBalanceMap.get(unit.id) || 0;
       const interestAmount = unitInterestMap.get(unit.id) || 0;
-      const baseAmount = quotaAmount + noveltiesAmount;
       return {
         due: null,
         unit,
         daysLate: 0,
-        baseAmount,
         interestRate: rate,
+        priorBalance,
+        currentCharges,
+        chargeLines,
         interestAmount,
-        totalWithInterest: round2(baseAmount + interestAmount),
-        quotaAmount,
-        noveltiesAmount,
         discountAmount: 0,
-        netTotal: round2(baseAmount + interestAmount),
+        netTotal: round2(priorBalance + currentCharges + interestAmount),
         rowId: unit.id,
       };
-    }).filter(r => r.baseAmount > 0 || r.interestAmount > 0);
-  }, [units, unitQuotaMap, unitNoveltiesMap, unitInterestMap, interestRate, graceDays]);
+    }).filter(r => r.currentCharges > 0 || r.priorBalance > 0 || r.interestAmount > 0);
+  }, [units, unitChargeLinesMap, unitPriorBalanceMap, unitInterestMap, interestRate]);
 
-  const totalBase = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.baseAmount, 0), [reviewed, liquidation, computedLiquidation]);
+  const totalPriorBalance = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.priorBalance, 0), [reviewed, liquidation, computedLiquidation]);
+  const totalCurrentCharges = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.currentCharges, 0), [reviewed, liquidation, computedLiquidation]);
   const totalInterest = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.interestAmount, 0), [reviewed, liquidation, computedLiquidation]);
-  const totalGeneral = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.totalWithInterest, 0), [reviewed, liquidation, computedLiquidation]);
+  const totalGeneral = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.netTotal, 0), [reviewed, liquidation, computedLiquidation]);
 
   function handleInterestRateChange(value: string) {
     const parsed = parseFloat(value);
     if (isNaN(parsed)) { setInterestRate(''); return; }
     const rounded = Math.round(parsed * 100) / 100;
     setInterestRate(String(rounded));
+  }
+
+  // Compute discount for a single row based on active tiers and today's date
+  function computeAutoDiscount(currentCharges: number): number {
+    const today = new Date().getDate();
+    for (const tier of activeTiers) {
+      if (today <= tier.valid_until_day) {
+        if (tier.discount_type === 'porcentaje') {
+          return round2(currentCharges * tier.discount_value / 100);
+        } else {
+          return Math.min(tier.discount_value, currentCharges);
+        }
+      }
+    }
+    return 0;
   }
 
   async function handleReviewLiquidation() {
@@ -298,31 +363,16 @@ export default function ProcesoFacturacionPage() {
       const rows = computedLiquidation;
       setLiquidation(rows);
 
-      // Build discount rows for step 2 if discounts are active
       if (hasDiscounts) {
-        const today = new Date().getDate();
         const dRows: DiscountRow[] = rows.map(r => {
-          let appliedDiscount = 0;
-          for (const tier of activeTiers) {
-            if (today <= tier.valid_until_day) {
-              if (tier.discount_type === 'porcentaje') {
-                const baseForDiscount = tier.calculation_base_concept_ids && tier.calculation_base_concept_ids.length > 0
-                  ? r.quotaAmount
-                  : r.baseAmount;
-                appliedDiscount = round2(baseForDiscount * tier.discount_value / 100);
-              } else {
-                appliedDiscount = Math.min(tier.discount_value, r.baseAmount);
-              }
-              break;
-            }
-          }
+          const appliedDiscount = computeAutoDiscount(r.currentCharges);
           return {
             unitId: r.unit.id,
             unitLabel: r.unit.unit_label,
             tower: r.unit.tower,
-            baseAmount: r.totalWithInterest,
+            baseAmount: r.currentCharges,
             discountAmount: appliedDiscount,
-            netAmount: round2(r.totalWithInterest - appliedDiscount),
+            netAmount: round2(r.currentCharges - appliedDiscount),
             manualOverride: false,
             overrideDiscount: '',
           };
@@ -331,10 +381,7 @@ export default function ProcesoFacturacionPage() {
       }
 
       setReviewed(true);
-
-      if (defaultedAgrs.length > 0) {
-        setWarningOpen(true);
-      }
+      if (defaultedAgrs.length > 0) setWarningOpen(true);
       setReviewing(false);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Error al revisar la liquidación';
@@ -343,17 +390,15 @@ export default function ProcesoFacturacionPage() {
     }
   }
 
-  function handleRowInterestChange(unitId: string, newRate: number) {
+  // Edit interest amount directly per row
+  function handleRowInterestAmountChange(unitId: string, newInterest: number) {
     setLiquidation(prev =>
       prev.map(row => {
         if (row.unit.id !== unitId) return row;
-        const interest = round2(row.interestAmount * (newRate / (row.interestRate || 1)));
         return {
           ...row,
-          interestRate: newRate,
-          interestAmount: interest,
-          totalWithInterest: round2(row.baseAmount + interest),
-          netTotal: round2(row.baseAmount + interest - row.discountAmount),
+          interestAmount: round2(newInterest),
+          netTotal: round2(row.priorBalance + row.currentCharges + newInterest - row.discountAmount),
         };
       })
     );
@@ -363,21 +408,8 @@ export default function ProcesoFacturacionPage() {
     setDiscountRows(prev => {
       const updated = [...prev];
       const row = updated[idx];
-      const overrideVal = parseFloat(discountStr) || 0;
       if (discountStr === '') {
-        // Revert to auto — recompute from tiers
-        const today = new Date().getDate();
-        let autoDiscount = 0;
-        for (const tier of activeTiers) {
-          if (today <= tier.valid_until_day) {
-            if (tier.discount_type === 'porcentaje') {
-              autoDiscount = round2(row.baseAmount * tier.discount_value / 100);
-            } else {
-              autoDiscount = Math.min(tier.discount_value, row.baseAmount);
-            }
-            break;
-          }
-        }
+        const autoDiscount = computeAutoDiscount(row.baseAmount);
         updated[idx] = {
           ...row,
           discountAmount: autoDiscount,
@@ -386,6 +418,7 @@ export default function ProcesoFacturacionPage() {
           overrideDiscount: '',
         };
       } else {
+        const overrideVal = parseFloat(discountStr) || 0;
         const newDiscount = Math.min(overrideVal, row.baseAmount);
         updated[idx] = {
           ...row,
@@ -399,7 +432,6 @@ export default function ProcesoFacturacionPage() {
     });
   }
 
-  // Apply discounts to liquidation when advancing from step 2 to step 3
   function applyDiscountsAndAdvance() {
     setLiquidation(prev => prev.map(row => {
       const dRow = discountRows.find(d => d.unitId === row.unit.id);
@@ -407,7 +439,7 @@ export default function ProcesoFacturacionPage() {
       return {
         ...row,
         discountAmount: dRow.discountAmount,
-        netTotal: round2(row.totalWithInterest - dRow.discountAmount),
+        netTotal: round2(row.priorBalance + row.currentCharges + row.interestAmount - dRow.discountAmount),
       };
     }));
     setCurrentStep(3);
@@ -472,7 +504,7 @@ export default function ProcesoFacturacionPage() {
         </div>
       ) : (
         <>
-          {/* Step 1: Configuration + Review */}
+          {/* Step 1 */}
           {currentStep === 1 && (
             <>
           <Card className="mb-6">
@@ -498,7 +530,7 @@ export default function ProcesoFacturacionPage() {
                     onChange={(e) => handleInterestRateChange(e.target.value)}
                     placeholder="Ej: 0.50"
                   />
-                  <p className="text-xs text-gray-400 mt-1">Máximo 2 decimales. Tasa diaria sobre saldo vencido.</p>
+                  <p className="text-xs text-gray-400 mt-1">Parámetro de cálculo. No editable por propiedad.</p>
                 </div>
                 <div>
                   <Input
@@ -534,7 +566,6 @@ export default function ProcesoFacturacionPage() {
                 </div>
               </div>
 
-              {/* Custom start date override + computed cutoff display */}
               <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <Input
@@ -562,7 +593,6 @@ export default function ProcesoFacturacionPage() {
                 </div>
               </div>
 
-              {/* Data source summary */}
               <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 text-center">
                   <p className="text-xs text-gray-500">Cuotas activas</p>
@@ -582,7 +612,6 @@ export default function ProcesoFacturacionPage() {
                 </div>
               </div>
 
-              {/* Help tooltip for cutoff rule */}
               <div className="mt-3 flex items-start gap-2 px-3 py-2 rounded-lg bg-blue-50 border border-blue-200">
                 <Info className="w-4 h-4 text-blue-600 flex-shrink-0 mt-0.5" />
                 <p className="text-xs text-blue-700">
@@ -620,12 +649,15 @@ export default function ProcesoFacturacionPage() {
             </CardBody>
           </Card>
 
-          {/* Summary Cards */}
           {reviewed && (
             <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
               <Card><CardBody>
-                <p className="text-sm text-gray-500">Cuotas + Novedades</p>
-                <p className="text-xl font-bold text-gray-900">{formatCOP(totalBase)}</p>
+                <p className="text-sm text-gray-500">Saldos Anteriores</p>
+                <p className="text-xl font-bold text-gray-900">{formatCOP(totalPriorBalance)}</p>
+              </CardBody></Card>
+              <Card><CardBody>
+                <p className="text-sm text-gray-500">Cargos del Periodo</p>
+                <p className="text-xl font-bold text-gray-900">{formatCOP(totalCurrentCharges)}</p>
               </CardBody></Card>
               <Card><CardBody>
                 <p className="text-sm text-gray-500">Intereses de Mora</p>
@@ -634,10 +666,6 @@ export default function ProcesoFacturacionPage() {
               <Card><CardBody>
                 <p className="text-sm text-gray-500">Total a Facturar</p>
                 <p className="text-xl font-bold text-blue-700">{formatCOP(totalGeneral)}</p>
-              </CardBody></Card>
-              <Card><CardBody>
-                <p className="text-sm text-gray-500">Propiedades</p>
-                <p className="text-xl font-bold text-gray-900">{(reviewed ? liquidation : computedLiquidation).length}</p>
               </CardBody></Card>
             </div>
           )}
@@ -668,9 +696,8 @@ export default function ProcesoFacturacionPage() {
                     <thead>
                       <tr className="border-b border-gray-200 bg-gray-50">
                         <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Propiedad</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Cuota Admin</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden sm:table-cell">Novedades</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden sm:table-cell">Saldos Vencidos</th>
+                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden sm:table-cell">Saldo Anterior</th>
+                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Cargos del Periodo</th>
                         <th className="text-center text-xs font-semibold text-gray-600 uppercase px-6 py-3">Tasa (%)</th>
                         <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Interés Mora</th>
                         <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Total</th>
@@ -683,32 +710,35 @@ export default function ProcesoFacturacionPage() {
                             <p className="text-sm font-medium text-gray-900">{row.unit.tower} {row.unit.unit_label}</p>
                             <p className="text-xs text-gray-500">{row.unit.owner_name || ''}</p>
                           </td>
-                          <td className="px-6 py-3 text-right text-sm text-gray-900">{formatCOP(row.quotaAmount)}</td>
-                          <td className="px-6 py-3 text-right text-sm text-gray-700 hidden sm:table-cell">{formatCOP(row.noveltiesAmount)}</td>
-                          <td className="px-6 py-3 text-right text-sm text-gray-700 hidden sm:table-cell">{formatCOP(row.interestAmount)}</td>
-                          <td className="px-6 py-3 text-center">
+                          <td className="px-6 py-3 text-right text-sm text-gray-700 hidden sm:table-cell">
+                            {row.priorBalance > 0 ? formatCOP(row.priorBalance) : '—'}
+                          </td>
+                          <td className="px-6 py-3 text-right text-sm text-gray-900">{formatCOP(row.currentCharges)}</td>
+                          <td className="px-6 py-3 text-center text-sm text-gray-500">
+                            {row.interestRate.toFixed(2)}
+                          </td>
+                          <td className="px-6 py-3 text-right">
                             <input
                               type="number"
                               step="0.01"
                               min="0"
-                              value={row.interestRate}
+                              value={row.interestAmount}
                               onChange={(e) => {
                                 const val = Math.round((parseFloat(e.target.value) || 0) * 100) / 100;
-                                handleRowInterestChange(row.unit.id, val);
+                                handleRowInterestAmountChange(row.unit.id, val);
                               }}
-                              className="w-20 text-center text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                              className="w-24 text-right text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                             />
                           </td>
-                          <td className="px-6 py-3 text-right text-sm font-medium text-yellow-600">{formatCOP(row.interestAmount)}</td>
-                          <td className="px-6 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(row.totalWithInterest)}</td>
+                          <td className="px-6 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(row.netTotal)}</td>
                         </tr>
                       ))}
                     </tbody>
                     <tfoot>
                       <tr className="border-t-2 border-gray-200 bg-gray-50">
                         <td className="px-6 py-3 text-sm font-semibold text-gray-900">Totales:</td>
-                        <td className="px-6 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(totalBase)}</td>
-                        <td colSpan={2} className="px-6 py-3 hidden sm:table-cell" />
+                        <td className="px-6 py-3 text-right text-sm font-bold text-gray-900 hidden sm:table-cell">{formatCOP(totalPriorBalance)}</td>
+                        <td className="px-6 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(totalCurrentCharges)}</td>
                         <td className="px-6 py-3" />
                         <td className="px-6 py-3 text-right text-sm font-bold text-yellow-600">{formatCOP(totalInterest)}</td>
                         <td className="px-6 py-3 text-right text-sm font-bold text-blue-700">{formatCOP(totalGeneral)}</td>
@@ -722,7 +752,7 @@ export default function ProcesoFacturacionPage() {
           </>
           )}
 
-          {/* Step 2: Discount Configuration (only if discounts are active) */}
+          {/* Step 2: Discount Configuration */}
           {currentStep === 2 && hasDiscounts && (
             <Card>
               <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
@@ -741,14 +771,13 @@ export default function ProcesoFacturacionPage() {
               <div className="p-5">
                 <div className="mb-4 rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
                   <p className="text-sm text-blue-800">
-                    Los descuentos se calcularon automáticamente según los escalones configurados y el día actual.
-                    Puede ajustar manualmente el descuento por propiedad ingresando un valor en la columna "Descuento".
-                    Deje el campo vacío para revertir al cálculo automático.
+                    Los descuentos se calcularon automáticamente según los escalones configurados y el día actual, aplicados sobre los cargos del periodo.
+                    Puede ajustar manualmente el descuento por propiedad. Deje el campo vacío para revertir al cálculo automático.
                   </p>
                 </div>
                 {discountRows.length === 0 ? (
                   <div className="text-center py-12">
-                    <p className="text-gray-500">No hay propiedades con saldos para aplicar descuentos.</p>
+                    <p className="text-gray-500">No hay propiedades con cargos para aplicar descuentos.</p>
                   </div>
                 ) : (
                   <>
@@ -756,9 +785,9 @@ export default function ProcesoFacturacionPage() {
                     <table className="w-full text-sm">
                       <thead><tr className="border-b border-gray-200 bg-gray-50">
                         <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Propiedad</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Base</th>
+                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Base (Cargos)</th>
                         <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Descuento</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Neto a Pagar</th>
+                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Neto con Descuento</th>
                       </tr></thead>
                       <tbody className="divide-y divide-gray-100">
                         {discountRows.map((row, idx) => (
@@ -807,17 +836,23 @@ export default function ProcesoFacturacionPage() {
             </Card>
           )}
 
-          {/* Step 3: Formats, PDF & Email */}
+          {/* Step 3: Formats & Email */}
           {currentStep === 3 && (
             <Paso2FormatoEnvio
               liquidation={liquidation.map(r => ({
-                due: r.due || ({ id: r.rowId, organization_id: activeOrg.id, unit_id: r.unit.id, type: 'ordinaria' as const, period: billingPeriod, due_date: new Date().toISOString().slice(0, 10), amount: r.baseAmount, interest_rate: r.interestRate, balance: r.baseAmount, status: 'pendiente' as const, created_at: '' }) as Due,
+                due: r.due || ({ id: r.rowId, organization_id: activeOrg.id, unit_id: r.unit.id, type: 'ordinaria' as const, period: billingPeriod, due_date: new Date().toISOString().slice(0, 10), amount: r.currentCharges, interest_rate: r.interestRate, balance: r.priorBalance, status: 'pendiente' as const, created_at: '' }) as Due,
                 unit: r.unit,
                 daysLate: r.daysLate,
-                baseAmount: r.baseAmount,
                 interestRate: r.interestRate,
+                priorBalance: r.priorBalance,
+                currentCharges: r.currentCharges,
+                chargeLines: r.chargeLines,
                 interestAmount: r.interestAmount,
+                discountAmount: r.discountAmount,
+                netTotal: r.netTotal,
                 totalWithInterest: r.netTotal,
+                baseAmount: r.currentCharges,
+                rowId: r.rowId,
               }))}
               agreements={[...agreements, ...defaultedAgreements]}
               org={activeOrg}
@@ -845,7 +880,7 @@ export default function ProcesoFacturacionPage() {
         </>
       )}
 
-      {/* Warning Modal: Defaulted Payment Agreements */}
+      {/* Warning Modal */}
       <Modal
         open={warningOpen}
         onClose={() => setWarningOpen(false)}
@@ -861,8 +896,7 @@ export default function ProcesoFacturacionPage() {
               </p>
               <p className="text-sm text-red-700 mt-1">
                 Los siguientes propiedades tienen acuerdos de pago en estado de incumplimiento.
-                Revise la situación antes de proceder con la facturación, ya que los saldos
-                pueden estar sujetos a tratamiento especial.
+                Revise la situación antes de proceder con la facturación.
               </p>
             </div>
           </div>
@@ -895,14 +929,6 @@ export default function ProcesoFacturacionPage() {
                 ))}
               </tbody>
             </table>
-          </div>
-
-          <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-yellow-50 border border-yellow-200">
-            <Info className="w-4 h-4 text-yellow-600 flex-shrink-0 mt-0.5" />
-            <p className="text-xs text-yellow-700">
-              Puede continuar con el proceso de facturación, pero se recomienda regularizar
-              los acuerdos incumplidos antes de emitir nuevas facturas.
-            </p>
           </div>
 
           <div className="flex justify-end gap-3 pt-2">

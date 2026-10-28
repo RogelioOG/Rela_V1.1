@@ -225,11 +225,15 @@ export interface BillingConcept {
   is_active: boolean;
   causa_intereses: boolean;
   maneja_descuento: boolean;
+  discount_income_account_id: string | null;
+  discount_counterpart_account_id: string | null;
   created_at: string;
   updated_at: string;
   income_account?: Account;
   counterpart_account?: Account;
   parent_concept?: BillingConcept;
+  discount_income_account?: Account;
+  discount_counterpart_account?: Account;
 }
 
 export interface Due {
