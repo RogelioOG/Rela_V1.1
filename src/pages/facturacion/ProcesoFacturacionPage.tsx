@@ -184,6 +184,44 @@ export default function ProcesoFacturacionPage() {
 
   useEffect(() => { if (activeOrg) loadData(); }, [activeOrg, loadData]);
 
+  // Hidratación automática: Verifica si ya existe facturación para este periodo y auto-restaura el estado
+  useEffect(() => {
+    async function checkExistingPeriodHydration() {
+      if (!activeOrg || !billingPeriod || units.length === 0) return;
+      try {
+        const { data: existingDues } = await supabase
+          .from('dues')
+          .select('*, units(*)')
+          .eq('organization_id', activeOrg.id)
+          .eq('period', billingPeriod);
+
+        if (existingDues && existingDues.length > 0) {
+          // Reconstruir la liquidación a partir de los registros ya guardados en cartera
+          const restoredRows: LiquidationRow[] = existingDues.map(d => ({
+            due: d,
+            unit: d.units || units.find(u => u.id === d.unit_id) || units[0],
+            daysLate: 0,
+            interestRate: parseFloat(interestRate) || 0.5,
+            priorBalance: 0,
+            currentCharges: d.amount,
+            chargeLines: [],
+            interestAmount: 0,
+            discountAmount: 0,
+            netTotal: d.balance,
+            rowId: d.id,
+          }));
+
+          setLiquidation(restoredRows);
+          setReviewed(true);
+          setCurrentStep(3); // Salta directamente al paso de Formatos y Envío si ya está facturado
+        }
+      } catch (e) {
+        console.warn('Error al hidratar el estado del periodo:', e);
+      }
+    }
+    checkExistingPeriodHydration();
+  }, [activeOrg, billingPeriod, units]);
+
   const effectiveCutoffDate = useMemo(() => {
     if (customStartDate) return new Date(customStartDate + 'T00:00:00');
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(billingPeriod)) return new Date();
@@ -199,7 +237,6 @@ export default function ProcesoFacturacionPage() {
     return m;
   }, [concepts]);
 
-  // Build per-unit charge lines from admin quotas and novelties
   const unitChargeLinesMap = useMemo(() => {
     const map = new Map<string, ChargeLine[]>();
     const conceptById = (id: string) => conceptMap.get(id);
@@ -270,7 +307,6 @@ export default function ProcesoFacturacionPage() {
     return map;
   }, [adminQuotas, novelties, units, conceptMap]);
 
-  // Per-unit prior balance (sum of eligible past-due balances)
   const unitPriorBalanceMap = useMemo(() => {
     const map = new Map<string, number>();
     for (const due of dues) {
@@ -281,7 +317,6 @@ export default function ProcesoFacturacionPage() {
     return map;
   }, [dues, effectiveCutoffDate]);
 
-  // Per-unit computed interest from eligible dues
   const unitInterestMap = useMemo(() => {
     const rate = parseFloat(interestRate) || 0;
     const grace = parseInt(graceDays) || 0;
@@ -331,9 +366,7 @@ export default function ProcesoFacturacionPage() {
     setInterestRate(String(rounded));
   }
 
-// Función exacta para calcular el descuento automático sin depender estrictamente del día actual de prueba
   function computeAutoDiscount(currentCharges: number, chargeLines: ChargeLine[]): number {
-    // Tomamos el primer escalón activo disponible
     const activeTier = activeTiers[0]; 
     if (!activeTier) return 0;
 
@@ -396,7 +429,6 @@ export default function ProcesoFacturacionPage() {
     }
   }
 
-  // Edit interest amount directly per row
   function handleRowInterestAmountChange(unitId: string, newInterest: number) {
     setLiquidation(prev =>
       prev.map(row => {
@@ -676,7 +708,6 @@ export default function ProcesoFacturacionPage() {
             </div>
           )}
 
-          {/* Liquidation Table */}
           {reviewed && (
             <Card>
               <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
@@ -935,7 +966,7 @@ export default function ProcesoFacturacionPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {defaultedAgreements.map((a) => (
+                defaultedAgreements.map((a) => (
                   <tr key={a.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3">
                       <p className="text-sm font-medium text-gray-900">{a.units?.tower} {a.units?.unit_label}</p>
@@ -948,7 +979,7 @@ export default function ProcesoFacturacionPage() {
                       <Badge variant="red">Incumplido</Badge>
                     </td>
                   </tr>
-                ))}
+                ))
               </tbody>
             </table>
           </div>
