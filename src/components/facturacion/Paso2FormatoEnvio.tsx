@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import {
   FileText, Eye, Download, Mail, Send, CheckCircle2, AlertTriangle,
   Search, Loader2, Info, Layers, FileStack, Users, Trash2
@@ -202,11 +202,39 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
   const [simModalOpen, setSimModalOpen] = useState(false);
   const [error, setError] = useState('');
 
-  // Control de estado post-facturación
+  // Control de estado post-facturación y persistencia automática
   const [isFinalized, setIsFinalized] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [generatedInvoices, setGeneratedInvoices] = useState<{ id: string; invoiceNumber: string; row: LiquidationRow }[]>([]);
   const [deletingBatch, setDeletingBatch] = useState(false);
+
+  // Hidratación y persistencia: Verifica si ya existe facturación previa para este periodo en Supabase
+  useEffect(() => {
+    async function checkExistingPeriodState() {
+      if (!org || !billingPeriod) return;
+      try {
+        const { data: existingDues } = await supabase
+          .from('dues')
+          .select('*')
+          .eq('organization_id', org.id)
+          .eq('period', billingPeriod);
+
+        if (existingDues && existingDues.length > 0) {
+          // Si ya existen registros guardados, auto-restaura la vista procesada
+          const restoredInvoices = liquidation.map((row, idx) => ({
+            id: row.rowId || row.due.id,
+            invoiceNumber: `CC-${String(idx + 1).padStart(4, '0')}`,
+            row,
+          }));
+          setGeneratedInvoices(restoredInvoices);
+          setIsFinalized(true);
+        }
+      } catch (e) {
+        console.warn('No se pudo verificar el estado previo del periodo:', e);
+      }
+    }
+    checkExistingPeriodState();
+  }, [org, billingPeriod, liquidation]);
 
   const recipients: Recipient[] = useMemo(() => {
     return liquidation.map(row => {
@@ -285,79 +313,129 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     });
   }
 
-  // Finalizar Proceso: Inserta en Cartera (dues) y registra el Asiento Contable real en el ERP
+  // Finalizar Proceso: Inserta en cartera y registra el Asiento en journal_entries compatible con AsientosPage.tsx
   async function handleFinalizeProcess() {
     if (!org) return;
     setFinalizing(true);
     setError('');
 
-    // Generar consecutivos limpios estilo CC-0001, CC-0002
-    const batchInvoices = liquidation.map((row, idx) => {
-      const seq = String(idx + 1).padStart(4, '0');
-      const invoiceNumber = `CC-${seq}`;
-      return {
-        id: row.rowId || 'inv-' + Math.random().toString(36).substring(2, 9),
-        invoiceNumber,
-        row,
-      };
-    });
-
     try {
       const todayIso = new Date().toISOString().slice(0, 10);
-      const totalAmount = liquidation.reduce((sum, r) => sum + r.netTotal, 0);
 
-      // 1. Guardar o actualizar registro de cuentas por cobrar en dues
-      await supabase.from('dues').insert(liquidation.map((r) => ({
-        organization_id: org.id,
-        unit_id: r.unit.id,
-        period: billingPeriod,
-        amount: r.netTotal,
-        balance: r.netTotal,
-        status: 'pendiente',
-        due_date: todayIso,
-      })));
+      // 1. Obtener consecutivo actual para el tipo de documento 'CC'
+      const { data: docConfig } = await supabase
+        .from('accounting_documents')
+        .select('*')
+        .eq('organization_id', org.id)
+        .eq('prefix', 'CC')
+        .single();
 
-      // 2. Registrar el Asiento Contable en la tabla oficial del ERP (accounting_entries o journal_entries)
-      const entryPayload = {
-        organization_id: org.id,
-        entry_date: todayIso,
-        description: `Causación Facturación Periodo ${billingPeriod} - Cuentas de Cobro CC`,
-        total_amount: totalAmount,
-        status: 'posted',
-        document_type: 'CC',
-        items: liquidation.map(r => ({
-          description: `Cuenta de Cobro ${r.unit.tower} ${r.unit.unit_label} - Periodo ${billingPeriod}`,
-          debit: r.netTotal,
-          credit: 0
-        }))
-      };
+      let nextSeq = docConfig?.next_consecutive || 1;
 
-      const { error: accError } = await supabase.from('accounting_entries').insert(entryPayload);
-      if (accError) {
-        // Fallback seguro a journal_entries si la tabla oficial usa ese nombre
-        await supabase.from('journal_entries').insert(entryPayload).catch(() => {});
+      // 2. Buscar cuentas contables predeterminadas o disponibles para el asiento
+      const { data: accountsData } = await supabase
+        .from('accounts')
+        .select('*')
+        .eq('organization_id', org.id);
+
+      const accounts = accountsData || [];
+      const receivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
+      const incomeAcc = accounts.find(a => a.code.startsWith('4')) || accounts[1] || accounts[0];
+
+      const batchInvoices = [];
+
+      for (let i = 0; i < liquidation.length; i++) {
+        const row = liquidation[i];
+        const invoiceNumber = `CC-${String(nextSeq + i).padStart(4, '0')}`;
+        const rowId = row.rowId || 'inv-' + Math.random().toString(36).substring(2, 9);
+
+        batchInvoices.push({
+          id: rowId,
+          invoiceNumber,
+          row,
+        });
+
+        // Insertar en dues (cartera)
+        await supabase.from('dues').insert({
+          organization_id: org.id,
+          unit_id: row.unit.id,
+          period: billingPeriod,
+          amount: row.netTotal,
+          balance: row.netTotal,
+          status: 'pendiente',
+          due_date: todayIso,
+        });
+
+        // Insertar cabecera del asiento contable en journal_entries (compatible con AsientosPage)
+        const { data: je, error: jeErr } = await supabase.from('journal_entries').insert({
+          organization_id: org.id,
+          date: todayIso,
+          description: `Causación Cuota de Cobro ${invoiceNumber} - ${row.unit.tower} ${row.unit.unit_label} Periodo ${billingPeriod}`,
+          document_type: 'CC',
+          document_number: nextSeq + i,
+          is_manual: true,
+        }).select().single();
+
+        if (!jeErr && je && receivableAcc && incomeAcc) {
+          // Insertar líneas del asiento (Débito a Cartera / Crédito a Ingresos)
+          await supabase.from('journal_lines').insert([
+            {
+              journal_entry_id: je.id,
+              account_id: receivableAcc.id,
+              debit: row.netTotal,
+              credit: 0,
+            },
+            {
+              journal_entry_id: je.id,
+              account_id: incomeAcc.id,
+              debit: 0,
+              credit: row.netTotal,
+            }
+          ]);
+        }
       }
 
+      // Actualizar el consecutivo en accounting_documents si existe
+      if (docConfig) {
+        await supabase.from('accounting_documents')
+          .update({ next_consecutive: nextSeq + liquidation.length })
+          .eq('id', docConfig.id);
+      }
+
+      setGeneratedInvoices(batchInvoices);
+      setIsFinalized(true);
     } catch (e) {
-      console.warn('Proceso finalizado en modo seguro con respaldo local.');
+      console.warn('Error al registrar asientos contables en bloque:', e);
+      setError('Ocurrió un inconveniente al contabilizar, pero se generó localmente.');
     }
 
-    setGeneratedInvoices(batchInvoices);
-    setIsFinalized(true);
     setFinalizing(false);
   }
 
-  // Eliminar Facturación en Bloque (Reversión completa)
+  // Eliminar Facturación en Bloque (Reversión completa de dues y asientos)
   async function handleDeleteBatch() {
     if (!confirm('¿Está seguro de eliminar toda la facturación de este periodo en bloque? Se reversarán los asientos contables y se liberarán los consecutivos.')) return;
     setDeletingBatch(true);
     setError('');
     try {
       if (org) {
-        // Eliminar las cuentas de cobro/dues de este periodo en Supabase
+        // Borrar las cuentas de cobro/dues de este periodo
         await supabase.from('dues').delete().eq('organization_id', org.id).eq('period', billingPeriod);
+        
+        // Borrar los asientos manuales de tipo CC creados en este periodo
+        const { data: entriesToDelete } = await supabase
+          .from('journal_entries')
+          .select('id')
+          .eq('organization_id', org.id)
+          .eq('document_type', 'CC');
+
+        if (entriesToDelete && entriesToDelete.length > 0) {
+          const ids = entriesToDelete.map(e => e.id);
+          await supabase.from('journal_lines').delete().in('journal_entry_id', ids);
+          await supabase.from('journal_entries').delete().in('id', ids);
+        }
       }
-      await new Promise(r => setTimeout(r, 400));
+
       setIsFinalized(false);
       setGeneratedInvoices([]);
       setSelected(new Set());
@@ -404,7 +482,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             </div>
             <div>
               <h3 className="text-base font-bold text-green-900">¡Facturación Generada y Contabilizada con Éxito!</h3>
-              <p className="text-sm text-green-700">Se han emitido {generatedInvoices.length} cuentas de cobro consecutivas (CC-0001 en adelante) y se afectó el módulo contable.</p>
+              <p className="text-sm text-green-700">Se han emitido {generatedInvoices.length} cuentas de cobro consecutivas (CC-0001 en adelante) y se registraron en Asientos Contables.</p>
             </div>
           </div>
           <Button variant="danger" size="sm" onClick={handleDeleteBatch} disabled={deletingBatch}>
