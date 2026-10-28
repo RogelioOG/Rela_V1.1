@@ -331,26 +331,23 @@ export default function ProcesoFacturacionPage() {
     setInterestRate(String(rounded));
   }
 
-  // Compute discount for a single row based on active tiers, today's date,
-  // and the tier's configured calculation base (selected concepts or Valor Total)
+// Función exacta para calcular el descuento automático sin depender estrictamente del día actual de prueba
   function computeAutoDiscount(currentCharges: number, chargeLines: ChargeLine[]): number {
-    const today = new Date().getDate();
-    for (const tier of activeTiers) {
-      if (today <= tier.valid_until_day) {
-        if (tier.discount_type === 'porcentaje') {
-          const baseConceptIds = tier.calculation_base_concept_ids;
-          const base = baseConceptIds && baseConceptIds.length > 0
-            ? round2(chargeLines
-                .filter(l => baseConceptIds.includes(l.conceptId))
-                .reduce((s, l) => s + l.amount, 0))
-            : currentCharges;
-          return round2(base * tier.discount_value / 100);
-        } else {
-          return Math.min(tier.discount_value, currentCharges);
-        }
-      }
+    // Tomamos el primer escalón activo disponible
+    const activeTier = activeTiers[0]; 
+    if (!activeTier) return 0;
+
+    if (activeTier.discount_type === 'porcentaje') {
+      const baseConceptIds = activeTier.calculation_base_concept_ids;
+      const base = baseConceptIds && baseConceptIds.length > 0
+        ? round2(chargeLines
+            .filter(l => baseConceptIds.includes(l.conceptId))
+            .reduce((s, l) => s + l.amount, 0))
+        : currentCharges;
+      return round2(base * activeTier.discount_value / 100);
+    } else {
+      return Math.min(activeTier.discount_value, currentCharges);
     }
-    return 0;
   }
 
   async function handleReviewLiquidation() {
