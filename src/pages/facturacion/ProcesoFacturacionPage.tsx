@@ -58,12 +58,14 @@ function getDaysLate(dueDate: string, graceDays: number, cutoffDate: Date): numb
   return Math.max(0, days - graceDays);
 }
 
+// Corrección clave: Calcula el corte basado estrictamente en el periodo YYYY-MM parametrizado
 function getCutoffDate(period: string, rule: CutoffRule): Date {
   const [y, m] = period.split('-').map(Number);
+  if (!y || !m) return new Date();
   if (rule === 'inicio_mes_facturar') {
-    return new Date(y, m - 1, 1);
+    return new Date(y, m - 1, 1); // Día 1 del mes del periodo
   }
-  return new Date(y, m - 2 + 1, 0);
+  return new Date(y, m - 1, 0); // Último día del mes anterior al periodo
 }
 
 function isEligibleDue(dueDate: string, cutoffDate: Date): boolean {
@@ -221,6 +223,7 @@ export default function ProcesoFacturacionPage() {
     checkExistingPeriodHydration();
   }, [activeOrg, billingPeriod, units]);
 
+  // Cálculo de la fecha de corte efectiva vinculada estrictamente al billingPeriod o a la fecha personalizada
   const effectiveCutoffDate = useMemo(() => {
     if (customStartDate) return new Date(customStartDate + 'T00:00:00');
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(billingPeriod)) return new Date();
@@ -555,7 +558,7 @@ export default function ProcesoFacturacionPage() {
               </p>
             </div>
             <CardBody>
-              {/* Se eliminó el campo redundante de Periodo de Facturación para sincronizarse estrictamente con el Calendario */}
+              {/* Se eliminó el campo redundante de Periodo de Facturación para sincronizarse estrictamente con el Calendario global */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 <div>
                   <Input
@@ -590,7 +593,7 @@ export default function ProcesoFacturacionPage() {
                     <option value="cierre_mes_anterior">Día de cierre del mes anterior</option>
                     <option value="inicio_mes_facturar">Día 1 del mes a facturar</option>
                   </Select>
-                  <p className="text-xs text-gray-400 mt-1">Define el corte de saldos elegibles.</p>
+                  <p className="text-xs text-gray-400 mt-1">Define el corte de saldos elegibles según el periodo.</p>
                 </div>
               </div>
 
@@ -604,7 +607,7 @@ export default function ProcesoFacturacionPage() {
                     placeholder="DD/MM/AAAA"
                   />
                   <p className="text-xs text-gray-400 mt-1">
-                    Si se especifica, anula la regla de corte. Solo se liquidan saldos vencidos a esta fecha.
+                    Si se especifica, anula la regla de corte anterior. Solo se liquidan saldos a esta fecha.
                   </p>
                 </div>
                 <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3 flex items-center gap-3">
@@ -615,7 +618,7 @@ export default function ProcesoFacturacionPage() {
                       {effectiveCutoffDate.toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric' })}
                     </p>
                     <p className="text-xs text-gray-400 mt-0.5">
-                      {customStartDate ? 'Fecha personalizada' : cutoffRuleLabels[cutoffRule]}
+                      {customStartDate ? 'Fecha personalizada (activa)' : cutoffRuleLabels[cutoffRule]}
                     </p>
                   </div>
                 </div>
@@ -644,7 +647,7 @@ export default function ProcesoFacturacionPage() {
                 <Info className="w-4 h-4 text-blue-600 flex-shrink-0 mt-0.5" />
                 <p className="text-xs text-blue-700">
                   {customStartDate
-                    ? 'Se utilizará la fecha personalizada como corte. Solo generan interés los saldos con vencimiento anterior a esa fecha.'
+                    ? 'Se está utilizando la fecha personalizada como corte para los intereses de mora, ignorando la regla seleccionada.'
                     : cutoffRuleHelp[cutoffRule]}
                   {' El sistema suma automáticamente las cuotas de administración guardadas, las novedades del periodo no facturadas, y los intereses de mora calculados sobre saldos vencidos.'}
                 </p>
@@ -975,7 +978,7 @@ export default function ProcesoFacturacionPage() {
           </div>
 
           <div className="flex justify-end gap-3 pt-2">
-            <Button variant="outline" onClick={() => setWarningOpen(false)}>Cerrar y Revisar</Button>
+            <Button variant="outline" onClick={() => setWarningInfo(false)}>Cerrar y Revisar</Button>
             <Button onClick={() => setWarningOpen(false)}>
               <CheckCircle2 className="w-4 h-4" /> Continuar con Facturación
             </Button>
