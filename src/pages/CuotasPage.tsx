@@ -46,12 +46,29 @@ export default function CuotasPage() {
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // Declaración previa de loadQuotaRows para evitar conflictos de inicialización
+  // Función auxiliar de cálculo basada en los parámetros activos
+  const computeRowAmount = useCallback((coefficient: number, method: string, budget: number, fixed: number, decimals: number, unitList: Unit[]) => {
+    const factor = Math.pow(10, decimals);
+    if (method === 'presupuesto') {
+      const totalCoeff = unitList.reduce((s, u) => s + u.coefficient, 0) || 1;
+      return Math.round((budget * coefficient / totalCoeff) * factor) / factor;
+    }
+    if (method === 'fijo') {
+      return Math.round(fixed * factor) / factor;
+    }
+    return 0;
+  }, []);
+
   const loadQuotaRows = useCallback((quota: AdminQuota, unitList: Unit[]) => {
     const lines = quota.admin_quota_lines || [];
+    const method = quota.calculation_method;
+    const budget = quota.budget_amount || 0;
+    const fixed = quota.fixed_amount || 0;
+    const decimals = quota.rounding_decimals || 2;
+
     const rows: QuotaRow[] = unitList.map(u => {
       const line = lines.find(l => l.unit_id === u.id);
-      const computed = 0;
+      const computed = computeRowAmount(u.coefficient, method, budget, fixed, decimals, unitList);
       return {
         unit_id: u.id,
         unit_label: u.unit_label,
@@ -59,11 +76,11 @@ export default function CuotasPage() {
         coefficient: u.coefficient,
         computed_amount: computed,
         manual_amount: line ? String(line.amount) : '',
-        is_override: !!line,
+        is_override: !!line || method === 'manual',
       };
     });
     setQuotaRows(rows);
-  }, []);
+  }, [computeRowAmount]);
 
   const loadExistingQuota = useCallback(async () => {
     if (!activeOrg || !selectedPeriodId || !selectedConceptId) return;
@@ -121,28 +138,17 @@ export default function CuotasPage() {
 
   useEffect(() => { if (selectedPeriodId && selectedConceptId && units.length > 0) loadExistingQuota(); }, [selectedPeriodId, selectedConceptId, units, loadExistingQuota]);
 
-  function computeAmount(coefficient: number): number {
-    const decimals = parseInt(roundingDecimals) || 2;
-    const factor = Math.pow(10, decimals);
-    if (calcMethod === 'presupuesto') {
-      const budget = parseFloat(budgetAmount) || 0;
-      const totalCoeff = units.reduce((s, u) => s + u.coefficient, 0) || 1;
-      return Math.round((budget * coefficient / totalCoeff) * factor) / factor;
-    }
-    if (calcMethod === 'fijo') {
-      const fixed = parseFloat(fixedAmount) || 0;
-      return Math.round(fixed * factor) / factor;
-    }
-    return 0;
-  }
-
   function regenerateRows() {
+    const decimals = parseInt(roundingDecimals) || 2;
+    const budget = parseFloat(budgetAmount) || 0;
+    const fixed = parseFloat(fixedAmount) || 0;
+
     const rows: QuotaRow[] = units.map(u => ({
       unit_id: u.id,
       unit_label: u.unit_label,
       tower: u.tower,
       coefficient: u.coefficient,
-      computed_amount: computeAmount(u.coefficient),
+      computed_amount: computeRowAmount(u.coefficient, calcMethod, budget, fixed, decimals, units),
       manual_amount: '',
       is_override: false,
     }));
@@ -160,7 +166,7 @@ export default function CuotasPage() {
 
   const totalQuota = useMemo(() => {
     return quotaRows.reduce((s, r) => {
-      const val = r.is_override ? (parseFloat(r.manual_amount) || 0) : r.computed_amount;
+      const val = r.is_override && r.manual_amount !== '' ? (parseFloat(r.manual_amount) || 0) : r.computed_amount;
       return s + val;
     }, 0);
   }, [quotaRows]);
@@ -233,7 +239,7 @@ export default function CuotasPage() {
 
       if (calcMethod === 'manual' || quotaRows.some(r => r.is_override)) {
         const linesToInsert = quotaRows
-          .filter(r => r.is_override)
+          .filter(r => r.is_override && r.manual_amount !== '')
           .map(r => ({
             organization_id: activeOrg.id,
             admin_quota_id: quotaId,
@@ -363,7 +369,7 @@ export default function CuotasPage() {
                 <Button variant="outline" onClick={regenerateRows} disabled={units.length === 0}>
                   <Table className="w-4 h-4" /> Generar / Recalcular
                 </Button>
-                {existingQuota && <Badge variant="blue">Configuración existente (registro activo)</Badge>}
+                {existingQuota && <Badge variant="blue">Configuración existente (registro activo cargado)</Badge>}
               </div>
             </div>
           </Card>
@@ -408,7 +414,7 @@ export default function CuotasPage() {
                   </tr></thead>
                   <tbody className="divide-y divide-gray-100">
                     {quotaRows.map((row, idx) => {
-                      const effectiveValue = row.is_override ? (parseFloat(row.manual_amount) || 0) : row.computed_amount;
+                      const effectiveValue = row.is_override && row.manual_amount !== '' ? (parseFloat(row.manual_amount) || 0) : row.computed_amount;
                       return (
                         <tr key={row.unit_id} className="hover:bg-gray-50">
                           <td className="px-6 py-3 text-sm text-gray-700">{row.tower}</td>
@@ -427,7 +433,7 @@ export default function CuotasPage() {
                             </td>
                           ) : (
                             <td className="px-6 py-3 text-right">
-                              {row.is_override ? (
+                              {row.is_override && row.manual_amount !== '' ? (
                                 <span className="text-sm font-medium text-blue-600">{formatCOP(parseFloat(row.manual_amount) || 0)}</span>
                               ) : (
                                 <span className="text-sm text-gray-900">{formatCOP(effectiveValue)}</span>
