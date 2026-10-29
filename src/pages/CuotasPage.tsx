@@ -46,32 +46,12 @@ export default function CuotasPage() {
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  useEffect(() => { if (activeOrg) loadInitial(); }, [activeOrg, loadInitial]);
-
-  const loadInitial = useCallback(async () => {
-    if (!activeOrg) return;
-    setLoading(true);
-    const [{ data: periodData }, { data: conceptData }, { data: unitData }] = await Promise.all([
-      supabase.from('revenue_periods').select('*').eq('organization_id', activeOrg.id).order('start_date', { ascending: false }),
-      supabase.from('billing_concepts').select('*').eq('organization_id', activeOrg.id).eq('is_active', true).order('is_default', { ascending: false }).order('name'),
-      supabase.from('units').select('*').eq('organization_id', activeOrg.id).eq('is_active', true).order('tower').order('unit_label'),
-    ]);
-    const pList = periodData || [];
-    const cList = conceptData || [];
-    setPeriods(pList);
-    setConcepts(cList);
-    setUnits(unitData || []);
-    const defaultConcept = cList.find(c => c.is_default);
-    setSelectedConceptId(defaultConcept?.id || cList[0]?.id || '');
-    if (pList.length > 0) setSelectedPeriodId(pList[0].id);
-    setLoading(false);
-  }, [activeOrg]);
-
+  // Declaración previa de loadQuotaRows para evitar conflictos de inicialización
   const loadQuotaRows = useCallback((quota: AdminQuota, unitList: Unit[]) => {
     const lines = quota.admin_quota_lines || [];
     const rows: QuotaRow[] = unitList.map(u => {
       const line = lines.find(l => l.unit_id === u.id);
-      const computed = 0; // se recalcula mediante computeAmount si es necesario
+      const computed = 0;
       return {
         unit_id: u.id,
         unit_label: u.unit_label,
@@ -117,6 +97,27 @@ export default function CuotasPage() {
     setMsg('');
     setValidationErrors([]);
   }, [activeOrg, selectedPeriodId, selectedConceptId, units, loadQuotaRows]);
+
+  const loadInitial = useCallback(async () => {
+    if (!activeOrg) return;
+    setLoading(true);
+    const [{ data: periodData }, { data: conceptData }, { data: unitData }] = await Promise.all([
+      supabase.from('revenue_periods').select('*').eq('organization_id', activeOrg.id).order('start_date', { ascending: false }),
+      supabase.from('billing_concepts').select('*').eq('organization_id', activeOrg.id).eq('is_active', true).order('is_default', { ascending: false }).order('name'),
+      supabase.from('units').select('*').eq('organization_id', activeOrg.id).eq('is_active', true).order('tower').order('unit_label'),
+    ]);
+    const pList = periodData || [];
+    const cList = conceptData || [];
+    setPeriods(pList);
+    setConcepts(cList);
+    setUnits(unitData || []);
+    const defaultConcept = cList.find(c => c.is_default);
+    setSelectedConceptId(defaultConcept?.id || cList[0]?.id || '');
+    if (pList.length > 0) setSelectedPeriodId(pList[0].id);
+    setLoading(false);
+  }, [activeOrg]);
+
+  useEffect(() => { if (activeOrg) loadInitial(); }, [activeOrg, loadInitial]);
 
   useEffect(() => { if (selectedPeriodId && selectedConceptId && units.length > 0) loadExistingQuota(); }, [selectedPeriodId, selectedConceptId, units, loadExistingQuota]);
 
