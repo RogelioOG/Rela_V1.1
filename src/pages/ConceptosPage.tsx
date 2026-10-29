@@ -394,3 +394,115 @@ export default function ConceptosPage() {
               <Input label="Descripción" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Descripción opcional del concepto" />
             </div>
           </div>
+
+          <div>
+            <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><BookOpen className="w-4 h-4" /> Clasificación Contable</h3>
+            <div className="grid grid-cols-1 gap-4">
+              <Select label="Clasificación de Cuenta" value={form.account_class} onChange={(e) => setForm({ ...form, account_class: e.target.value, income_account_id: '', counterpart_account_id: '', third_account_id: '' })}>
+                <option value="real">Cuentas Reales (Clases 1-6 — PUC/NIIF)</option>
+                <option value="orden">Cuentas de Orden (Clases 8 y 9)</option>
+              </Select>
+              <p className="text-xs text-gray-500 -mt-2">
+                {form.account_class === 'real'
+                  ? 'Cuentas que afectan el balance: Activos, Pasivos, Patrimonio, Ingresos, Gastos y Costos.'
+                  : 'Cuentas de control y memo que no afectan el balance general.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Select label="Cuenta de Ingreso / Orden" value={form.income_account_id} onChange={(e) => setForm({ ...form, income_account_id: e.target.value })}>
+              <option value="">— Seleccionar —</option>
+              {filteredAccounts(form.account_class).map(a => (
+                <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
+              ))}
+            </Select>
+            <Select label="Cuenta Contrapartida (Contra-cuenta)" value={form.counterpart_account_id} onChange={(e) => setForm({ ...form, counterpart_account_id: e.target.value })}>
+              <option value="">— Seleccionar —</option>
+              {filteredAccounts(form.account_class).map(a => (
+                <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
+              ))}
+            </Select>
+          </div>
+
+          {/* CORRECCIÓN: La tercera cuenta contable aparece EXCLUSIVAMENTE cuando la clasificación es 'orden' */}
+          {form.account_class === 'orden' && (
+            <div className="rounded-lg bg-purple-50 border border-purple-200 px-4 py-4 space-y-3">
+              <p className="text-sm font-semibold text-purple-900">Tercera Cuenta Contable (Automatización)</p>
+              <Select label="Tercera Cuenta Contable" value={form.third_account_id} onChange={(e) => setForm({ ...form, third_account_id: e.target.value })}>
+                <option value="">— Seleccionar —</option>
+                {accounts.map(a => (
+                  <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
+                ))}
+              </Select>
+            </div>
+          )}
+
+          {form.income_account_id && form.counterpart_account_id && (
+            <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3">
+              <p className="text-xs text-gray-600">
+                <strong>Flujo contable:</strong> Al registrar un cobro de este concepto, se debitará la cuenta contrapartida y se acreditará la cuenta de ingreso. Las cuentas de orden se registran como movimiento de control sin afectar el balance.
+              </p>
+            </div>
+          )}
+
+          {!editing?.is_late_interest && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
+                <input type="checkbox" checked={form.causa_intereses} onChange={(e) => setForm({ ...form, causa_intereses: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <div>
+                  <span className="text-sm font-medium text-gray-900">Causa Intereses de Mora</span>
+                  <p className="text-xs text-gray-500">Genera interés sobre saldos vencidos de este concepto.</p>
+                </div>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
+                <input type="checkbox" checked={form.maneja_descuento} onChange={(e) => setForm({ ...form, maneja_descuento: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <div>
+                  <span className="text-sm font-medium text-gray-900">Maneja Descuento</span>
+                  <p className="text-xs text-gray-500">Aplica descuento por pronto pago en este concepto.</p>
+                </div>
+              </label>
+            </div>
+          )}
+
+          {!editing?.is_late_interest && form.maneja_descuento && (
+            <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-4 space-y-3">
+              <p className="text-sm font-semibold text-green-800">Cuentas Contables para Descuentos</p>
+              <p className="text-xs text-green-700">Parametrice las cuentas exclusivas para el registro de descuentos por pronto pago de este concepto.</p>
+              <Select label="Cuenta de Descuento" value={form.discount_income_account_id} onChange={(e) => setForm({ ...form, discount_income_account_id: e.target.value })}>
+                <option value="">— Seleccionar —</option>
+                {filteredAccounts(form.account_class).map(a => (
+                  <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
+                ))}
+              </Select>
+            </div>
+          )}
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+            <span className="text-sm text-gray-700">Concepto activo</span>
+          </label>
+
+          {error && <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3"><p className="text-sm text-red-700">{error}</p></div>}
+          <div className="flex justify-end gap-3 pt-2">
+            <Button type="button" variant="outline" onClick={() => setModalOpen(false)}>Cancelar</Button>
+            <Button type="submit" disabled={saving}>{saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Guardando...</> : 'Guardar'}</Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal open={!!deleteTarget} onClose={() => setDeleteTarget(null)} title="Eliminar Concepto" size="sm">
+        <p className="text-sm text-gray-600 mb-4">
+          ¿Eliminar el concepto <strong>{deleteTarget?.name}</strong>?
+          {deleteTarget && !deleteTarget.is_late_interest && (
+            <span className="block mt-2 text-amber-600">Se eliminará también su sub-concepto de intereses de mora asociado.</span>
+          )}
+        </p>
+        <div className="flex justify-end gap-3">
+          <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancelar</Button>
+          <Button variant="danger" onClick={handleDelete}>Sí, Eliminar</Button>
+        </div>
+      </Modal>
+    </div>
+  );
+}
