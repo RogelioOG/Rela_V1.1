@@ -74,7 +74,7 @@ function buildPdfHtml(
   org: Organization | null,
   billingPeriod: string,
   agreements: PaymentAgreement[],
-  invoiceNumber: string = 'CC-0001',
+  invoiceNumber: string = 'CC-0061',
 ): string {
   const orgName = org?.name || 'Organización';
   const orgAddress = org?.address || '';
@@ -207,12 +207,24 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
   const [finalizing, setFinalizing] = useState(false);
   const [generatedInvoices, setGeneratedInvoices] = useState<{ id: string; invoiceNumber: string; row: LiquidationRow }[]>([]);
   const [deletingBatch, setDeletingBatch] = useState(false);
+  const [currentNextSeq, setCurrentNextSeq] = useState<number>(1);
 
-  // Hidratación y persistencia: Verifica si ya existe facturación previa para este periodo en Supabase
+  // Hidratación y persistencia: Verifica si ya existe facturación previa y consulta el consecutivo real del sistema
   useEffect(() => {
     async function checkExistingPeriodState() {
       if (!org || !billingPeriod) return;
       try {
+        // Consultar el consecutivo real configurado en accounting_documents para 'CC'
+        const { data: docConfig } = await supabase
+          .from('accounting_documents')
+          .select('next_consecutive')
+          .eq('organization_id', org.id)
+          .eq('prefix', 'CC')
+          .single();
+
+        const baseSeq = docConfig?.next_consecutive || 1;
+        setCurrentNextSeq(baseSeq);
+
         const { data: existingDues } = await supabase
           .from('dues')
           .select('*')
@@ -222,7 +234,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (existingDues && existingDues.length > 0) {
           const restoredInvoices = liquidation.map((row, idx) => ({
             id: row.rowId || row.due.id,
-            invoiceNumber: `CC-${String(idx + 1).padStart(4, '0')}`,
+            invoiceNumber: `CC-${String(baseSeq + idx).padStart(4, '0')}`,
             row,
           }));
           setGeneratedInvoices(restoredInvoices);
@@ -277,11 +289,11 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
   function openPreviewPdf() {
     if (!previewRow) return;
-    const html = buildPdfHtml(previewRow, template, org, billingPeriod, agreements, 'CC-0001');
+    const html = buildPdfHtml(previewRow, template, org, billingPeriod, agreements, `CC-${String(currentNextSeq).padStart(4, '0')}`);
     openPrintWindow(html);
   }
 
-  function downloadSingle(row: LiquidationRow, invNum = 'CC-0001') {
+  function downloadSingle(row: LiquidationRow, invNum = `CC-${String(currentNextSeq).padStart(4, '0')}`) {
     const html = buildPdfHtml(row, template, org, billingPeriod, agreements, invNum);
     openPrintWindow(html);
   }
@@ -292,7 +304,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
       : liquidation.filter(r => selected.has(r.rowId || r.due.id));
     if (rows.length === 0) { setError('Seleccione al menos una cuenta para descargar el PDF consolidado.'); return; }
     const pages = rows.map((r, idx) => {
-      const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(idx + 1).padStart(4, '0')}`;
+      const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
       return buildPdfHtml(r, template, org, billingPeriod, agreements, invNum);
     }).join('<div style="page-break-after:always;"></div>');
     const html = `<html><head><meta charset="utf-8"><title>Cuentas de Cobro Consolidadas - ${billingPeriod}</title></head><body>${pages}</body></html>`;
@@ -302,7 +314,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
   function downloadSelectedIndividual() {
     const targets = isFinalized
       ? generatedInvoices.filter(i => selected.has(i.id))
-      : liquidation.filter(r => selected.has(r.rowId || r.due.id)).map((r, idx) => ({ id: r.rowId, invoiceNumber: `CC-${String(idx + 1).padStart(4, '0')}`, row: r }));
+      : liquidation.filter(r => selected.has(r.rowId || r.due.id)).map((r, idx) => ({ id: r.rowId, invoiceNumber: `CC-${String(currentNextSeq + idx).padStart(4, '0')}`, row: r }));
     if (targets.length === 0) { setError('Seleccione al menos una cuenta para descargar.'); return; }
     targets.forEach((t, idx) => {
       setTimeout(() => {
@@ -312,7 +324,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     });
   }
 
-  // Finalizar Proceso: Asocia fecha del periodo contable, cuentas parametrizadas y terceros reales
+  // Finalizar Proceso: Toma estrictamente el consecutivo actual del sistema y lo incrementa
   async function handleFinalizeProcess() {
     if (!org) return;
     setFinalizing(true);
@@ -327,6 +339,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         ? lastDayDate.toISOString().slice(0, 10) 
         : new Date().toISOString().slice(0, 10);
 
+      // 1. Consultar el consecutivo actual parametrizado en la base de datos
       const { data: docConfig } = await supabase
         .from('accounting_documents')
         .select('*')
@@ -334,7 +347,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         .eq('prefix', 'CC')
         .single();
 
-      let nextSeq = docConfig?.next_consecutive || 1;
+      let nextSeq = docConfig?.next_consecutive || 61; // Respeta el valor parametrizado en el sistema[cite: 3]
+      setCurrentNextSeq(nextSeq);
 
       const [{ data: accountsData }, { data: conceptsData }, { data: thirdPartiesData }] = await Promise.all([
         supabase.from('accounts').select('*').eq('organization_id', org.id),
@@ -358,7 +372,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
       for (let i = 0; i < liquidation.length; i++) {
         const row = liquidation[i];
-        const invoiceNumber = `CC-${String(nextSeq + i).padStart(4, '0')}`;
+        const invoiceNumber = `CC-${String(nextSeq + i).padStart(4, '0')}`; // Sigue estrictamente la secuencia parametrizada[cite: 3]
         const rowId = row.rowId || 'inv-' + Math.random().toString(36).substring(2, 9);
 
         batchInvoices.push({
@@ -449,14 +463,13 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     setFinalizing(false);
   }
 
-  // Eliminar Facturación en Bloque: Reversión completa, asientos y liberación automática de consecutivos
+  // Eliminar Facturación en Bloque: Reversión y liberación exacta de consecutivos
   async function handleDeleteBatch() {
     if (!confirm('¿Está seguro de eliminar toda la facturación de este periodo en bloque? Se reversarán los asientos contables y se liberarán los consecutivos.')) return;
     setDeletingBatch(true);
     setError('');
     try {
       if (org) {
-        // 1. Contar cuántas cuentas de cobro/dues se van a eliminar para liberar esos números exactamente
         const { data: duesToDelete } = await supabase
           .from('dues')
           .select('id')
@@ -465,10 +478,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
         const countToDelete = duesToDelete?.length || 0;
 
-        // 2. Eliminar registros de dues
         await supabase.from('dues').delete().eq('organization_id', org.id).eq('period', billingPeriod);
         
-        // 3. Eliminar asientos contables vinculados a tipo 'CC'
         const { data: entriesToDelete } = await supabase
           .from('journal_entries')
           .select('id')
@@ -481,7 +492,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
           await supabase.from('journal_entries').delete().in('id', ids);
         }
 
-        // 4. LIBERAR CONSECUTIVOS: Reintegrar los números al contador global del documento 'CC'
         if (countToDelete > 0) {
           const { data: docConfig } = await supabase
             .from('accounting_documents')
@@ -495,6 +505,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             await supabase.from('accounting_documents')
               .update({ next_consecutive: newConsecutive })
               .eq('id', docConfig.id);
+            setCurrentNextSeq(newConsecutive);
           }
         }
       }
@@ -545,7 +556,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             </div>
             <div>
               <h3 className="text-base font-bold text-green-900">¡Facturación Generada y Contabilizada con Éxito!</h3>
-              <p className="text-sm text-green-700">Se han emitido {generatedInvoices.length} cuentas de cobro consecutivas (CC-0001 en adelante) con fecha del periodo {billingPeriod} y registradas en Asientos Contables.</p>
+              <p className="text-sm text-green-700">Se han emitido {generatedInvoices.length} cuentas de cobro consecutivas (desde CC-{String(currentNextSeq).padStart(4, '0')}) con fecha del periodo {billingPeriod}.</p>
             </div>
           </div>
           <Button variant="danger" size="sm" onClick={handleDeleteBatch} disabled={deletingBatch}>
@@ -628,7 +639,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               <tbody className="divide-y divide-gray-100">
                 {liquidation.map((row, idx) => {
                   const rowId = row.rowId || row.due.id;
-                  const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(idx + 1).padStart(4, '0')}`;
+                  const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
                   return (
                     <tr key={rowId} className="hover:bg-gray-50">
                       <td className="px-4 py-3">
