@@ -46,7 +46,7 @@ export default function CuotasPage() {
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // Carga estricta de la configuración guardada existente en la tabla sin recalcular por cambio de opción
+  // Carga estricta de la configuración guardada existente en la tabla
   const loadQuotaRowsFromSaved = useCallback((quota: AdminQuota | null, unitList: Unit[]) => {
     if (unitList.length === 0) return;
     const lines = quota?.admin_quota_lines || [];
@@ -139,7 +139,27 @@ export default function CuotasPage() {
     return 0;
   }
 
-  // La tabla solo se recalcula cuando el usuario oprime intencionalmente el botón Generar / Recalcular
+  // Manejo del cambio de método: si seleccionan manual, inicializa celdas vacías/editables; si es fijo o presupuesto, mantiene los datos guardados hasta dar en generar
+  function handleMethodChange(newMethod: 'presupuesto' | 'fijo' | 'manual') {
+    setCalcMethod(newMethod);
+    setValidationErrors([]);
+    if (newMethod === 'manual') {
+      const rows: QuotaRow[] = units.map(u => ({
+        unit_id: u.id,
+        unit_label: u.unit_label,
+        tower: u.tower,
+        coefficient: u.coefficient,
+        computed_amount: 0,
+        manual_amount: '',
+        is_override: true,
+      }));
+      setQuotaRows(rows);
+    } else {
+      loadQuotaRowsFromSaved(existingQuota, units);
+    }
+  }
+
+  // La tabla solo se recalcula cuando se presiona explícitamente el botón Generar / Recalcular
   function regenerateRows() {
     const rows: QuotaRow[] = units.map(u => ({
       unit_id: u.id,
@@ -164,10 +184,10 @@ export default function CuotasPage() {
 
   const totalQuota = useMemo(() => {
     return quotaRows.reduce((s, r) => {
-      const val = r.is_override && r.manual_amount !== '' ? (parseFloat(r.manual_amount) || 0) : r.computed_amount;
+      const val = calcMethod === 'manual' || r.is_override ? (parseFloat(r.manual_amount) || 0) : r.computed_amount;
       return s + val;
     }, 0);
-  }, [quotaRows]);
+  }, [quotaRows, calcMethod]);
 
   function validateBeforeSave(): string[] {
     const errors: string[] = [];
@@ -184,7 +204,7 @@ export default function CuotasPage() {
       errors.push('El valor fijo por unidad debe ser mayor que cero.');
     }
     if (calcMethod === 'manual') {
-      const missing = quotaRows.filter(r => !r.is_override || (parseFloat(r.manual_amount) || 0) <= 0);
+      const missing = quotaRows.filter(r => !r.manual_amount || (parseFloat(r.manual_amount) || 0) <= 0);
       if (missing.length > 0) {
         errors.push(`Faltan valores para ${missing.length} unidad(es). Todas deben tener un valor asignado.`);
       }
@@ -235,12 +255,11 @@ export default function CuotasPage() {
       if (insertErr) throw insertErr;
       const quotaId = created.id;
 
-      // Guardamos tanto los valores calculados vigentes como los manuales en admin_quota_lines
       const linesToInsert = quotaRows.map(r => ({
         organization_id: activeOrg.id,
         admin_quota_id: quotaId,
         unit_id: r.unit_id,
-        amount: r.is_override && r.manual_amount !== '' ? (parseFloat(r.manual_amount) || 0) : r.computed_amount,
+        amount: calcMethod === 'manual' ? (parseFloat(r.manual_amount) || 0) : r.computed_amount,
       }));
 
       if (linesToInsert.length > 0) {
@@ -326,7 +345,7 @@ export default function CuotasPage() {
                 {(['fijo', 'presupuesto', 'manual'] as const).map(method => (
                   <button
                     key={method}
-                    onClick={() => { setCalcMethod(method); setValidationErrors([]); }}
+                    onClick={() => handleMethodChange(method)}
                     className={`p-4 rounded-xl border-2 text-left transition-all ${calcMethod === method ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}
                   >
                     <div className="flex items-center gap-2 mb-1">
@@ -362,9 +381,11 @@ export default function CuotasPage() {
               )}
 
               <div className="flex items-center gap-3">
-                <Button variant="outline" onClick={regenerateRows} disabled={units.length === 0}>
-                  <Table className="w-4 h-4" /> Generar / Recalcular
-                </Button>
+                {calcMethod !== 'manual' && (
+                  <Button variant="outline" onClick={regenerateRows} disabled={units.length === 0}>
+                    <Table className="w-4 h-4" /> Generar / Recalcular
+                  </Button>
+                )}
                 {existingQuota && <Badge variant="blue">Configuración existente cargada en tabla</Badge>}
               </div>
             </div>
@@ -385,7 +406,7 @@ export default function CuotasPage() {
             </div>
           )}
 
-          {/* Quota Table - Muestra siempre la configuración guardada sin recalcular sola */}
+          {/* Quota Table */}
           <Card>
             <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2"><Home className="w-5 h-5 text-blue-600" /> Cuotas por Unidad</h2>
@@ -403,20 +424,19 @@ export default function CuotasPage() {
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Torre</th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Unidad</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden sm:table-cell">Coeficiente</th>
-                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Valor Configurado / Guardado</th>
-                  {calcMethod === 'manual' && <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Valor Manual</th>}
+                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">
+                    {calcMethod === 'manual' ? 'Valor Manual por Unidad' : 'Valor Configurado / Guardado'}
+                  </th>
                 </tr></thead>
                 <tbody className="divide-y divide-gray-100">
                   {quotaRows.map((row, idx) => {
-                    const effectiveValue = row.computed_amount;
                     return (
                       <tr key={row.unit_id} className="hover:bg-gray-50">
                         <td className="px-6 py-3 text-sm text-gray-700">{row.tower}</td>
                         <td className="px-6 py-3 text-sm font-medium text-gray-900">{row.unit_label}</td>
                         <td className="px-6 py-3 text-sm text-gray-500 text-right hidden sm:table-cell">{row.coefficient.toFixed(4)}</td>
-                        <td className="px-6 py-3 text-sm text-gray-900 text-right font-medium">{formatCOP(effectiveValue)}</td>
-                        {calcMethod === 'manual' && (
-                          <td className="px-6 py-3 text-right">
+                        <td className="px-6 py-3 text-right">
+                          {calcMethod === 'manual' ? (
                             <input
                               type="number"
                               value={row.manual_amount}
@@ -424,8 +444,10 @@ export default function CuotasPage() {
                               placeholder="0"
                               className="w-32 rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
-                          </td>
-                        )}
+                          ) : (
+                            <span className="text-sm text-gray-900 font-medium">{formatCOP(row.computed_amount)}</span>
+                          )}
+                        </td>
                       </tr>
                     );
                   })}
@@ -433,7 +455,6 @@ export default function CuotasPage() {
                 <tfoot><tr className="border-t-2 border-gray-200 bg-gray-50">
                   <td colSpan={3} className="px-6 py-3 text-sm font-semibold text-gray-900 text-right">Total Cuotas:</td>
                   <td className="px-6 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(totalQuota)}</td>
-                  {calcMethod === 'manual' && <td />}
                 </tr></tfoot>
               </table>
             </div>
