@@ -75,7 +75,7 @@ export default function CalendarioPage() {
     setLoading(false);
   }, [activeOrg]);
 
-  // Calcula automáticamente fechas y nombre fiscalmente en orden estricto
+  // Calcula automáticamente fechas y nombre según el mes seleccionado sin alterar manualmente el año fiscal
   function updatePeriodDatesAndName(monthStr: string, yearStr: string, currentForm: FormState) {
     const m = parseInt(monthStr);
     const y = parseInt(yearStr);
@@ -98,20 +98,19 @@ export default function CalendarioPage() {
   function openCreate() {
     setEditing(null);
     
-    // Buscar el último periodo creado para sugerir de forma inteligente el siguiente mes consecutivo en orden
+    // Calcula el mes y año consecutivo basándose únicamente en la secuencia del último periodo existente
     let nextMonth = 1;
     let nextYear = 2026;
 
     if (items.length > 0) {
-      // Tomamos el periodo más reciente registrado
       const latest = items[0];
       if (latest.work_month != null && latest.work_year != null) {
         if (latest.work_month === 12) {
           nextMonth = 1;
-          nextYear = latest.work_year + 1; // Si era diciembre, avanza al siguiente año fiscal en orden
+          nextYear = latest.work_year + 1; // Transición automática al siguiente año fiscal al cruzar Diciembre -> Enero
         } else {
-          nextMonth = latest.work_month + 1; // Mes siguiente consecutivo (Ej: Sep -> Oct)
-          nextYear = latest.work_year;       // Mantiene el año fiscal actual de trabajo
+          nextMonth = latest.work_month + 1; // Siguiente mes consecutivo
+          nextYear = latest.work_year;       // Hereda el año fiscal de trabajo actual
         }
       }
     }
@@ -342,18 +341,11 @@ export default function CalendarioPage() {
         )}
       </Card>
 
-      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editing ? 'Editar Periodo' : 'Nuevo Periodo (Siguiente Consecutivo)'} size="md">
+      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editing ? 'Editar Periodo' : 'Nuevo Periodo de Trabajo'} size="md">
         <form onSubmit={handleSubmit} className="space-y-5">
-          <div className="space-y-4">
-            <Input label="Nombre del Periodo (Automático)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required placeholder="Ej: Octubre 2026" />
-            <div className="grid grid-cols-2 gap-4">
-              <Input label="Fecha de Inicio *" type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} required />
-              <Input label="Fecha de Fin *" type="date" value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} required />
-            </div>
-          </div>
-
+          {/* Formulario limpio sin la sección ni subtítulos redundantes de "Datos del Periodo" */}
           <div>
-            <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><CalendarDays className="w-4 h-4" /> Periodo de Trabajo (Secuencia Consecutiva y Año Fiscal)</h3>
+            <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><CalendarDays className="w-4 h-4" /> Periodo de Trabajo (Secuencia Consecutiva)</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Select 
                 label="Mes Siguiente Consecutivo *" 
@@ -362,19 +354,22 @@ export default function CalendarioPage() {
               >
                 {MONTHS.map(m => <option key={m.value} value={String(m.value)}>{m.label}</option>)}
               </Select>
+
+              {/* El año fiscal se hereda automáticamente y queda bloqueado para edición manual */}
               <Input 
-                label="Año Fiscal de Trabajo *" 
+                label="Año Fiscal de Trabajo (Protegido)" 
                 type="number" 
-                min="2000" 
-                max="2100" 
                 value={form.work_year} 
-                onChange={(e) => setForm(updatePeriodDatesAndName(form.work_month, e.target.value, form))} 
-                placeholder="Ej: 2026" 
+                disabled
+                className="bg-gray-100 text-gray-600 cursor-not-allowed font-semibold"
               />
             </div>
-            <p className="text-xs text-gray-500 mt-1.5">El sistema sugiere automáticamente el mes consecutivo en orden estricto, respetando el año fiscal sin amarrarse a la fecha del sistema.</p>
-            
-            <label className="flex items-center gap-2 cursor-pointer mt-3 rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
+
+            <p className="text-xs text-gray-500 mt-2">
+              El sistema mantiene en orden la secuencia mensual. Si se pasa de Diciembre a Enero, el año fiscal se incrementa automáticamente.
+            </p>
+
+            <label className="flex items-center gap-2 cursor-pointer mt-4 rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
               <input
                 type="checkbox"
                 checked={form.is_work_period_active}
@@ -409,7 +404,7 @@ export default function CalendarioPage() {
           )}
         </p>
         <div className="flex justify-end gap-3">
-          <Button variant="outline" onClick={() => deleteTarget && handleDelete()}>Cancelar</Button>
+          <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancelar</Button>
           <Button variant="danger" onClick={handleDelete}>Sí, Eliminar</Button>
         </div>
       </Modal>
