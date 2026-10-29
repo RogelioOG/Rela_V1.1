@@ -52,7 +52,7 @@ export default function ConceptosPage() {
     setLoading(true);
     const { data } = await supabase
       .from('billing_concepts')
-      .select('*, income_account:accounts!income_account_id(*), counterpart_account:accounts!counterpart_account_id(*), parent_concept:billing_concepts!parent_concept_id(*), discount_income_account:accounts!discount_income_account_id(*), discount_counterpart_account:accounts!discount_counterpart_account_id(*)')
+      .select('*, income_account:accounts!income_account_id(*), counterpart_account:accounts!counterpart_account_id(*), third_account:accounts!third_account_id(*), parent_concept:billing_concepts!parent_concept_id(*), discount_income_account:accounts!discount_income_account_id(*), discount_counterpart_account:accounts!discount_counterpart_account_id(*)')
       .eq('organization_id', activeOrg.id)
       .order('is_late_interest', { ascending: true })
       .order('name', { ascending: true });
@@ -115,7 +115,6 @@ export default function ConceptosPage() {
       return;
     }
 
-    // CORRECCIÓN: Incluir third_account_id en el payload cuando es cuenta de orden
     const payload: any = {
       organization_id: activeOrg.id,
       code: form.code.toUpperCase(),
