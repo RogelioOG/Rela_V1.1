@@ -46,14 +46,32 @@ export default function CuotasPage() {
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // Carga estricta de la configuración guardada existente en la tabla
+  // Función de cálculo matemático para cuando el usuario decida generar/recalcular
+  const computeAmountForUnit = useCallback((coefficient: number, method: string, budget: number, fixed: number, decimals: number, unitList: Unit[]) => {
+    const factor = Math.pow(10, decimals);
+    if (method === 'presupuesto') {
+      const totalCoeff = unitList.reduce((s, u) => s + u.coefficient, 0) || 1;
+      return Math.round((budget * coefficient / totalCoeff) * factor) / factor;
+    }
+    if (method === 'fijo') {
+      return Math.round(fixed * factor) / factor;
+    }
+    return 0;
+  }, []);
+
+  // Carga estricta y correcta de los valores ya guardados en la base de datos para mostrarlos en la tabla
   const loadQuotaRowsFromSaved = useCallback((quota: AdminQuota | null, unitList: Unit[]) => {
     if (unitList.length === 0) return;
     const lines = quota?.admin_quota_lines || [];
+    const method = quota?.calculation_method || 'fijo';
+    const budget = quota?.budget_amount || 0;
+    const fixed = quota?.fixed_amount || 0;
+    const decimals = quota?.rounding_decimals || 2;
 
     const rows: QuotaRow[] = unitList.map(u => {
       const line = lines.find(l => l.unit_id === u.id);
-      const savedAmount = line ? line.amount : 0;
+      // Si hay línea guardada usa su monto; si no, calcula según el método activo o coeficiente
+      const savedAmount = line ? line.amount : computeAmountForUnit(u.coefficient, method, budget, fixed, decimals, unitList);
       return {
         unit_id: u.id,
         unit_label: u.unit_label,
@@ -65,7 +83,7 @@ export default function CuotasPage() {
       };
     });
     setQuotaRows(rows);
-  }, []);
+  }, [computeAmountForUnit]);
 
   const loadExistingQuota = useCallback(async () => {
     if (!activeOrg || !selectedPeriodId || !selectedConceptId || units.length === 0) return;
@@ -124,49 +142,40 @@ export default function CuotasPage() {
 
   useEffect(() => { if (selectedPeriodId && selectedConceptId && units.length > 0) loadExistingQuota(); }, [selectedPeriodId, selectedConceptId, units, loadExistingQuota]);
 
-  function computeAmount(coefficient: number): number {
-    const decimals = parseInt(roundingDecimals) || 2;
-    const factor = Math.pow(10, decimals);
-    if (calcMethod === 'presupuesto') {
-      const budget = parseFloat(budgetAmount) || 0;
-      const totalCoeff = units.reduce((s, u) => s + u.coefficient, 0) || 1;
-      return Math.round((budget * coefficient / totalCoeff) * factor) / factor;
-    }
-    if (calcMethod === 'fijo') {
-      const fixed = parseFloat(fixedAmount) || 0;
-      return Math.round(fixed * factor) / factor;
-    }
-    return 0;
-  }
-
-  // Manejo del cambio de método: si seleccionan manual, inicializa celdas vacías/editables; si es fijo o presupuesto, mantiene los datos guardados hasta dar en generar
   function handleMethodChange(newMethod: 'presupuesto' | 'fijo' | 'manual') {
     setCalcMethod(newMethod);
     setValidationErrors([]);
     if (newMethod === 'manual') {
-      const rows: QuotaRow[] = units.map(u => ({
-        unit_id: u.id,
-        unit_label: u.unit_label,
-        tower: u.tower,
-        coefficient: u.coefficient,
-        computed_amount: 0,
-        manual_amount: '',
-        is_override: true,
-      }));
+      const rows: QuotaRow[] = units.map(u => {
+        const existingLine = existingQuota?.admin_quota_lines?.find(l => l.unit_id === u.id);
+        return {
+          unit_id: u.id,
+          unit_label: u.unit_label,
+          tower: u.tower,
+          coefficient: u.coefficient,
+          computed_amount: 0,
+          manual_amount: existingLine ? String(existingLine.amount) : '',
+          is_override: true,
+        };
+      });
       setQuotaRows(rows);
     } else {
       loadQuotaRowsFromSaved(existingQuota, units);
     }
   }
 
-  // La tabla solo se recalcula cuando se presiona explícitamente el botón Generar / Recalcular
+  // La tabla solo se recalcula de forma nueva cuando se oprime explícitamente el botón Generar / Recalcular
   function regenerateRows() {
+    const decimals = parseInt(roundingDecimals) || 2;
+    const budget = parseFloat(budgetAmount) || 0;
+    const fixed = parseFloat(fixedAmount) || 0;
+
     const rows: QuotaRow[] = units.map(u => ({
       unit_id: u.id,
       unit_label: u.unit_label,
       tower: u.tower,
       coefficient: u.coefficient,
-      computed_amount: computeAmount(u.coefficient),
+      computed_amount: computeAmountForUnit(u.coefficient, calcMethod, budget, fixed, decimals, units),
       manual_amount: '',
       is_override: false,
     }));
@@ -184,7 +193,7 @@ export default function CuotasPage() {
 
   const totalQuota = useMemo(() => {
     return quotaRows.reduce((s, r) => {
-      const val = calcMethod === 'manual' || r.is_override ? (parseFloat(r.manual_amount) || 0) : r.computed_amount;
+      const val = calcMethod === 'manual' || r.is_override && r.manual_amount !== '' ? (parseFloat(r.manual_amount) || 0) : r.computed_amount;
       return s + val;
     }, 0);
   }, [quotaRows, calcMethod]);
