@@ -46,7 +46,6 @@ export default function CuotasPage() {
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // Función de cálculo matemático para cuando el usuario decida generar/recalcular
   const computeAmountForUnit = useCallback((coefficient: number, method: string, budget: number, fixed: number, decimals: number, unitList: Unit[]) => {
     const factor = Math.pow(10, decimals);
     if (method === 'presupuesto') {
@@ -59,7 +58,6 @@ export default function CuotasPage() {
     return 0;
   }, []);
 
-  // Carga estricta y correcta de los valores ya guardados en la base de datos para mostrarlos en la tabla
   const loadQuotaRowsFromSaved = useCallback((quota: AdminQuota | null, unitList: Unit[]) => {
     if (unitList.length === 0) return;
     const lines = quota?.admin_quota_lines || [];
@@ -70,7 +68,6 @@ export default function CuotasPage() {
 
     const rows: QuotaRow[] = unitList.map(u => {
       const line = lines.find(l => l.unit_id === u.id);
-      // Si hay línea guardada usa su monto; si no, calcula según el método activo o coeficiente
       const savedAmount = line ? line.amount : computeAmountForUnit(u.coefficient, method, budget, fixed, decimals, unitList);
       return {
         unit_id: u.id,
@@ -164,7 +161,6 @@ export default function CuotasPage() {
     }
   }
 
-  // La tabla solo se recalcula de forma nueva cuando se oprime explícitamente el botón Generar / Recalcular
   function regenerateRows() {
     const decimals = parseInt(roundingDecimals) || 2;
     const budget = parseFloat(budgetAmount) || 0;
@@ -193,7 +189,7 @@ export default function CuotasPage() {
 
   const totalQuota = useMemo(() => {
     return quotaRows.reduce((s, r) => {
-      const val = calcMethod === 'manual' || r.is_override && r.manual_amount !== '' ? (parseFloat(r.manual_amount) || 0) : r.computed_amount;
+      const val = calcMethod === 'manual' || (r.is_override && r.manual_amount !== '') ? (parseFloat(r.manual_amount) || 0) : r.computed_amount;
       return s + val;
     }, 0);
   }, [quotaRows, calcMethod]);
@@ -249,21 +245,34 @@ export default function CuotasPage() {
         is_active: true,
       };
 
+      let quotaId = '';
+
       if (existingQuota) {
-        await supabase
+        // Actualizamos el registro existente en lugar de insertar uno nuevo duplicado que viole la llave única
+        const { error: updateErr } = await supabase
           .from('admin_quotas')
-          .update({ is_active: false })
+          .update(payload)
           .eq('id', existingQuota.id);
+        if (updateErr) throw updateErr;
+        quotaId = existingQuota.id;
+
+        // Borramos las líneas anteriores para reemplazarlas por las nuevas
+        await supabase
+          .from('admin_quota_lines')
+          .delete()
+          .eq('admin_quota_id', quotaId);
+      } else {
+        // Si no existe, insertamos el nuevo
+        const { data: created, error: insertErr } = await supabase
+          .from('admin_quotas')
+          .insert(payload)
+          .select()
+          .single();
+        if (insertErr) throw insertErr;
+        quotaId = created.id;
       }
 
-      const { data: created, error: insertErr } = await supabase
-        .from('admin_quotas')
-        .insert(payload)
-        .select()
-        .single();
-      if (insertErr) throw insertErr;
-      const quotaId = created.id;
-
+      // Insertamos las líneas de cuotas correspondientes
       const linesToInsert = quotaRows.map(r => ({
         organization_id: activeOrg.id,
         admin_quota_id: quotaId,
@@ -272,7 +281,8 @@ export default function CuotasPage() {
       }));
 
       if (linesToInsert.length > 0) {
-        await supabase.from('admin_quota_lines').insert(linesToInsert);
+        const { error: linesErr } = await supabase.from('admin_quota_lines').insert(linesToInsert);
+        if (linesErr) throw linesErr;
       }
 
       setMsg('Cuotas de administración guardadas correctamente.');
@@ -538,7 +548,7 @@ export default function CuotasPage() {
           <div className="rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
             <p className="text-sm text-blue-800 flex items-start gap-2">
               <Layers className="w-4 h-4 mt-0.5 flex-shrink-0" />
-              Cada vez que guarda, el registro anterior se conserva en el historial como inactivo y se crea un nuevo registro activo. Puede restaurar cualquier configuración histórica si lo necesita[cite: 6].
+              Cada vez que guarda, el registro anterior se actualiza o se conserva correctamente en el historial[cite: 6].
             </p>
           </div>
         </div>
@@ -550,13 +560,13 @@ export default function CuotasPage() {
           Ya existe una configuración activa para este periodo y concepto.
         </p>
         <p className="text-sm text-gray-600 mb-4">
-          Al guardar, el registro actual se moverá al historial y se creará un nuevo registro activo con los nuevos valores. ¿Desea continuar?
+          Al guardar, se actualizarán los valores y las líneas de cuotas correspondientes. ¿Desea continuar?
         </p>
         <div className="flex justify-end gap-3">
           <Button variant="outline" onClick={() => setConfirmOpen(false)}>Cancelar</Button>
           <Button onClick={executeSave} disabled={saving}>
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            Sí, Guardar Nuevo
+            Sí, Guardar Cambios
           </Button>
         </div>
       </Modal>
