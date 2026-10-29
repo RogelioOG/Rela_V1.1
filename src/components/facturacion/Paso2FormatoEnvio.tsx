@@ -202,19 +202,16 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
   const [simModalOpen, setSimModalOpen] = useState(false);
   const [error, setError] = useState('');
 
-  // Control de estado post-facturación y persistencia automática
   const [isFinalized, setIsFinalized] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [generatedInvoices, setGeneratedInvoices] = useState<{ id: string; invoiceNumber: string; row: LiquidationRow }[]>([]);
   const [deletingBatch, setDeletingBatch] = useState(false);
   const [currentNextSeq, setCurrentNextSeq] = useState<number>(1);
 
-  // Hidratación y persistencia: Verifica si ya existe facturación previa y consulta el consecutivo real del sistema
   useEffect(() => {
     async function checkExistingPeriodState() {
       if (!org || !billingPeriod) return;
       try {
-        // Consultar el consecutivo real configurado en accounting_documents para 'CC'
         const { data: docConfig } = await supabase
           .from('accounting_documents')
           .select('next_consecutive')
@@ -324,7 +321,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     });
   }
 
-  // Finalizar Proceso: Toma estrictamente el consecutivo actual del sistema y lo incrementa
   async function handleFinalizeProcess() {
     if (!org) return;
     setFinalizing(true);
@@ -339,7 +335,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         ? lastDayDate.toISOString().slice(0, 10) 
         : new Date().toISOString().slice(0, 10);
 
-      // 1. Consultar el consecutivo actual parametrizado en la base de datos
       const { data: docConfig } = await supabase
         .from('accounting_documents')
         .select('*')
@@ -347,7 +342,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         .eq('prefix', 'CC')
         .single();
 
-      let nextSeq = docConfig?.next_consecutive || 61; // Respeta el valor parametrizado en el sistema[cite: 3]
+      let nextSeq = docConfig?.next_consecutive || 61;
       setCurrentNextSeq(nextSeq);
 
       const [{ data: accountsData }, { data: conceptsData }, { data: thirdPartiesData }] = await Promise.all([
@@ -372,7 +367,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
       for (let i = 0; i < liquidation.length; i++) {
         const row = liquidation[i];
-        const invoiceNumber = `CC-${String(nextSeq + i).padStart(4, '0')}`; // Sigue estrictamente la secuencia parametrizada[cite: 3]
+        const invoiceNumber = `CC-${String(nextSeq + i).padStart(4, '0')}`;
         const rowId = row.rowId || 'inv-' + Math.random().toString(36).substring(2, 9);
 
         batchInvoices.push({
@@ -412,6 +407,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (!jeErr && je && defaultReceivableAcc) {
           const linesToInsert = [];
 
+          // 1. Débito a cartera por el total neto de la factura (incluyendo intereses)
           linesToInsert.push({
             journal_entry_id: je.id,
             account_id: defaultReceivableAcc.id,
@@ -420,6 +416,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             third_party_id: assignedThirdPartyId,
           });
 
+          // 2. Créditos por conceptos base de cuotas y novedades del periodo
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               const specificAccId = conceptAccountMap.get(cl.conceptId) || defaultIncomeAcc?.id;
@@ -433,7 +430,23 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                 });
               }
             }
-          } else {
+          }
+
+          // 3. Crédito específico por Intereses de Mora calculados
+          if (row.interestAmount && row.interestAmount > 0) {
+            const interestAcc = accounts.find(a => a.code.startsWith('42') || a.name.toLowerCase().includes('interés')) || defaultIncomeAcc;
+            if (interestAcc) {
+              linesToInsert.push({
+                journal_entry_id: je.id,
+                account_id: interestAcc.id,
+                debit: 0,
+                credit: row.interestAmount,
+                third_party_id: assignedThirdPartyId,
+              });
+            }
+          }
+
+          if (linesToInsert.length === 1) {
             linesToInsert.push({
               journal_entry_id: je.id,
               account_id: defaultIncomeAcc?.id || defaultReceivableAcc.id,
@@ -463,7 +476,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     setFinalizing(false);
   }
 
-  // Eliminar Facturación en Bloque: Reversión y liberación exacta de consecutivos
   async function handleDeleteBatch() {
     if (!confirm('¿Está seguro de eliminar toda la facturación de este periodo en bloque? Se reversarán los asientos contables y se liberarán los consecutivos.')) return;
     setDeletingBatch(true);
@@ -547,7 +559,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
   return (
     <div className="space-y-6">
-      {/* Banner de Estado Post-Facturación en Bloque */}
       {isFinalized && (
         <div className="rounded-xl bg-green-50 border border-green-200 p-5 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -566,7 +577,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         </div>
       )}
 
-      {/* Template Selector */}
       <Card>
         <div className="px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
@@ -596,7 +606,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         </CardBody>
       </Card>
 
-      {/* Accounts table */}
       <Card>
         <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
@@ -694,7 +703,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         )}
       </Card>
 
-      {/* Email Dispatch */}
       <Card>
         <div className="px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
@@ -733,7 +741,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         </CardBody>
       </Card>
 
-      {/* Navigation Buttons */}
       <div className="flex justify-between items-center bg-gray-50 p-4 rounded-xl border border-gray-200">
         <Button variant="outline" onClick={onBack}>Volver a Descuentos</Button>
         <div className="flex items-center gap-3">
@@ -750,7 +757,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         </div>
       </div>
 
-      {/* Modal Preview PDF */}
       <Modal open={!!previewRow} onClose={() => setPreviewRow(null)} title={`Vista Previa — ${previewRow?.unit.tower} ${previewRow?.unit.unit_label}`} size="lg">
         {previewRow && (
           <div className="space-y-4">
@@ -778,7 +784,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         )}
       </Modal>
 
-      {/* Modal Simulación */}
       <Modal open={simModalOpen} onClose={() => setSimModalOpen(false)} title="Reporte de Simulación" size="md">
         {simResults && (
           <div className="space-y-3">
