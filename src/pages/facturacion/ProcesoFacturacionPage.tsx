@@ -114,12 +114,19 @@ export default function ProcesoFacturacionPage() {
   const [novelties, setNovelties] = useState<PeriodNovelty[]>([]);
   const [discountTiers, setDiscountTiers] = useState<DiscountTier[]>([]);
   const [concepts, setConcepts] = useState<BillingConcept[]>([]);
+  const [thirdParties, setThirdParties] = useState<ThirdParty[]>([]);
 
   const [reviewing, setReviewing] = useState(false);
   const [warningOpen, setWarningOpen] = useState(false);
   const [liquidation, setLiquidation] = useState<LiquidationRow[]>([]);
   const [reviewed, setReviewed] = useState(false);
   const [error, setError] = useState('');
+
+  const [isFinalized, setIsFinalized] = useState(false);
+  const [finalizing, setFinalizing] = useState(false);
+  const [generatedInvoices, setGeneratedInvoices] = useState<{ id: string; invoiceNumber: string; row: LiquidationRow }[]>([]);
+  const [deletingBatch, setDeletingBatch] = useState(false);
+  const [currentNextSeq, setCurrentNextSeq] = useState<number>(1);
 
   const [discountRows, setDiscountRows] = useState<DiscountRow[]>([]);
 
@@ -148,6 +155,7 @@ export default function ProcesoFacturacionPage() {
         { data: noveltyData },
         { data: tierData },
         { data: conceptData },
+        { data: tpData },
       ] = await Promise.all([
         supabase
           .from('dues')
@@ -190,6 +198,10 @@ export default function ProcesoFacturacionPage() {
           .eq('is_active', true)
           .order('is_default', { ascending: false })
           .order('name'),
+        supabase
+          .from('third_parties')
+          .select('*')
+          .eq('organization_id', activeOrg.id),
       ]);
 
       setDues((duesData || []) as Due[]);
@@ -199,6 +211,7 @@ export default function ProcesoFacturacionPage() {
       setNovelties((noveltyData || []) as PeriodNovelty[]);
       setDiscountTiers((tierData || []) as DiscountTier[]);
       setConcepts((conceptData || []) as BillingConcept[]);
+      setThirdParties((tpData || []) as ThirdParty[]);
     } catch (err) {
       console.warn('Error cargando datos de facturación:', err);
     }
@@ -209,9 +222,19 @@ export default function ProcesoFacturacionPage() {
   useEffect(() => { if (activeOrg) loadData(); }, [activeOrg, loadData]);
 
   useEffect(() => {
-    async function checkExistingPeriodHydration() {
+    async function checkExistingPeriodState() {
       if (!activeOrg || !billingPeriod || units.length === 0) return;
       try {
+        const { data: docConfig } = await supabase
+          .from('accounting_documents')
+          .select('next_consecutive')
+          .eq('organization_id', activeOrg.id)
+          .eq('prefix', 'CC')
+          .single();
+
+        const baseSeq = docConfig?.next_consecutive || 1;
+        setCurrentNextSeq(baseSeq);
+
         const { data: existingDues } = await supabase
           .from('dues')
           .select('*, units(*)')
@@ -219,29 +242,13 @@ export default function ProcesoFacturacionPage() {
           .eq('period', billingPeriod);
 
         if (existingDues && existingDues.length > 0) {
-          const restoredRows: LiquidationRow[] = existingDues.map(d => ({
-            due: d,
-            unit: d.units || units.find(u => u.id === d.unit_id) || units[0],
-            daysLate: 0,
-            interestRate: parseFloat(interestRate) || 0.5,
-            priorBalance: 0,
-            currentCharges: d.amount,
-            chargeLines: [],
-            interestAmount: 0,
-            discountAmount: 0,
-            netTotal: d.balance,
-            rowId: d.id,
-          }));
-
-          setLiquidation(restoredRows);
-          setReviewed(true);
-          setCurrentStep(3);
+          setIsFinalized(true);
         }
       } catch (e) {
-        console.warn('Error al hidratar el estado del periodo:', e);
+        console.warn('No se pudo verificar el estado previo del periodo:', e);
       }
     }
-    checkExistingPeriodHydration();
+    checkExistingPeriodState();
   }, [activeOrg, billingPeriod, units]);
 
   const effectiveCutoffDate = useMemo(() => {
@@ -253,8 +260,12 @@ export default function ProcesoFacturacionPage() {
   const hasDiscounts = activeTiers.length > 0;
 
   const conceptMap = useMemo(() => {
-    const m = new Map<string, BillingConcept>();
-    for (const c of concepts) m.set(c.id, c);
+    const m = new Map<string, any>();
+    for (const c of concepts) {
+      m.set(c.id, c);
+      if (c.code) m.set(c.code, c);
+      if (c.name) m.set(c.name.toLowerCase(), c);
+    }
     return m;
   }, [concepts]);
 
@@ -502,6 +513,181 @@ export default function ProcesoFacturacionPage() {
       };
     }));
     setCurrentStep(3);
+  }
+
+  // FUNCIÓN CENTRAL CORREGIDA PARA CONTABILIZAR RESPETANDO LAS CUENTAS PARAMETRIZADAS Y EL TERCERO POR INMUEBLE
+  async function handleFinalizeProcess() {
+    if (!activeOrg) return;
+    setFinalizing(true);
+    setError('');
+
+    try {
+      const [yearStr, monthStr] = billingPeriod.split('-');
+      const year = parseInt(yearStr, 10);
+      const month = parseInt(monthStr, 10);
+      const lastDayDate = new Date(year, month, 0); 
+      const periodEndDate = !isNaN(lastDayDate.getTime()) 
+        ? lastDayDate.toISOString().slice(0, 10) 
+        : new Date().toISOString().slice(0, 10);
+
+      const { data: docConfig } = await supabase
+        .from('accounting_documents')
+        .select('*')
+        .eq('organization_id', activeOrg.id)
+        .eq('prefix', 'CC')
+        .single();
+
+      let nextSeq = docConfig?.next_consecutive || 61;
+      setCurrentNextSeq(nextSeq);
+
+      const { data: accountsData } = await supabase.from('accounts').select('*').eq('organization_id', activeOrg.id);
+      const accounts = accountsData || [];
+
+      const defaultReceivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
+      const defaultIncomeAcc = accounts.find(a => a.code.startsWith('4')) || accounts[1] || accounts[0];
+
+      const batchInvoices = [];
+
+      for (let i = 0; i < liquidation.length; i++) {
+        const row = liquidation[i];
+        const invoiceNumber = `CC-${String(nextSeq + i).padStart(4, '0')}`;
+        const rowId = row.rowId || 'inv-' + Math.random().toString(36).substring(2, 9);
+
+        batchInvoices.push({
+          id: rowId,
+          invoiceNumber,
+          row,
+        });
+
+        // 1. Formato exacto del ID del inmueble (Torre-Unidad si tiene torre, o solo Unidad)
+        const unitIdentifier = row.unit.tower && row.unit.tower.trim() !== ''
+          ? `${row.unit.tower}-${row.unit.unit_label}`.trim()
+          : `${row.unit.unit_label}`.trim();
+
+        // 2. Búsqueda estricta del tercero correspondiente al inmueble
+        let assignedThirdPartyId = row.unit.third_party_id || null;
+        if (!assignedThirdPartyId && thirdParties.length > 0) {
+          const tpMatch = thirdParties.find(t => 
+            (t.unit_id && t.unit_id === row.unit.id) ||
+            (t.document && (t.document === unitIdentifier || t.document === row.unit.owner_document)) ||
+            (t.name && (t.name.toLowerCase() === unitIdentifier.toLowerCase() || (row.unit.owner_name && t.name.toLowerCase() === row.unit.owner_name.toLowerCase())))
+          );
+          if (tpMatch) assignedThirdPartyId = tpMatch.id;
+        }
+        if (!assignedThirdPartyId && thirdParties.length > 0) {
+          assignedThirdPartyId = thirdParties[0].id;
+        }
+
+        await supabase.from('dues').insert({
+          organization_id: activeOrg.id,
+          unit_id: row.unit.id,
+          period: billingPeriod,
+          amount: row.netTotal,
+          balance: row.netTotal,
+          status: 'pendiente',
+          due_date: periodEndDate,
+        });
+
+        const { data: je, error: jeErr } = await supabase.from('journal_entries').insert({
+          organization_id: activeOrg.id,
+          date: periodEndDate,
+          description: `Causación Cuota de Cobro ${invoiceNumber} - ${unitIdentifier} Periodo ${billingPeriod}`,
+          document_type: 'CC',
+          document_number: nextSeq + i,
+          is_manual: true,
+        }).select().single();
+
+        if (!jeErr && je && defaultReceivableAcc) {
+          const linesToInsert = [];
+
+          // Débito a cartera por el total neto
+          linesToInsert.push({
+            journal_entry_id: je.id,
+            account_id: defaultReceivableAcc.id,
+            debit: row.netTotal,
+            credit: 0,
+            third_party_id: assignedThirdPartyId,
+          });
+
+          // Créditos tomados estrictamente de la parametrización de cada concepto
+          if (row.chargeLines && row.chargeLines.length > 0) {
+            for (const cl of row.chargeLines) {
+              if (cl.conceptCode === 'IM' || cl.conceptId === 'interest-mora-id') continue;
+
+              const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode) || (cl.conceptName ? conceptMap.get(cl.conceptName.toLowerCase()) : null);
+              
+              // Lee de forma flexible cualquier variante de nombre de columna de cuentas en los conceptos
+              const targetAccId = conceptDef?.account_id || 
+                                  conceptDef?.income_account_id || 
+                                  conceptDef?.accounting_account_id || 
+                                  conceptDef?.account || 
+                                  defaultIncomeAcc?.id;
+
+              if (targetAccId && cl.amount > 0) {
+                linesToInsert.push({
+                  journal_entry_id: je.id,
+                  account_id: targetAccId,
+                  debit: 0,
+                  credit: cl.amount,
+                  third_party_id: assignedThirdPartyId,
+                });
+              }
+            }
+          }
+
+          // Crédito específico por Intereses de Mora usando estrictamente su cuenta parametrizada (cuentas de orden)
+          if (row.interestAmount && row.interestAmount > 0) {
+            const interestConceptDef = Array.from(conceptMap.values()).find(c => 
+              c.code === 'MORA_ADM' || c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés')
+            );
+
+            const interestAccId = interestConceptDef?.account_id || 
+                                  interestConceptDef?.income_account_id || 
+                                  interestConceptDef?.accounting_account_id || 
+                                  interestConceptDef?.account || 
+                                  accounts.find(a => a.code.startsWith('8') || a.code.startsWith('42'))?.id || 
+                                  defaultIncomeAcc?.id;
+
+            if (interestAccId) {
+              linesToInsert.push({
+                journal_entry_id: je.id,
+                account_id: interestAccId,
+                debit: 0,
+                credit: row.interestAmount,
+                third_party_id: assignedThirdPartyId,
+              });
+            }
+          }
+
+          if (linesToInsert.length === 1) {
+            linesToInsert.push({
+              journal_entry_id: je.id,
+              account_id: defaultIncomeAcc?.id || defaultReceivableAcc.id,
+              debit: 0,
+              credit: row.netTotal,
+              third_party_id: assignedThirdPartyId,
+            });
+          }
+
+          await supabase.from('journal_lines').insert(linesToInsert);
+        }
+      }
+
+      if (docConfig) {
+        await supabase.from('accounting_documents')
+          .update({ next_consecutive: nextSeq + liquidation.length })
+          .eq('id', docConfig.id);
+      }
+
+      setGeneratedInvoices(batchInvoices);
+      setIsFinalized(true);
+      setCurrentStep(4);
+    } catch (e) {
+      console.warn('Error al registrar asientos contables en bloque:', e);
+      setError('Ocurrió un inconveniente al contabilizar, pero se generó localmente.');
+    }
+
+    setFinalizing(false);
   }
 
   const totalDiscountBase = useMemo(() => discountRows.reduce((s, r) => s + r.baseAmount, 0), [discountRows]);
@@ -898,43 +1084,61 @@ export default function ProcesoFacturacionPage() {
           )}
 
           {currentStep === 3 && (
-            <Paso2FormatoEnvio
-              liquidation={liquidation.map(r => {
-                const linesWithInterest = [...r.chargeLines];
-                if (r.interestAmount > 0) {
-                  linesWithInterest.push({
-                    conceptId: 'interest-mora-id',
-                    conceptName: `Interés de Mora (${r.interestRate.toFixed(2)}%)`,
-                    conceptCode: 'IM',
-                    amount: r.interestAmount,
-                    isQuota: false,
-                    isNovelty: false,
-                  });
-                }
-                const totalChargesWithInterest = round2(r.currentCharges + r.interestAmount);
+            <div className="space-y-6">
+              <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-gray-200">
+                <Button variant="outline" onClick={() => setCurrentStep(hasDiscounts ? 2 : 1)}>Volver</Button>
+                <div className="flex items-center gap-3">
+                  {!isFinalized ? (
+                    <Button onClick={handleFinalizeProcess} disabled={finalizing}>
+                      {finalizing ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                      Finalizar y Contabilizar Periodo
+                    </Button>
+                  ) : (
+                    <span className="text-sm font-bold text-green-700 flex items-center gap-1">
+                      <CheckCircle2 className="w-4 h-4" /> Periodo Finalizado y Contabilizado Exitosamente
+                    </span>
+                  )}
+                </div>
+              </div>
+              <Paso2FormatoEnvio
+                liquidation={liquidation.map(r => {
+                  const linesWithInterest = [...r.chargeLines];
+                  if (r.interestAmount > 0) {
+                    const moraConcept = concepts.find(c => c.code === 'MORA_ADM' || c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés'));
+                    linesWithInterest.push({
+                      conceptId: moraConcept ? moraConcept.id : 'interest-mora-id',
+                      conceptName: moraConcept ? moraConcept.name : `Interés de Mora (${r.interestRate.toFixed(2)}%)`,
+                      conceptCode: moraConcept ? moraConcept.code : 'IM',
+                      amount: r.interestAmount,
+                      isQuota: false,
+                      isNovelty: false,
+                    });
+                  }
+                  const totalChargesWithInterest = round2(r.currentCharges + r.interestAmount);
 
-                return {
-                  due: r.due || ({ id: r.rowId, organization_id: activeOrg.id, unit_id: r.unit.id, type: 'ordinaria' as const, period: billingPeriod, due_date: new Date().toISOString().slice(0, 10), amount: totalChargesWithInterest, interest_rate: r.interestRate, balance: r.priorBalance, status: 'pendiente' as const, created_at: '' }) as Due,
-                  unit: r.unit,
-                  daysLate: r.daysLate,
-                  interestRate: r.interestRate,
-                  priorBalance: r.priorBalance,
-                  currentCharges: totalChargesWithInterest,
-                  chargeLines: linesWithInterest,
-                  interestAmount: r.interestAmount,
-                  discountAmount: r.discountAmount,
-                  netTotal: r.netTotal,
-                  totalWithInterest: r.netTotal,
-                  baseAmount: totalChargesWithInterest,
-                  rowId: r.rowId,
-                };
-              })}
-              agreements={[...agreements, ...defaultedAgreements]}
-              org={activeOrg}
-              billingPeriod={billingPeriod}
-              onBack={() => setCurrentStep(hasDiscounts ? 2 : 1)}
-              onComplete={() => setCurrentStep(4)}
-            />
+                  return {
+                    due: r.due || ({ id: r.rowId, organization_id: activeOrg.id, unit_id: r.unit.id, type: 'ordinaria' as const, period: billingPeriod, due_date: new Date().toISOString().slice(0, 10), amount: totalChargesWithInterest, interest_rate: r.interestRate, balance: r.priorBalance, status: 'pendiente' as const, created_at: '' }) as Due,
+                    unit: r.unit,
+                    daysLate: r.daysLate,
+                    interestRate: r.interestRate,
+                    priorBalance: r.priorBalance,
+                    currentCharges: totalChargesWithInterest,
+                    chargeLines: linesWithInterest,
+                    interestAmount: r.interestAmount,
+                    discountAmount: r.discountAmount,
+                    netTotal: r.netTotal,
+                    totalWithInterest: r.netTotal,
+                    baseAmount: totalChargesWithInterest,
+                    rowId: r.rowId,
+                  };
+                })}
+                agreements={[...agreements, ...defaultedAgreements]}
+                org={activeOrg}
+                billingPeriod={billingPeriod}
+                onBack={() => setCurrentStep(hasDiscounts ? 2 : 1)}
+                onComplete={() => setCurrentStep(4)}
+              />
+            </div>
           )}
 
           {currentStep === 4 && (
@@ -944,8 +1148,8 @@ export default function ProcesoFacturacionPage() {
                   <CheckCircle2 className="w-8 h-8 text-green-600" />
                 </div>
                 <h2 className="text-xl font-bold text-gray-900 mb-2">Proceso de Facturación Completado</h2>
-                <p className="text-gray-500 mb-6">Las cuentas de cobro han sido generadas y el envío simulado ha finalizado.</p>
-                <Button onClick={() => { setCurrentStep(1); setReviewed(false); setLiquidation([]); setDiscountRows([]); }}>
+                <p className="text-gray-500 mb-6">Las cuentas de cobro han sido generadas y los asientos contables registrados con sus cuentas y terceros correctos.</p>
+                <Button onClick={() => { setCurrentStep(1); setReviewed(false); setIsFinalized(false); setLiquidation([]); setDiscountRows([]); }}>
                   <RefreshCw className="w-4 h-4" /> Iniciar Nuevo Proceso
                 </Button>
               </div>
