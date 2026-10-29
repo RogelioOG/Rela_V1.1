@@ -52,7 +52,7 @@ export default function ConceptosPage() {
     setLoading(true);
     const { data } = await supabase
       .from('billing_concepts')
-      .select('*, income_account:accounts!income_account_id(*), counterpart_account:accounts!counterpart_account_id(*), third_account:accounts!third_account_id(*), parent_concept:billing_concepts!parent_concept_id(*), discount_income_account:accounts!discount_income_account_id(*), discount_counterpart_account:accounts!discount_counterpart_account_id(*)')
+      .select('*, income_account:accounts!income_account_id(*), counterpart_account:accounts!counterpart_account_id(*), parent_concept:billing_concepts!parent_concept_id(*), discount_income_account:accounts!discount_income_account_id(*), discount_counterpart_account:accounts!discount_counterpart_account_id(*)')
       .eq('organization_id', activeOrg.id)
       .order('is_late_interest', { ascending: true })
       .order('name', { ascending: true });
@@ -92,7 +92,7 @@ export default function ConceptosPage() {
       account_class: c.account_class,
       income_account_id: c.income_account_id || '',
       counterpart_account_id: c.counterpart_account_id || '',
-      third_account_id: c.third_account_id || '',
+      third_account_id: (c as any).third_account_id || '',
       is_active: c.is_active,
       causa_intereses: c.causa_intereses ?? true,
       maneja_descuento: c.maneja_descuento ?? false,
@@ -115,7 +115,7 @@ export default function ConceptosPage() {
       return;
     }
 
-    const payload = {
+    const payload: any = {
       organization_id: activeOrg.id,
       code: form.code.toUpperCase(),
       name: form.name,
@@ -124,13 +124,17 @@ export default function ConceptosPage() {
       account_class: form.account_class,
       income_account_id: form.income_account_id || null,
       counterpart_account_id: form.counterpart_account_id || null,
-      third_account_id: form.account_class === 'orden' ? (form.third_account_id || null) : null,
       is_active: form.is_active,
       causa_intereses: form.causa_intereses,
       maneja_descuento: form.maneja_descuento,
       discount_income_account_id: form.discount_income_account_id || null,
       discount_counterpart_account_id: form.discount_counterpart_account_id || null,
     };
+
+    // Solo incluimos third_account_id si la base de datos lo soporta o lo agregamos opcionalmente
+    if (form.account_class === 'orden' && form.third_account_id) {
+      payload.third_account_id = form.third_account_id;
+    }
 
     try {
       let parentId: string | null = null;
