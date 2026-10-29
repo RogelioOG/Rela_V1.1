@@ -18,15 +18,17 @@ interface FormState {
   account_class: string;
   income_account_id: string;
   counterpart_account_id: string;
+  third_account_id: string;
   is_active: boolean;
   causa_intereses: boolean;
   maneja_descuento: boolean;
   discount_income_account_id: string;
   discount_counterpart_account_id: string;
 }
+
 const emptyForm: FormState = {
   code: '', name: '', description: '', category: 'administracion',
-  account_class: 'real', income_account_id: '', counterpart_account_id: '', is_active: true,
+  account_class: 'real', income_account_id: '', counterpart_account_id: '', third_account_id: '', is_active: true,
   causa_intereses: true, maneja_descuento: false,
   discount_income_account_id: '', discount_counterpart_account_id: '',
 };
@@ -50,7 +52,7 @@ export default function ConceptosPage() {
     setLoading(true);
     const { data } = await supabase
       .from('billing_concepts')
-      .select('*, income_account:accounts!income_account_id(*), counterpart_account:accounts!counterpart_account_id(*), parent_concept:billing_concepts!parent_concept_id(*), discount_income_account:accounts!discount_income_account_id(*), discount_counterpart_account:accounts!discount_counterpart_account_id(*)')
+      .select('*, income_account:accounts!income_account_id(*), counterpart_account:accounts!counterpart_account_id(*), third_account:accounts!third_account_id(*), parent_concept:billing_concepts!parent_concept_id(*), discount_income_account:accounts!discount_income_account_id(*), discount_counterpart_account:accounts!discount_counterpart_account_id(*)')
       .eq('organization_id', activeOrg.id)
       .order('is_late_interest', { ascending: true })
       .order('name', { ascending: true });
@@ -90,6 +92,7 @@ export default function ConceptosPage() {
       account_class: c.account_class,
       income_account_id: c.income_account_id || '',
       counterpart_account_id: c.counterpart_account_id || '',
+      third_account_id: c.third_account_id || '',
       is_active: c.is_active,
       causa_intereses: c.causa_intereses ?? true,
       maneja_descuento: c.maneja_descuento ?? false,
@@ -121,6 +124,7 @@ export default function ConceptosPage() {
       account_class: form.account_class,
       income_account_id: form.income_account_id || null,
       counterpart_account_id: form.counterpart_account_id || null,
+      third_account_id: form.account_class === 'orden' ? (form.third_account_id || null) : null,
       is_active: form.is_active,
       causa_intereses: form.causa_intereses,
       maneja_descuento: form.maneja_descuento,
@@ -172,7 +176,6 @@ export default function ConceptosPage() {
             maneja_descuento: false,
           });
         } else {
-          // Update name in case parent concept name changed
           await supabase.from('billing_concepts').update({
             name: lateInterestName,
             parent_concept_id: parentId,
@@ -397,7 +400,7 @@ export default function ConceptosPage() {
           <div>
             <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><BookOpen className="w-4 h-4" /> Clasificación Contable</h3>
             <div className="grid grid-cols-1 gap-4">
-              <Select label="Clasificación de Cuenta" value={form.account_class} onChange={(e) => setForm({ ...form, account_class: e.target.value, income_account_id: '', counterpart_account_id: '' })}>
+              <Select label="Clasificación de Cuenta" value={form.account_class} onChange={(e) => setForm({ ...form, account_class: e.target.value, income_account_id: '', counterpart_account_id: '', third_account_id: '' })}>
                 <option value="real">Cuentas Reales (Clases 1-6 — PUC/NIIF)</option>
                 <option value="orden">Cuentas de Orden (Clases 8 y 9)</option>
               </Select>
@@ -423,6 +426,20 @@ export default function ConceptosPage() {
               ))}
             </Select>
           </div>
+
+          {/* Campo dinámico para la tercera cuenta exclusiva de Cuentas de Orden */}
+          {form.account_class === 'orden' && (
+            <div className="rounded-lg bg-purple-50 border border-purple-200 px-4 py-4 space-y-3">
+              <p className="text-sm font-semibold text-purple-900">Tercera Cuenta Contable (Automatización)</p>
+              <p className="text-xs text-purple-700">Parametrice una cuenta adicional de orden para la automatización en procesos futuros como recibos de caja.</p>
+              <Select label="Tercera Cuenta Contable" value={form.third_account_id} onChange={(e) => setForm({ ...form, third_account_id: e.target.value })}>
+                <option value="">— Seleccionar —</option>
+                {filteredAccounts(form.account_class).map(a => (
+                  <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
+                ))}
+              </Select>
+            </div>
+          )}
 
           {form.income_account_id && form.counterpart_account_id && (
             <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3">
