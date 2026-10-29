@@ -115,6 +115,7 @@ export default function ConceptosPage() {
       return;
     }
 
+    // Payload base seguro sin campos que no existan en Supabase todavía
     const payload: any = {
       organization_id: activeOrg.id,
       code: form.code.toUpperCase(),
@@ -125,17 +126,11 @@ export default function ConceptosPage() {
       income_account_id: form.income_account_id || null,
       counterpart_account_id: form.counterpart_account_id || null,
       is_active: form.is_active,
-      causa_intereses: form.causa_intereses,
-      maneja_descuento: form.maneja_descuento,
+      causa_intereses: editing?.is_late_interest ? false : form.causa_intereses,
+      maneja_descuento: editing?.is_late_interest ? false : form.maneja_descuento,
       discount_income_account_id: form.discount_income_account_id || null,
       discount_counterpart_account_id: form.discount_counterpart_account_id || null,
     };
-
-    if (form.account_class === 'orden' && form.third_account_id) {
-      payload.third_account_id = form.third_account_id;
-    } else {
-      payload.third_account_id = null;
-    }
 
     try {
       let parentId: string | null = null;
@@ -431,18 +426,16 @@ export default function ConceptosPage() {
             </Select>
           </div>
 
-          {/* Campo dinámico para la tercera cuenta en Cuentas de Orden (con todas las cuentas activas disponibles) */}
-          {form.account_class === 'orden' && (
-            <div className="rounded-lg bg-purple-50 border border-purple-200 px-4 py-4 space-y-3">
-              <p className="text-sm font-semibold text-purple-900">Tercera Cuenta Contable (Automatización)</p>
-              <Select label="Tercera Cuenta Contable" value={form.third_account_id} onChange={(e) => setForm({ ...form, third_account_id: e.target.value })}>
-                <option value="">— Seleccionar —</option>
-                {accounts.map(a => (
-                  <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
-                ))}
-              </Select>
-            </div>
-          )}
+          {/* Ocultamos o mostramos tercera cuenta según se requiera */}
+          <div className="rounded-lg bg-purple-50 border border-purple-200 px-4 py-4 space-y-3">
+            <p className="text-sm font-semibold text-purple-900">Tercera Cuenta Contable (Automatización)</p>
+            <Select label="Tercera Cuenta Contable" value={form.third_account_id} onChange={(e) => setForm({ ...form, third_account_id: e.target.value })}>
+              <option value="">— Seleccionar —</option>
+              {accounts.map(a => (
+                <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
+              ))}
+            </Select>
+          </div>
 
           {form.income_account_id && form.counterpart_account_id && (
             <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3">
@@ -452,24 +445,27 @@ export default function ConceptosPage() {
             </div>
           )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
-              <input type="checkbox" checked={form.causa_intereses} onChange={(e) => setForm({ ...form, causa_intereses: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
-              <div>
-                <span className="text-sm font-medium text-gray-900">Causa Intereses de Mora</span>
-                <p className="text-xs text-gray-500">Genera interés sobre saldos vencidos de este concepto.</p>
-              </div>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
-              <input type="checkbox" checked={form.maneja_descuento} onChange={(e) => setForm({ ...form, maneja_descuento: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
-              <div>
-                <span className="text-sm font-medium text-gray-900">Maneja Descuento</span>
-                <p className="text-xs text-gray-500">Aplica descuento por pronto pago en este concepto.</p>
-              </div>
-            </label>
-          </div>
+          {/* Ocultar checkboxes de intereses y descuento si es un sub-concepto de mora */}
+          {!editing?.is_late_interest && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
+                <input type="checkbox" checked={form.causa_intereses} onChange={(e) => setForm({ ...form, causa_intereses: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <div>
+                  <span className="text-sm font-medium text-gray-900">Causa Intereses de Mora</span>
+                  <p className="text-xs text-gray-500">Genera interés sobre saldos vencidos de este concepto.</p>
+                </div>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
+                <input type="checkbox" checked={form.maneja_descuento} onChange={(e) => setForm({ ...form, maneja_descuento: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <div>
+                  <span className="text-sm font-medium text-gray-900">Maneja Descuento</span>
+                  <p className="text-xs text-gray-500">Aplica descuento por pronto pago en este concepto.</p>
+                </div>
+              </label>
+            </div>
+          )}
 
-          {form.maneja_descuento && (
+          {!editing?.is_late_interest && form.maneja_descuento && (
             <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-4 space-y-3">
               <p className="text-sm font-semibold text-green-800">Cuentas Contables para Descuentos</p>
               <p className="text-xs text-green-700">Parametrice las cuentas exclusivas para el registro de descuentos por pronto pago de este concepto.</p>
