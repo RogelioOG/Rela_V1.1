@@ -46,7 +46,7 @@ export default function CuotasPage() {
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  useEffect(() => { if (activeOrg) loadInitial(); }, [activeOrg]);
+  useEffect(() => { if (activeOrg) loadInitial(); }, [activeOrg, loadInitial]);
 
   const loadInitial = useCallback(async () => {
     if (!activeOrg) return;
@@ -67,11 +67,26 @@ export default function CuotasPage() {
     setLoading(false);
   }, [activeOrg]);
 
-  useEffect(() => { if (selectedPeriodId && selectedConceptId) loadExistingQuota(); }, [selectedPeriodId, selectedConceptId]);
+  const loadQuotaRows = useCallback((quota: AdminQuota, unitList: Unit[]) => {
+    const lines = quota.admin_quota_lines || [];
+    const rows: QuotaRow[] = unitList.map(u => {
+      const line = lines.find(l => l.unit_id === u.id);
+      const computed = 0; // se recalcula mediante computeAmount si es necesario
+      return {
+        unit_id: u.id,
+        unit_label: u.unit_label,
+        tower: u.tower,
+        coefficient: u.coefficient,
+        computed_amount: computed,
+        manual_amount: line ? String(line.amount) : '',
+        is_override: !!line,
+      };
+    });
+    setQuotaRows(rows);
+  }, []);
 
   const loadExistingQuota = useCallback(async () => {
     if (!activeOrg || !selectedPeriodId || !selectedConceptId) return;
-    // Load all history records (both active and inactive) for this period+concept
     const { data: allRecords } = await supabase
       .from('admin_quotas')
       .select('*, admin_quota_lines(*)')
@@ -90,7 +105,7 @@ export default function CuotasPage() {
       setBudgetAmount(String(active.budget_amount));
       setFixedAmount(String(active.fixed_amount));
       setRoundingDecimals(String(active.rounding_decimals));
-      loadQuotaRows(active);
+      loadQuotaRows(active, units);
     } else {
       setExistingQuota(null);
       setCalcMethod('fijo');
@@ -101,25 +116,9 @@ export default function CuotasPage() {
     }
     setMsg('');
     setValidationErrors([]);
-  }, [activeOrg, selectedPeriodId, selectedConceptId]);
+  }, [activeOrg, selectedPeriodId, selectedConceptId, units, loadQuotaRows]);
 
-  function loadQuotaRows(quota: AdminQuota) {
-    const lines = quota.admin_quota_lines || [];
-    const rows: QuotaRow[] = units.map(u => {
-      const line = lines.find(l => l.unit_id === u.id);
-      const computed = computeAmount(u.coefficient);
-      return {
-        unit_id: u.id,
-        unit_label: u.unit_label,
-        tower: u.tower,
-        coefficient: u.coefficient,
-        computed_amount: computed,
-        manual_amount: line ? String(line.amount) : '',
-        is_override: !!line,
-      };
-    });
-    setQuotaRows(rows);
-  }
+  useEffect(() => { if (selectedPeriodId && selectedConceptId && units.length > 0) loadExistingQuota(); }, [selectedPeriodId, selectedConceptId, units, loadExistingQuota]);
 
   function computeAmount(coefficient: number): number {
     const decimals = parseInt(roundingDecimals) || 2;
@@ -216,7 +215,6 @@ export default function CuotasPage() {
         is_active: true,
       };
 
-      // Deactivate the previous active record (if any) to preserve it as history
       if (existingQuota) {
         await supabase
           .from('admin_quotas')
@@ -224,7 +222,6 @@ export default function CuotasPage() {
           .eq('id', existingQuota.id);
       }
 
-      // Insert a new active record
       const { data: created, error: insertErr } = await supabase
         .from('admin_quotas')
         .insert(payload)
@@ -247,7 +244,7 @@ export default function CuotasPage() {
         }
       }
 
-      setMsg('Cuotas de administración guardadas correctamente. El registro anterior se conservó en el historial.');
+      setMsg('Cuotas de administración guardadas correctamente.');
       setSaving(false);
       await loadExistingQuota();
     } catch (err) {
@@ -262,7 +259,6 @@ export default function CuotasPage() {
     setSaving(true);
     setMsg('');
     try {
-      // Deactivate all active records for this period+concept
       await supabase
         .from('admin_quotas')
         .update({ is_active: false })
@@ -271,7 +267,6 @@ export default function CuotasPage() {
         .eq('billing_concept_id', quota.billing_concept_id)
         .eq('is_active', true);
 
-      // Activate the selected historical record
       await supabase
         .from('admin_quotas')
         .update({ is_active: true })
@@ -293,7 +288,7 @@ export default function CuotasPage() {
     <div className="max-w-7xl mx-auto">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Cuotas de Administración</h1>
-        <p className="text-gray-500 mt-1">Generación de cuotas base mensuales según Ley 675 de 2001</p>
+        <p className="text-gray-500 mt-1">Generación de cuotas base mensuales según Ley 675 de 2001[cite: 6]</p>
       </div>
 
       {loading ? (
@@ -443,7 +438,7 @@ export default function CuotasPage() {
                     })}
                   </tbody>
                   <tfoot><tr className="border-t-2 border-gray-200 bg-gray-50">
-                    <td colSpan={calcMethod === 'manual' ? 4 : 4} className="px-6 py-3 text-sm font-semibold text-gray-900 text-right">Total Cuotas:</td>
+                    <td colSpan={4} className="px-6 py-3 text-sm font-semibold text-gray-900 text-right">Total Cuotas:</td>
                     <td className="px-6 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(totalQuota)}</td>
                   </tr></tfoot>
                 </table>
@@ -520,7 +515,7 @@ export default function CuotasPage() {
           <div className="rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
             <p className="text-sm text-blue-800 flex items-start gap-2">
               <Layers className="w-4 h-4 mt-0.5 flex-shrink-0" />
-              Cada vez que guarda, el registro anterior se conserva en el historial como inactivo y se crea un nuevo registro activo. Puede restaurar cualquier configuración histórica si lo necesita.
+              Cada vez que guarda, el registro anterior se conserva en el historial como inactivo y se crea un nuevo registro activo. Puede restaurar cualquier configuración histórica si lo necesita[cite: 6].
             </p>
           </div>
         </div>
