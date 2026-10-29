@@ -115,6 +115,7 @@ export default function ConceptosPage() {
       return;
     }
 
+    // CORRECCIÓN: Incluir third_account_id en el payload cuando es cuenta de orden
     const payload: any = {
       organization_id: activeOrg.id,
       code: form.code.toUpperCase(),
@@ -124,6 +125,7 @@ export default function ConceptosPage() {
       account_class: form.account_class,
       income_account_id: form.income_account_id || null,
       counterpart_account_id: form.counterpart_account_id || null,
+      third_account_id: form.account_class === 'orden' ? (form.third_account_id || null) : null,
       is_active: form.is_active,
       causa_intereses: editing?.is_late_interest ? false : form.causa_intereses,
       maneja_descuento: editing?.is_late_interest ? false : form.maneja_descuento,
@@ -425,7 +427,6 @@ export default function ConceptosPage() {
             </Select>
           </div>
 
-          {/* CORRECCIÓN: La tercera cuenta contable aparece EXCLUSIVAMENTE cuando la clasificación es 'orden' */}
           {form.account_class === 'orden' && (
             <div className="rounded-lg bg-purple-50 border border-purple-200 px-4 py-4 space-y-3">
               <p className="text-sm font-semibold text-purple-900">Tercera Cuenta Contable (Automatización)</p>
