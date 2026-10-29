@@ -46,44 +46,29 @@ export default function CuotasPage() {
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // Función auxiliar de cálculo basada en los parámetros activos
-  const computeRowAmount = useCallback((coefficient: number, method: string, budget: number, fixed: number, decimals: number, unitList: Unit[]) => {
-    const factor = Math.pow(10, decimals);
-    if (method === 'presupuesto') {
-      const totalCoeff = unitList.reduce((s, u) => s + u.coefficient, 0) || 1;
-      return Math.round((budget * coefficient / totalCoeff) * factor) / factor;
-    }
-    if (method === 'fijo') {
-      return Math.round(fixed * factor) / factor;
-    }
-    return 0;
-  }, []);
-
-  const loadQuotaRows = useCallback((quota: AdminQuota, unitList: Unit[]) => {
-    const lines = quota.admin_quota_lines || [];
-    const method = quota.calculation_method;
-    const budget = quota.budget_amount || 0;
-    const fixed = quota.fixed_amount || 0;
-    const decimals = quota.rounding_decimals || 2;
+  // Carga estricta de la configuración guardada existente en la tabla sin recalcular por cambio de opción
+  const loadQuotaRowsFromSaved = useCallback((quota: AdminQuota | null, unitList: Unit[]) => {
+    if (unitList.length === 0) return;
+    const lines = quota?.admin_quota_lines || [];
 
     const rows: QuotaRow[] = unitList.map(u => {
       const line = lines.find(l => l.unit_id === u.id);
-      const computed = computeRowAmount(u.coefficient, method, budget, fixed, decimals, unitList);
+      const savedAmount = line ? line.amount : 0;
       return {
         unit_id: u.id,
         unit_label: u.unit_label,
         tower: u.tower,
         coefficient: u.coefficient,
-        computed_amount: computed,
+        computed_amount: savedAmount,
         manual_amount: line ? String(line.amount) : '',
-        is_override: !!line || method === 'manual',
+        is_override: !!line,
       };
     });
     setQuotaRows(rows);
-  }, [computeRowAmount]);
+  }, []);
 
   const loadExistingQuota = useCallback(async () => {
-    if (!activeOrg || !selectedPeriodId || !selectedConceptId) return;
+    if (!activeOrg || !selectedPeriodId || !selectedConceptId || units.length === 0) return;
     const { data: allRecords } = await supabase
       .from('admin_quotas')
       .select('*, admin_quota_lines(*)')
@@ -102,18 +87,18 @@ export default function CuotasPage() {
       setBudgetAmount(String(active.budget_amount));
       setFixedAmount(String(active.fixed_amount));
       setRoundingDecimals(String(active.rounding_decimals));
-      loadQuotaRows(active, units);
+      loadQuotaRowsFromSaved(active, units);
     } else {
       setExistingQuota(null);
       setCalcMethod('fijo');
       setBudgetAmount('0');
       setFixedAmount('0');
       setRoundingDecimals('2');
-      setQuotaRows([]);
+      loadQuotaRowsFromSaved(null, units);
     }
     setMsg('');
     setValidationErrors([]);
-  }, [activeOrg, selectedPeriodId, selectedConceptId, units, loadQuotaRows]);
+  }, [activeOrg, selectedPeriodId, selectedConceptId, units, loadQuotaRowsFromSaved]);
 
   const loadInitial = useCallback(async () => {
     if (!activeOrg) return;
@@ -127,7 +112,8 @@ export default function CuotasPage() {
     const cList = conceptData || [];
     setPeriods(pList);
     setConcepts(cList);
-    setUnits(unitData || []);
+    const uList = unitData || [];
+    setUnits(uList);
     const defaultConcept = cList.find(c => c.is_default);
     setSelectedConceptId(defaultConcept?.id || cList[0]?.id || '');
     if (pList.length > 0) setSelectedPeriodId(pList[0].id);
@@ -138,17 +124,29 @@ export default function CuotasPage() {
 
   useEffect(() => { if (selectedPeriodId && selectedConceptId && units.length > 0) loadExistingQuota(); }, [selectedPeriodId, selectedConceptId, units, loadExistingQuota]);
 
-  function regenerateRows() {
+  function computeAmount(coefficient: number): number {
     const decimals = parseInt(roundingDecimals) || 2;
-    const budget = parseFloat(budgetAmount) || 0;
-    const fixed = parseFloat(fixedAmount) || 0;
+    const factor = Math.pow(10, decimals);
+    if (calcMethod === 'presupuesto') {
+      const budget = parseFloat(budgetAmount) || 0;
+      const totalCoeff = units.reduce((s, u) => s + u.coefficient, 0) || 1;
+      return Math.round((budget * coefficient / totalCoeff) * factor) / factor;
+    }
+    if (calcMethod === 'fijo') {
+      const fixed = parseFloat(fixedAmount) || 0;
+      return Math.round(fixed * factor) / factor;
+    }
+    return 0;
+  }
 
+  // La tabla solo se recalcula cuando el usuario oprime intencionalmente el botón Generar / Recalcular
+  function regenerateRows() {
     const rows: QuotaRow[] = units.map(u => ({
       unit_id: u.id,
       unit_label: u.unit_label,
       tower: u.tower,
       coefficient: u.coefficient,
-      computed_amount: computeRowAmount(u.coefficient, calcMethod, budget, fixed, decimals, units),
+      computed_amount: computeAmount(u.coefficient),
       manual_amount: '',
       is_override: false,
     }));
@@ -237,18 +235,16 @@ export default function CuotasPage() {
       if (insertErr) throw insertErr;
       const quotaId = created.id;
 
-      if (calcMethod === 'manual' || quotaRows.some(r => r.is_override)) {
-        const linesToInsert = quotaRows
-          .filter(r => r.is_override && r.manual_amount !== '')
-          .map(r => ({
-            organization_id: activeOrg.id,
-            admin_quota_id: quotaId,
-            unit_id: r.unit_id,
-            amount: parseFloat(r.manual_amount) || 0,
-          }));
-        if (linesToInsert.length > 0) {
-          await supabase.from('admin_quota_lines').insert(linesToInsert);
-        }
+      // Guardamos tanto los valores calculados vigentes como los manuales en admin_quota_lines
+      const linesToInsert = quotaRows.map(r => ({
+        organization_id: activeOrg.id,
+        admin_quota_id: quotaId,
+        unit_id: r.unit_id,
+        amount: r.is_override && r.manual_amount !== '' ? (parseFloat(r.manual_amount) || 0) : r.computed_amount,
+      }));
+
+      if (linesToInsert.length > 0) {
+        await supabase.from('admin_quota_lines').insert(linesToInsert);
       }
 
       setMsg('Cuotas de administración guardadas correctamente.');
@@ -330,7 +326,7 @@ export default function CuotasPage() {
                 {(['fijo', 'presupuesto', 'manual'] as const).map(method => (
                   <button
                     key={method}
-                    onClick={() => { setCalcMethod(method); setQuotaRows([]); setValidationErrors([]); }}
+                    onClick={() => { setCalcMethod(method); setValidationErrors([]); }}
                     className={`p-4 rounded-xl border-2 text-left transition-all ${calcMethod === method ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}
                   >
                     <div className="flex items-center gap-2 mb-1">
@@ -369,7 +365,7 @@ export default function CuotasPage() {
                 <Button variant="outline" onClick={regenerateRows} disabled={units.length === 0}>
                   <Table className="w-4 h-4" /> Generar / Recalcular
                 </Button>
-                {existingQuota && <Badge variant="blue">Configuración existente (registro activo cargado)</Badge>}
+                {existingQuota && <Badge variant="blue">Configuración existente cargada en tabla</Badge>}
               </div>
             </div>
           </Card>
@@ -389,69 +385,59 @@ export default function CuotasPage() {
             </div>
           )}
 
-          {/* Quota Table */}
-          {quotaRows.length > 0 && (
-            <Card>
-              <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2"><Home className="w-5 h-5 text-blue-600" /> Cuotas por Unidad</h2>
-                <div className="flex items-center gap-3">
-                  <span className="text-sm text-gray-500">Total: <strong className="text-gray-900">{formatCOP(totalQuota)}</strong></span>
-                  <Button onClick={requestSave} disabled={saving}>
-                    {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                    Guardar Cuotas
-                  </Button>
-                </div>
+          {/* Quota Table - Muestra siempre la configuración guardada sin recalcular sola */}
+          <Card>
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2"><Home className="w-5 h-5 text-blue-600" /> Cuotas por Unidad</h2>
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-gray-500">Total: <strong className="text-gray-900">{formatCOP(totalQuota)}</strong></span>
+                <Button onClick={requestSave} disabled={saving}>
+                  {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                  Guardar Cuotas
+                </Button>
               </div>
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead><tr className="border-b border-gray-200 bg-gray-50">
-                    <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Torre</th>
-                    <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Unidad</th>
-                    <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden sm:table-cell">Coeficiente</th>
-                    <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Valor Calculado</th>
-                    {calcMethod === 'manual' && <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Valor Manual</th>}
-                    {calcMethod !== 'manual' && <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Valor a Aplicar</th>}
-                  </tr></thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {quotaRows.map((row, idx) => {
-                      const effectiveValue = row.is_override && row.manual_amount !== '' ? (parseFloat(row.manual_amount) || 0) : row.computed_amount;
-                      return (
-                        <tr key={row.unit_id} className="hover:bg-gray-50">
-                          <td className="px-6 py-3 text-sm text-gray-700">{row.tower}</td>
-                          <td className="px-6 py-3 text-sm font-medium text-gray-900">{row.unit_label}</td>
-                          <td className="px-6 py-3 text-sm text-gray-500 text-right hidden sm:table-cell">{row.coefficient.toFixed(4)}</td>
-                          <td className="px-6 py-3 text-sm text-gray-700 text-right">{formatCOP(row.computed_amount)}</td>
-                          {calcMethod === 'manual' ? (
-                            <td className="px-6 py-3 text-right">
-                              <input
-                                type="number"
-                                value={row.manual_amount}
-                                onChange={(e) => updateManualAmount(idx, e.target.value)}
-                                placeholder="0"
-                                className="w-32 rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500"
-                              />
-                            </td>
-                          ) : (
-                            <td className="px-6 py-3 text-right">
-                              {row.is_override && row.manual_amount !== '' ? (
-                                <span className="text-sm font-medium text-blue-600">{formatCOP(parseFloat(row.manual_amount) || 0)}</span>
-                              ) : (
-                                <span className="text-sm text-gray-900">{formatCOP(effectiveValue)}</span>
-                              )}
-                            </td>
-                          )}
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                  <tfoot><tr className="border-t-2 border-gray-200 bg-gray-50">
-                    <td colSpan={4} className="px-6 py-3 text-sm font-semibold text-gray-900 text-right">Total Cuotas:</td>
-                    <td className="px-6 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(totalQuota)}</td>
-                  </tr></tfoot>
-                </table>
-              </div>
-            </Card>
-          )}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead><tr className="border-b border-gray-200 bg-gray-50">
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Torre</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Unidad</th>
+                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden sm:table-cell">Coeficiente</th>
+                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Valor Configurado / Guardado</th>
+                  {calcMethod === 'manual' && <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Valor Manual</th>}
+                </tr></thead>
+                <tbody className="divide-y divide-gray-100">
+                  {quotaRows.map((row, idx) => {
+                    const effectiveValue = row.computed_amount;
+                    return (
+                      <tr key={row.unit_id} className="hover:bg-gray-50">
+                        <td className="px-6 py-3 text-sm text-gray-700">{row.tower}</td>
+                        <td className="px-6 py-3 text-sm font-medium text-gray-900">{row.unit_label}</td>
+                        <td className="px-6 py-3 text-sm text-gray-500 text-right hidden sm:table-cell">{row.coefficient.toFixed(4)}</td>
+                        <td className="px-6 py-3 text-sm text-gray-900 text-right font-medium">{formatCOP(effectiveValue)}</td>
+                        {calcMethod === 'manual' && (
+                          <td className="px-6 py-3 text-right">
+                            <input
+                              type="number"
+                              value={row.manual_amount}
+                              onChange={(e) => updateManualAmount(idx, e.target.value)}
+                              placeholder="0"
+                              className="w-32 rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            />
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot><tr className="border-t-2 border-gray-200 bg-gray-50">
+                  <td colSpan={3} className="px-6 py-3 text-sm font-semibold text-gray-900 text-right">Total Cuotas:</td>
+                  <td className="px-6 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(totalQuota)}</td>
+                  {calcMethod === 'manual' && <td />}
+                </tr></tfoot>
+              </table>
+            </div>
+          </Card>
 
           {/* History Table */}
           {history.length > 0 && (
