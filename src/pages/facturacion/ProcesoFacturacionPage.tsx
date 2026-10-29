@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { Calculator, Loader2, AlertTriangle, CheckCircle2, Info, Clock, Percent, RefreshCw, ChevronRight, Calendar, Layers } from 'lucide-react';
-import { supabase, Unit, Due, PaymentAgreement, AdminQuota, AdminQuotaLine, PeriodNovelty, DiscountTier, BillingConcept } from '@/lib/supabase';
+import { supabase, Unit, Due, PaymentAgreement, AdminQuota, AdminQuotaLine, PeriodNovelty, DiscountTier, BillingConcept, ThirdParty } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card, CardBody } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -184,7 +184,7 @@ export default function ProcesoFacturacionPage() {
 
   useEffect(() => { if (activeOrg) loadData(); }, [activeOrg, loadData]);
 
-  // Hidratación automática: Verifica si ya existe facturación para este periodo y auto-restaura el estado
+  // Hidratación automática: Verifica si ya existe facturación previa para este periodo y auto-restaura el estado sin perder datos
   useEffect(() => {
     async function checkExistingPeriodHydration() {
       if (!activeOrg || !billingPeriod || units.length === 0) return;
@@ -555,7 +555,8 @@ export default function ProcesoFacturacionPage() {
               </p>
             </div>
             <CardBody>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {/* Se eliminó el campo redundante de Periodo de Facturación para sincronizarse estrictamente con el Calendario */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 <div>
                   <Input
                     label="Tasa de Interés de Mora (%)"
@@ -579,16 +580,6 @@ export default function ProcesoFacturacionPage() {
                     placeholder="Ej: 5"
                   />
                   <p className="text-xs text-gray-400 mt-1">Días posteriores al vencimiento sin interés.</p>
-                </div>
-                <div>
-                  <Input
-                    label="Periodo de Facturación (YYYY-MM)"
-                    type="text"
-                    value={billingPeriod}
-                    onChange={(e) => setBillingPeriod(e.target.value)}
-                    placeholder="Ej: 2026-10"
-                  />
-                  <p className="text-xs text-gray-400 mt-1">Mes que se está facturando.</p>
                 </div>
                 <div>
                   <Select
