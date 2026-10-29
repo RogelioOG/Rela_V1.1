@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Calendar, Plus, Pencil, Trash2, Loader2, Clock, Percent, CalendarDays, AlertTriangle, CheckCircle2, Lock } from 'lucide-react';
+import { Calendar, Plus, Pencil, Trash2, Loader2, CalendarDays, AlertTriangle, CheckCircle2, Lock } from 'lucide-react';
 import { supabase, RevenuePeriod } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card } from '@/components/ui/Card';
@@ -35,24 +35,15 @@ interface FormState {
   frequency: string;
   start_date: string;
   end_date: string;
-  billing_day: string;
-  due_day: string;
-  grace_days: string;
-  offset_days: string;
-  interest_start_date: string;
-  late_interest_rate: string;
-  discount_threshold_days: string;
-  discount_rate: string;
   is_active: boolean;
   work_month: string;
   work_year: string;
   is_work_period_active: boolean;
 }
+
 const emptyForm: FormState = {
   name: '', frequency: 'mensual', start_date: '', end_date: '',
-  billing_day: '1', due_day: '5', grace_days: '0', offset_days: '0',
-  interest_start_date: '', late_interest_rate: '0', discount_threshold_days: '0',
-  discount_rate: '0', is_active: true,
+  is_active: true,
   work_month: '', work_year: String(new Date().getFullYear()), is_work_period_active: false,
 };
 
@@ -88,12 +79,14 @@ export default function CalendarioPage() {
     setEditing(null);
     const now = new Date();
     const year = now.getFullYear();
+    const month = now.getMonth() + 1;
+    const monthName = MONTHS.find(m => m.value === month)?.label ?? '';
     setForm({
       ...emptyForm,
-      name: `Recaudo ${year}`,
-      start_date: `${year}-01-01`,
-      end_date: `${year}-12-31`,
-      work_month: String(now.getMonth() + 1),
+      name: `${monthName} ${year}`,
+      start_date: `${year}-${String(month).padStart(2, '0')}-01`,
+      end_date: `${year}-${String(month).padStart(2, '0')}-28`,
+      work_month: String(month),
       work_year: String(year),
     });
     setError('');
@@ -107,14 +100,6 @@ export default function CalendarioPage() {
       frequency: p.frequency,
       start_date: p.start_date,
       end_date: p.end_date,
-      billing_day: String(p.billing_day),
-      due_day: String(p.due_day),
-      grace_days: String(p.grace_days),
-      offset_days: String(p.offset_days),
-      interest_start_date: p.interest_start_date || '',
-      late_interest_rate: String(p.late_interest_rate),
-      discount_threshold_days: String(p.discount_threshold_days),
-      discount_rate: String(p.discount_rate),
       is_active: p.is_active,
       work_month: p.work_month != null ? String(p.work_month) : '',
       work_year: p.work_year != null ? String(p.work_year) : '',
@@ -156,14 +141,13 @@ export default function CalendarioPage() {
       frequency: form.frequency,
       start_date: form.start_date,
       end_date: form.end_date,
-      billing_day: parseInt(form.billing_day) || 1,
-      due_day: parseInt(form.due_day) || 5,
-      grace_days: parseInt(form.grace_days) || 0,
-      offset_days: parseInt(form.offset_days) || 0,
-      interest_start_date: form.interest_start_date || null,
-      late_interest_rate: parseFloat(form.late_interest_rate) || 0,
-      discount_threshold_days: parseInt(form.discount_threshold_days) || 0,
-      discount_rate: parseFloat(form.discount_rate) || 0,
+      billing_day: 1,
+      due_day: 5,
+      grace_days: 0,
+      offset_days: 0,
+      late_interest_rate: 0,
+      discount_threshold_days: 0,
+      discount_rate: 0,
       is_active: form.is_active,
       work_month: workMonthVal,
       work_year: workYearVal,
@@ -171,7 +155,6 @@ export default function CalendarioPage() {
     };
 
     try {
-      // If activating this period as the work period, deactivate all others first.
       if (form.is_work_period_active) {
         await supabase
           .from('revenue_periods')
@@ -242,7 +225,6 @@ export default function CalendarioPage() {
         <Button onClick={openCreate}><Plus className="w-4 h-4" /> Nuevo Periodo</Button>
       </div>
 
-      {/* Active work period banner */}
       {activeWorkPeriod ? (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-4 mb-6 flex items-start gap-3">
           <CheckCircle2 className="w-5 h-5 text-emerald-600 mt-0.5 shrink-0" />
@@ -267,11 +249,10 @@ export default function CalendarioPage() {
         </div>
       )}
 
-      {/* Enforcement notice */}
       <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 mb-6 flex items-start gap-2">
         <Lock className="w-4 h-4 text-gray-500 mt-0.5 shrink-0" />
         <p className="text-xs text-gray-600">
-          <strong>Restricción de periodo:</strong> El sistema bloquea cualquier intento de registrar una transacción de cartera (cuotas, intereses, recaudos, acuerdos de pago) correspondiente a un periodo distinto al periodo de trabajo activo. Solo puede haber un periodo activo por organización a la vez.
+          <strong>Restricción de periodo:</strong> El sistema bloquea cualquier intento de registrar una transacción de cartera correspondiente a un periodo distinto al periodo de trabajo activo. Solo puede haber un periodo activo por organización a la vez.
         </p>
       </div>
 
@@ -290,9 +271,6 @@ export default function CalendarioPage() {
               <thead><tr className="border-b border-gray-200 bg-gray-50">
                 <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Periodo</th>
                 <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden md:table-cell">Frecuencia</th>
-                <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden lg:table-cell">Facturación / Vencimiento</th>
-                <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden lg:table-cell">Gracia / Desfase</th>
-                <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden lg:table-cell">Interés Mora</th>
                 <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Periodo Trabajo</th>
                 <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Estado</th>
                 <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Acciones</th>
@@ -305,17 +283,6 @@ export default function CalendarioPage() {
                       <p className="text-xs text-gray-500">{formatShortDate(p.start_date)} — {formatShortDate(p.end_date)}</p>
                     </td>
                     <td className="px-6 py-4 hidden md:table-cell"><Badge variant="blue">{revenueFrequencyLabels[p.frequency]}</Badge></td>
-                    <td className="px-6 py-4 text-sm text-gray-700 hidden lg:table-cell">
-                      <p>Día facturación: <strong>{p.billing_day}</strong></p>
-                      <p>Vencimiento: <strong>{p.due_day}</strong></p>
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-700 hidden lg:table-cell">
-                      <p>Gracia: {p.grace_days} días</p>
-                      <p>Desfase: {p.offset_days} días</p>
-                    </td>
-                    <td className="px-6 py-4 text-right text-sm text-gray-700 hidden lg:table-cell">
-                      {p.late_interest_rate > 0 ? `${(p.late_interest_rate * 100).toFixed(2)}%` : 'N/A'}
-                    </td>
                     <td className="px-6 py-4">
                       <div className="flex flex-col gap-1">
                         <span className="text-sm text-gray-900">{monthLabel(p.work_month)} {p.work_year ?? '—'}</span>
@@ -346,28 +313,27 @@ export default function CalendarioPage() {
         )}
       </Card>
 
-      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editing ? 'Editar Periodo' : 'Nuevo Periodo'} size="lg">
+      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editing ? 'Editar Periodo' : 'Nuevo Periodo'} size="md">
         <form onSubmit={handleSubmit} className="space-y-5">
           <div>
             <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><CalendarDays className="w-4 h-4" /> Datos del Periodo</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Input label="Nombre del Periodo *" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required placeholder="Ej: Recaudo 2026" />
-              <Select label="Frecuencia" value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value })}>
-                {Object.entries(revenueFrequencyLabels).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-              </Select>
-              <Input label="Fecha de Inicio *" type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} required />
-              <Input label="Fecha de Fin *" type="date" value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} required />
+            <div className="grid grid-cols-1 gap-4">
+              <Input label="Nombre del Periodo *" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required placeholder="Ej: Septiembre 2026" />
+              <div className="grid grid-cols-2 gap-4">
+                <Input label="Fecha de Inicio *" type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} required />
+                <Input label="Fecha de Fin *" type="date" value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} required />
+              </div>
             </div>
           </div>
 
           <div>
-            <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><Clock className="w-4 h-4" /> Periodo de Trabajo de Cartera</h3>
+            <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><CalendarDays className="w-4 h-4" /> Periodo de Trabajo de Cartera</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Select label="Mes de Trabajo" value={form.work_month} onChange={(e) => setForm({ ...form, work_month: e.target.value })}>
+              <Select label="Mes de Trabajo *" value={form.work_month} onChange={(e) => setForm({ ...form, work_month: e.target.value })}>
                 <option value="">— Seleccionar —</option>
                 {MONTHS.map(m => <option key={m.value} value={String(m.value)}>{m.label}</option>)}
               </Select>
-              <Input label="Año de Trabajo" type="number" min="2000" max="2100" value={form.work_year} onChange={(e) => setForm({ ...form, work_year: e.target.value })} placeholder="Ej: 2026" />
+              <Input label="Año de Trabajo *" type="number" min="2000" max="2100" value={form.work_year} onChange={(e) => setForm({ ...form, work_year: e.target.value })} placeholder="Ej: 2026" />
             </div>
             <label className="flex items-center gap-2 cursor-pointer mt-3 rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
               <input
@@ -381,27 +347,6 @@ export default function CalendarioPage() {
                 <p className="text-xs text-gray-500">Solo puede haber un periodo activo a la vez. Al activarlo, los demás se desactivan automáticamente.</p>
               </div>
             </label>
-          </div>
-
-          <div>
-            <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><Clock className="w-4 h-4" /> Días de Facturación y Vencimiento</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Input label="Día de Facturación (1-31)" type="number" min="1" max="31" value={form.billing_day} onChange={(e) => setForm({ ...form, billing_day: e.target.value })} />
-              <Input label="Día de Vencimiento (1-31)" type="number" min="1" max="31" value={form.due_day} onChange={(e) => setForm({ ...form, due_day: e.target.value })} />
-              <Input label="Días de Gracia" type="number" min="0" value={form.grace_days} onChange={(e) => setForm({ ...form, grace_days: e.target.value })} />
-              <Input label="Días de Desfase" type="number" min="0" value={form.offset_days} onChange={(e) => setForm({ ...form, offset_days: e.target.value })} />
-            </div>
-          </div>
-
-          <div>
-            <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><Percent className="w-4 h-4" /> Intereses de Mora y Descuentos</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Input label="Fecha Inicio Intereses de Mora" type="date" value={form.interest_start_date} onChange={(e) => setForm({ ...form, interest_start_date: e.target.value })} />
-              <Input label="Tasa de Interés de Mora (mensual)" type="number" step="0.01" value={form.late_interest_rate} onChange={(e) => setForm({ ...form, late_interest_rate: e.target.value })} placeholder="Ej: 1.5 (equivalente a 0.015)" />
-              <Input label="Días Umbral Descuento (pago anticipado)" type="number" min="0" value={form.discount_threshold_days} onChange={(e) => setForm({ ...form, discount_threshold_days: e.target.value })} />
-              <Input label="Tasa de Descuento" type="number" step="0.01" value={form.discount_rate} onChange={(e) => setForm({ ...form, discount_rate: e.target.value })} placeholder="Ej: 5 (equivalente a 0.05)" />
-            </div>
-            <p className="text-xs text-gray-400 mt-2">Las tasas se ingresan como porcentaje. Ej: 1.5 = 1.5% mensual.</p>
           </div>
 
           <label className="flex items-center gap-2 cursor-pointer">
