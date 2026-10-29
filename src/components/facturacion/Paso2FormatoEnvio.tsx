@@ -319,16 +319,14 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     setError('');
 
     try {
-      // Calcular la fecha exacta del último día del periodo contable (ej. "2026-09" -> "2026-09-30")
       const [yearStr, monthStr] = billingPeriod.split('-');
       const year = parseInt(yearStr, 10);
       const month = parseInt(monthStr, 10);
-      const lastDayDate = new Date(year, month, 0); // Día 0 del siguiente mes da el último día del mes actual
+      const lastDayDate = new Date(year, month, 0); 
       const periodEndDate = !isNaN(lastDayDate.getTime()) 
         ? lastDayDate.toISOString().slice(0, 10) 
         : new Date().toISOString().slice(0, 10);
 
-      // 1. Obtener consecutivo actual para el tipo de documento 'CC'
       const { data: docConfig } = await supabase
         .from('accounting_documents')
         .select('*')
@@ -338,7 +336,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
       let nextSeq = docConfig?.next_consecutive || 1;
 
-      // 2. Obtener cuentas parametrizadas y terceros de la organización
       const [{ data: accountsData }, { data: conceptsData }, { data: thirdPartiesData }] = await Promise.all([
         supabase.from('accounts').select('*').eq('organization_id', org.id),
         supabase.from('billing_concepts').select('*').eq('organization_id', org.id),
@@ -349,13 +346,11 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
       const concepts = conceptsData || [] as BillingConcept[];
       const thirdParties = thirdPartiesData || [] as ThirdParty[];
 
-      // Mapeo de conceptos a cuentas contables parametrizadas
       const conceptAccountMap = new Map<string, string>();
       for (const c of concepts) {
         if (c.account_id) conceptAccountMap.set(c.id, c.account_id);
       }
 
-      // Cuenta de cartera por defecto (ej. empieza por 13) e ingresos por defecto (ej. empieza por 4)
       const defaultReceivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
       const defaultIncomeAcc = accounts.find(a => a.code.startsWith('4')) || accounts[1] || accounts[0];
 
@@ -372,17 +367,15 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
           row,
         });
 
-        // Buscar o asociar el tercero correspondiente al propietario de la unidad
         let assignedThirdPartyId = null;
         if (row.unit.owner_document && thirdParties.length > 0) {
           const tp = thirdParties.find(t => t.document === row.unit.owner_document || t.name?.toLowerCase() === row.unit.owner_name?.toLowerCase());
           if (tp) assignedThirdPartyId = tp.id;
         }
         if (!assignedThirdPartyId && thirdParties.length > 0) {
-          assignedThirdPartyId = thirdParties[0].id; // Fallback al primer tercero si no hay coincidencia exacta
+          assignedThirdPartyId = thirdParties[0].id;
         }
 
-        // Insertar en dues (cartera) usando la fecha de vencimiento o cierre del periodo
         await supabase.from('dues').insert({
           organization_id: org.id,
           unit_id: row.unit.id,
@@ -393,7 +386,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
           due_date: periodEndDate,
         });
 
-        // Insertar cabecera del asiento contable en journal_entries con la fecha del periodo contable
         const { data: je, error: jeErr } = await supabase.from('journal_entries').insert({
           organization_id: org.id,
           date: periodEndDate,
@@ -406,7 +398,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (!jeErr && je && defaultReceivableAcc) {
           const linesToInsert = [];
 
-          // Línea de Débito a Cartera (con el tercero del propietario)
           linesToInsert.push({
             journal_entry_id: je.id,
             account_id: defaultReceivableAcc.id,
@@ -415,7 +406,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             third_party_id: assignedThirdPartyId,
           });
 
-          // Líneas de Crédito por cada concepto o cargo de la liquidación usando su cuenta parametrizada
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               const specificAccId = conceptAccountMap.get(cl.conceptId) || defaultIncomeAcc?.id;
@@ -430,7 +420,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               }
             }
           } else {
-            // Fallback si no hay deslose de líneas
             linesToInsert.push({
               journal_entry_id: je.id,
               account_id: defaultIncomeAcc?.id || defaultReceivableAcc.id,
@@ -440,12 +429,10 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             });
           }
 
-          // Insertar líneas contables detalladas
           await supabase.from('journal_lines').insert(linesToInsert);
         }
       }
 
-      // Actualizar el consecutivo en accounting_documents si existe
       if (docConfig) {
         await supabase.from('accounting_documents')
           .update({ next_consecutive: nextSeq + liquidation.length })
@@ -462,15 +449,26 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     setFinalizing(false);
   }
 
-  // Eliminar Facturación en Bloque (Reversión completa de dues y asientos)
+  // Eliminar Facturación en Bloque: Reversión completa, asientos y liberación automática de consecutivos
   async function handleDeleteBatch() {
     if (!confirm('¿Está seguro de eliminar toda la facturación de este periodo en bloque? Se reversarán los asientos contables y se liberarán los consecutivos.')) return;
     setDeletingBatch(true);
     setError('');
     try {
       if (org) {
+        // 1. Contar cuántas cuentas de cobro/dues se van a eliminar para liberar esos números exactamente
+        const { data: duesToDelete } = await supabase
+          .from('dues')
+          .select('id')
+          .eq('organization_id', org.id)
+          .eq('period', billingPeriod);
+
+        const countToDelete = duesToDelete?.length || 0;
+
+        // 2. Eliminar registros de dues
         await supabase.from('dues').delete().eq('organization_id', org.id).eq('period', billingPeriod);
         
+        // 3. Eliminar asientos contables vinculados a tipo 'CC'
         const { data: entriesToDelete } = await supabase
           .from('journal_entries')
           .select('id')
@@ -482,6 +480,23 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
           await supabase.from('journal_lines').delete().in('journal_entry_id', ids);
           await supabase.from('journal_entries').delete().in('id', ids);
         }
+
+        // 4. LIBERAR CONSECUTIVOS: Reintegrar los números al contador global del documento 'CC'
+        if (countToDelete > 0) {
+          const { data: docConfig } = await supabase
+            .from('accounting_documents')
+            .select('*')
+            .eq('organization_id', org.id)
+            .eq('prefix', 'CC')
+            .single();
+
+          if (docConfig) {
+            const newConsecutive = Math.max(1, (docConfig.next_consecutive || 1) - countToDelete);
+            await supabase.from('accounting_documents')
+              .update({ next_consecutive: newConsecutive })
+              .eq('id', docConfig.id);
+          }
+        }
       }
 
       setIsFinalized(false);
@@ -489,7 +504,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
       setSelected(new Set());
       setDeletingBatch(false);
     } catch (err) {
-      setError('Error al eliminar la facturación en bloque.');
+      setError('Error al eliminar la facturación en bloque y liberar consecutivos.');
       setDeletingBatch(false);
     }
   }
