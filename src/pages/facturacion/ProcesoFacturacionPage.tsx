@@ -58,7 +58,6 @@ function getDaysLate(dueDate: string, graceDays: number, cutoffDate: Date): numb
   return Math.max(0, days - graceDays);
 }
 
-// Función corregida: calcula la fecha exacta respetando sin desfasar zona horaria ni mes
 function getCutoffDate(periodStr: string, rule: CutoffRule): Date {
   const [yStr, mStr] = periodStr.split('-');
   const y = parseInt(yStr, 10);
@@ -66,10 +65,8 @@ function getCutoffDate(periodStr: string, rule: CutoffRule): Date {
   if (isNaN(y) || isNaN(m)) return new Date();
 
   if (rule === 'inicio_mes_facturar') {
-    // Primer día del mes a facturar (Ej: 2026-09 -> 1 de Septiembre 2026)
     return new Date(y, m - 1, 1);
   }
-  // Último día del mes anterior al que se está facturando (Ej: 2026-09 -> 31 de Agosto 2026)
   return new Date(y, m - 1, 0);
 }
 
@@ -105,7 +102,7 @@ export default function ProcesoFacturacionPage() {
   const [interestRate, setInterestRate] = useState('0.50');
   const [graceDays, setGraceDays] = useState('5');
   
-  // Se obtiene o establece el periodo parametrizado de trabajo (ej. '2026-09')
+  // Periodo dinámico obtenido desde el módulo de Calendario (revenue_periods)
   const [billingPeriod, setBillingPeriod] = useState('2026-09'); 
   const [cutoffRule, setCutoffRule] = useState<CutoffRule>('cierre_mes_anterior');
   const [customStartDate, setCustomStartDate] = useState('');
@@ -127,24 +124,23 @@ export default function ProcesoFacturacionPage() {
 
   const [discountRows, setDiscountRows] = useState<DiscountRow[]>([]);
 
-  // Consultar periodo activo parametrizado en la base de datos al cargar
+  // Carga segura y lectura directa del periodo activo parametrizado en el Calendario (revenue_periods)
   const loadData = useCallback(async () => {
     if (!activeOrg) return;
     setLoading(true);
 
     try {
-      // Buscar el último o actual periodo activo en el calendario
-      const { data: activeCalendar } = await supabase
-        .from('billing_periods')
-        .select('period')
+      // Consultar el periodo de trabajo activo parametrizado en el módulo de Calendario
+      const { data: activePeriodData } = await supabase
+        .from('revenue_periods')
+        .select('work_month, work_year')
         .eq('organization_id', activeOrg.id)
-        .eq('status', 'abierto')
-        .order('period', { ascending: false })
-        .limit(1)
+        .eq('is_work_period_active', true)
         .maybeSingle();
 
-      if (activeCalendar?.period) {
-        setBillingPeriod(activeCalendar.period);
+      if (activePeriodData && activePeriodData.work_month != null && activePeriodData.work_year != null) {
+        const formattedMonth = String(activePeriodData.work_month).padStart(2, '0');
+        setBillingPeriod(`${activePeriodData.work_year}-${formattedMonth}`);
       }
 
       const [
@@ -252,7 +248,6 @@ export default function ProcesoFacturacionPage() {
     checkExistingPeriodHydration();
   }, [activeOrg, billingPeriod, units]);
 
-  // Cálculo corregido de la fecha de corte basada estrictamente en el periodo de trabajo
   const effectiveCutoffDate = useMemo(() => {
     if (customStartDate) return new Date(customStartDate + 'T00:00:00');
     return getCutoffDate(billingPeriod, cutoffRule);
@@ -620,7 +615,7 @@ export default function ProcesoFacturacionPage() {
                     <option value="cierre_mes_anterior">Día de cierre del mes anterior</option>
                     <option value="inicio_mes_facturar">Día 1 del mes a facturar</option>
                   </Select>
-                  <p className="text-xs text-gray-400 mt-1">Define el corte de saldos elegibles según el periodo ({billingPeriod}).</p>
+                  <p className="text-xs text-gray-400 mt-1">Define el corte de saldos elegibles según el periodo activo ({billingPeriod}).</p>
                 </div>
               </div>
 
