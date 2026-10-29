@@ -369,7 +369,6 @@ export default function ProcesoFacturacionPage() {
         chargeLines,
         interestAmount,
         discountAmount: 0,
-        // CORRECCIÓN: netTotal incluye obligatoriamente priorBalance + currentCharges + interestAmount
         netTotal: round2(priorBalance + currentCharges + interestAmount),
         rowId: unit.id,
       };
@@ -900,21 +899,36 @@ export default function ProcesoFacturacionPage() {
 
           {currentStep === 3 && (
             <Paso2FormatoEnvio
-              liquidation={liquidation.map(r => ({
-                due: r.due || ({ id: r.rowId, organization_id: activeOrg.id, unit_id: r.unit.id, type: 'ordinaria' as const, period: billingPeriod, due_date: new Date().toISOString().slice(0, 10), amount: r.currentCharges, interest_rate: r.interestRate, balance: r.priorBalance, status: 'pendiente' as const, created_at: '' }) as Due,
-                unit: r.unit,
-                daysLate: r.daysLate,
-                interestRate: r.interestRate,
-                priorBalance: r.priorBalance,
-                currentCharges: r.currentCharges,
-                chargeLines: r.chargeLines,
-                interestAmount: r.interestAmount,
-                discountAmount: r.discountAmount,
-                netTotal: r.netTotal,
-                totalWithInterest: r.netTotal,
-                baseAmount: r.currentCharges,
-                rowId: r.rowId,
-              }))}
+              liquidation={liquidation.map(r => {
+                const linesWithInterest = [...r.chargeLines];
+                if (r.interestAmount > 0) {
+                  linesWithInterest.push({
+                    conceptId: 'interest-mora-id',
+                    conceptName: `Interés de Mora (${r.interestRate.toFixed(2)}%)`,
+                    conceptCode: 'IM',
+                    amount: r.interestAmount,
+                    isQuota: false,
+                    isNovelty: false,
+                  });
+                }
+                const totalChargesWithInterest = round2(r.currentCharges + r.interestAmount);
+
+                return {
+                  due: r.due || ({ id: r.rowId, organization_id: activeOrg.id, unit_id: r.unit.id, type: 'ordinaria' as const, period: billingPeriod, due_date: new Date().toISOString().slice(0, 10), amount: totalChargesWithInterest, interest_rate: r.interestRate, balance: r.priorBalance, status: 'pendiente' as const, created_at: '' }) as Due,
+                  unit: r.unit,
+                  daysLate: r.daysLate,
+                  interestRate: r.interestRate,
+                  priorBalance: r.priorBalance,
+                  currentCharges: totalChargesWithInterest,
+                  chargeLines: linesWithInterest,
+                  interestAmount: r.interestAmount,
+                  discountAmount: r.discountAmount,
+                  netTotal: r.netTotal,
+                  totalWithInterest: r.netTotal,
+                  baseAmount: totalChargesWithInterest,
+                  rowId: r.rowId,
+                };
+              })}
               agreements={[...agreements, ...defaultedAgreements]}
               org={activeOrg}
               billingPeriod={billingPeriod}
