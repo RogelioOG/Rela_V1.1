@@ -355,9 +355,10 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
       const concepts = conceptsData || [] as BillingConcept[];
       const thirdParties = thirdPartiesData || [] as ThirdParty[];
 
-      const conceptAccountMap = new Map<string, string>();
+      // Mapeo exhaustivo de conceptos para extraer sus cuentas parametrizadas
+      const conceptMap = new Map<string, BillingConcept>();
       for (const c of concepts) {
-        if (c.account_id) conceptAccountMap.set(c.id, c.account_id);
+        conceptMap.set(c.id, c);
       }
 
       const defaultReceivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
@@ -376,10 +377,20 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
           row,
         });
 
+        // Búsqueda estricta del tercero por el ID del inmueble (Torre-Unidad o Unidad)
+        const expectedUnitIdIdentifier = row.unit.tower 
+          ? `${row.unit.tower}-${row.unit.unit_label}`.trim() 
+          : `${row.unit.unit_label}`.trim();
+
         let assignedThirdPartyId = null;
-        if (row.unit.owner_document && thirdParties.length > 0) {
-          const tp = thirdParties.find(t => t.document === row.unit.owner_document || t.name?.toLowerCase() === row.unit.owner_name?.toLowerCase());
-          if (tp) assignedThirdPartyId = tp.id;
+        if (thirdParties.length > 0) {
+          const tpMatch = thirdParties.find(t => 
+            t.document === row.unit.owner_document || 
+            t.document === expectedUnitIdIdentifier || 
+            t.name?.toLowerCase() === row.unit.owner_name?.toLowerCase() ||
+            t.name?.toLowerCase() === expectedUnitIdIdentifier.toLowerCase()
+          );
+          if (tpMatch) assignedThirdPartyId = tpMatch.id;
         }
         if (!assignedThirdPartyId && thirdParties.length > 0) {
           assignedThirdPartyId = thirdParties[0].id;
@@ -398,7 +409,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         const { data: je, error: jeErr } = await supabase.from('journal_entries').insert({
           organization_id: org.id,
           date: periodEndDate,
-          description: `Causación Cuota de Cobro ${invoiceNumber} - ${row.unit.tower} ${row.unit.unit_label} Periodo ${billingPeriod}`,
+          description: `Causación Cuota de Cobro ${invoiceNumber} - ${row.unit.tower ? row.unit.tower + '-' : ''}${row.unit.unit_label} Periodo ${billingPeriod}`,
           document_type: 'CC',
           document_number: nextSeq + i,
           is_manual: true,
@@ -407,7 +418,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (!jeErr && je && defaultReceivableAcc) {
           const linesToInsert = [];
 
-          // 1. Débito a cartera por el total neto de la factura (incluyendo intereses)
+          // 1. Débito a cartera por el total neto de la factura
           linesToInsert.push({
             journal_entry_id: je.id,
             account_id: defaultReceivableAcc.id,
@@ -416,14 +427,16 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             third_party_id: assignedThirdPartyId,
           });
 
-          // 2. Créditos por conceptos base de cuotas y novedades del periodo
+          // 2. Créditos tomados estrictamente de la parametrización de cada concepto (Cuotas y Novedades)
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
-              const specificAccId = conceptAccountMap.get(cl.conceptId) || defaultIncomeAcc?.id;
-              if (specificAccId && cl.amount > 0) {
+              const conceptDef = conceptMap.get(cl.conceptId);
+              // Usamos la cuenta de ingreso / orden parametrizada en el concepto, con fallback seguro
+              const targetAccId = conceptDef?.account_id || defaultIncomeAcc?.id;
+              if (targetAccId && cl.amount > 0) {
                 linesToInsert.push({
                   journal_entry_id: je.id,
-                  account_id: specificAccId,
+                  account_id: targetAccId,
                   debit: 0,
                   credit: cl.amount,
                   third_party_id: assignedThirdPartyId,
@@ -432,13 +445,16 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // 3. Crédito específico por Intereses de Mora calculados
+          // 3. Crédito específico por Intereses de Mora respetando su parametrización (Cuentas de Orden / Contra-cuenta)
           if (row.interestAmount && row.interestAmount > 0) {
-            const interestAcc = accounts.find(a => a.code.startsWith('42') || a.name.toLowerCase().includes('interés')) || defaultIncomeAcc;
-            if (interestAcc) {
+            // Buscamos el concepto de intereses de mora parametrizado (ej: código MORA_ADM o similar)
+            const interestConceptDef = Array.from(conceptMap.values()).find(c => c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés'));
+            const interestAccId = interestConceptDef?.account_id || accounts.find(a => a.code.startsWith('8') || a.code.startsWith('42'))?.id || defaultIncomeAcc?.id;
+
+            if (interestAccId) {
               linesToInsert.push({
                 journal_entry_id: je.id,
-                account_id: interestAcc.id,
+                account_id: interestAccId,
                 debit: 0,
                 credit: row.interestAmount,
                 third_party_id: assignedThirdPartyId,
