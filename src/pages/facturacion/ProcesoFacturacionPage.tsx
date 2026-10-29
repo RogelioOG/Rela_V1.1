@@ -51,25 +51,30 @@ const cutoffRuleHelp: Record<CutoffRule, string> = {
 };
 
 function getDaysLate(dueDate: string, graceDays: number, cutoffDate: Date): number {
-  const due = new Date(dueDate);
+  const due = new Date(dueDate + 'T00:00:00');
   const ms = cutoffDate.getTime() - due.getTime();
   if (ms <= 0) return 0;
   const days = Math.floor(ms / (1000 * 60 * 60 * 24));
   return Math.max(0, days - graceDays);
 }
 
-// Corrección clave: Calcula el corte basado estrictamente en el periodo YYYY-MM parametrizado
-function getCutoffDate(period: string, rule: CutoffRule): Date {
-  const [y, m] = period.split('-').map(Number);
-  if (!y || !m) return new Date();
+// Función corregida: calcula la fecha exacta respetando sin desfasar zona horaria ni mes
+function getCutoffDate(periodStr: string, rule: CutoffRule): Date {
+  const [yStr, mStr] = periodStr.split('-');
+  const y = parseInt(yStr, 10);
+  const m = parseInt(mStr, 10);
+  if (isNaN(y) || isNaN(m)) return new Date();
+
   if (rule === 'inicio_mes_facturar') {
-    return new Date(y, m - 1, 1); // Día 1 del mes del periodo
+    // Primer día del mes a facturar (Ej: 2026-09 -> 1 de Septiembre 2026)
+    return new Date(y, m - 1, 1);
   }
-  return new Date(y, m - 1, 0); // Último día del mes anterior al periodo
+  // Último día del mes anterior al que se está facturando (Ej: 2026-09 -> 31 de Agosto 2026)
+  return new Date(y, m - 1, 0);
 }
 
 function isEligibleDue(dueDate: string, cutoffDate: Date): boolean {
-  const due = new Date(dueDate);
+  const due = new Date(dueDate + 'T00:00:00');
   return due.getTime() < cutoffDate.getTime();
 }
 
@@ -99,7 +104,9 @@ export default function ProcesoFacturacionPage() {
 
   const [interestRate, setInterestRate] = useState('0.50');
   const [graceDays, setGraceDays] = useState('5');
-  const [billingPeriod, setBillingPeriod] = useState(new Date().toISOString().slice(0, 7));
+  
+  // Se obtiene o establece el periodo parametrizado de trabajo (ej. '2026-09')
+  const [billingPeriod, setBillingPeriod] = useState('2026-09'); 
   const [cutoffRule, setCutoffRule] = useState<CutoffRule>('cierre_mes_anterior');
   const [customStartDate, setCustomStartDate] = useState('');
 
@@ -120,73 +127,95 @@ export default function ProcesoFacturacionPage() {
 
   const [discountRows, setDiscountRows] = useState<DiscountRow[]>([]);
 
+  // Consultar periodo activo parametrizado en la base de datos al cargar
   const loadData = useCallback(async () => {
     if (!activeOrg) return;
     setLoading(true);
-    const [
-      { data: duesData },
-      { data: unitsData },
-      { data: agrData },
-      { data: quotaData },
-      { data: noveltyData },
-      { data: tierData },
-      { data: conceptData },
-    ] = await Promise.all([
-      supabase
-        .from('dues')
-        .select('*, units(*)')
+
+    try {
+      // Buscar el último o actual periodo activo en el calendario
+      const { data: activeCalendar } = await supabase
+        .from('billing_periods')
+        .select('period')
         .eq('organization_id', activeOrg.id)
-        .neq('status', 'pagada')
-        .order('due_date', { ascending: false }),
-      supabase
-        .from('units')
-        .select('*')
-        .eq('organization_id', activeOrg.id)
-        .eq('is_active', true)
-        .order('unit_label'),
-      supabase
-        .from('payment_agreements')
-        .select('*, units(*)')
-        .eq('organization_id', activeOrg.id)
-        .eq('is_active', true)
-        .eq('status', 'incumplido'),
-      supabase
-        .from('admin_quotas')
-        .select('*, admin_quota_lines(*), billing_concept:billing_concepts(*)')
-        .eq('organization_id', activeOrg.id)
-        .eq('is_active', true),
-      supabase
-        .from('period_novelties')
-        .select('*, billing_concept:billing_concepts(*), units:units(*)')
-        .eq('organization_id', activeOrg.id)
-        .eq('is_invoiced', false),
-      supabase
-        .from('discount_tiers')
-        .select('*')
-        .eq('organization_id', activeOrg.id)
-        .eq('is_active', true)
-        .order('tier_order', { ascending: true }),
-      supabase
-        .from('billing_concepts')
-        .select('*')
-        .eq('organization_id', activeOrg.id)
-        .eq('is_active', true)
-        .order('is_default', { ascending: false })
-        .order('name'),
-    ]);
-    setDues((duesData || []) as Due[]);
-    setUnits((unitsData || []) as Unit[]);
-    setAgreements((agrData || []) as PaymentAgreement[]);
-    setAdminQuotas((quotaData || []) as AdminQuota[]);
-    setNovelties((noveltyData || []) as PeriodNovelty[]);
-    setDiscountTiers((tierData || []) as DiscountTier[]);
-    setConcepts((conceptData || []) as BillingConcept[]);
+        .eq('status', 'abierto')
+        .order('period', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (activeCalendar?.period) {
+        setBillingPeriod(activeCalendar.period);
+      }
+
+      const [
+        { data: duesData },
+        { data: unitsData },
+        { data: agrData },
+        { data: quotaData },
+        { data: noveltyData },
+        { data: tierData },
+        { data: conceptData },
+      ] = await Promise.all([
+        supabase
+          .from('dues')
+          .select('*, units(*)')
+          .eq('organization_id', activeOrg.id)
+          .neq('status', 'pagada')
+          .order('due_date', { ascending: false }),
+        supabase
+          .from('units')
+          .select('*')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_active', true)
+          .order('unit_label'),
+        supabase
+          .from('payment_agreements')
+          .select('*, units(*)')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_active', true)
+          .eq('status', 'incumplido'),
+        supabase
+          .from('admin_quotas')
+          .select('*, admin_quota_lines(*), billing_concept:billing_concepts(*)')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_active', true),
+        supabase
+          .from('period_novelties')
+          .select('*, billing_concept:billing_concepts(*), units:units(*)')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_invoiced', false),
+        supabase
+          .from('discount_tiers')
+          .select('*')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_active', true)
+          .order('tier_order', { ascending: true }),
+        supabase
+          .from('billing_concepts')
+          .select('*')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_active', true)
+          .order('is_default', { ascending: false })
+          .order('name'),
+      ]);
+
+      setDues((duesData || []) as Due[]);
+      setUnits((unitsData || []) as Unit[]);
+      setAgreements((agrData || []) as PaymentAgreement[]);
+      setAdminQuotas((quotaData || []) as AdminQuota[]);
+      setNovelties((noveltyData || []) as PeriodNovelty[]);
+      setDiscountTiers((tierData || []) as DiscountTier[]);
+      setConcepts((conceptData || []) as BillingConcept[]);
+    } catch (err) {
+      console.warn('Error cargando datos de facturación:', err);
+    }
+
     setLoading(false);
   }, [activeOrg]);
 
   useEffect(() => { if (activeOrg) loadData(); }, [activeOrg, loadData]);
 
-  // Hidratación automática: Verifica si ya existe facturación previa para este periodo y auto-restaura el estado sin perder datos
+  // Hidratación automática: Verifica si ya existe facturación previa para este periodo y auto-restaura el estado
   useEffect(() => {
     async function checkExistingPeriodHydration() {
       if (!activeOrg || !billingPeriod || units.length === 0) return;
@@ -223,10 +252,9 @@ export default function ProcesoFacturacionPage() {
     checkExistingPeriodHydration();
   }, [activeOrg, billingPeriod, units]);
 
-  // Cálculo de la fecha de corte efectiva vinculada estrictamente al billingPeriod o a la fecha personalizada
+  // Cálculo corregido de la fecha de corte basada estrictamente en el periodo de trabajo
   const effectiveCutoffDate = useMemo(() => {
     if (customStartDate) return new Date(customStartDate + 'T00:00:00');
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(billingPeriod)) return new Date();
     return getCutoffDate(billingPeriod, cutoffRule);
   }, [customStartDate, billingPeriod, cutoffRule]);
 
@@ -558,7 +586,6 @@ export default function ProcesoFacturacionPage() {
               </p>
             </div>
             <CardBody>
-              {/* Se eliminó el campo redundante de Periodo de Facturación para sincronizarse estrictamente con el Calendario global */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 <div>
                   <Input
@@ -593,7 +620,7 @@ export default function ProcesoFacturacionPage() {
                     <option value="cierre_mes_anterior">Día de cierre del mes anterior</option>
                     <option value="inicio_mes_facturar">Día 1 del mes a facturar</option>
                   </Select>
-                  <p className="text-xs text-gray-400 mt-1">Define el corte de saldos elegibles según el periodo.</p>
+                  <p className="text-xs text-gray-400 mt-1">Define el corte de saldos elegibles según el periodo ({billingPeriod}).</p>
                 </div>
               </div>
 
@@ -615,7 +642,7 @@ export default function ProcesoFacturacionPage() {
                   <div>
                     <p className="text-xs text-gray-500">Fecha de corte efectiva</p>
                     <p className="text-sm font-semibold text-gray-900">
-                      {effectiveCutoffDate.toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric' })}
+                      {effectiveCutoffDate.toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' })}
                     </p>
                     <p className="text-xs text-gray-400 mt-0.5">
                       {customStartDate ? 'Fecha personalizada (activa)' : cutoffRuleLabels[cutoffRule]}
@@ -978,7 +1005,7 @@ export default function ProcesoFacturacionPage() {
           </div>
 
           <div className="flex justify-end gap-3 pt-2">
-            <Button variant="outline" onClick={() => setWarningInfo(false)}>Cerrar y Revisar</Button>
+            <Button variant="outline" onClick={() => setWarningOpen(false)}>Cerrar y Revisar</Button>
             <Button onClick={() => setWarningOpen(false)}>
               <CheckCircle2 className="w-4 h-4" /> Continuar con Facturación
             </Button>
