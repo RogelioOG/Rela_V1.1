@@ -44,7 +44,7 @@ interface FormState {
 const emptyForm: FormState = {
   name: '', frequency: 'mensual', start_date: '', end_date: '',
   is_active: true,
-  work_month: '', work_year: String(new Date().getFullYear()), is_work_period_active: false,
+  work_month: '9', work_year: '2026', is_work_period_active: false,
 };
 
 export default function CalendarioPage() {
@@ -75,20 +75,49 @@ export default function CalendarioPage() {
     setLoading(false);
   }, [activeOrg]);
 
+  // Calcula automáticamente fechas y nombre fiscalmente en orden estricto
+  function updatePeriodDatesAndName(monthStr: string, yearStr: string, currentForm: FormState) {
+    const m = parseInt(monthStr);
+    const y = parseInt(yearStr);
+    let updated = { ...currentForm, work_month: monthStr, work_year: yearStr };
+
+    if (!isNaN(m) && !isNaN(y) && y > 1900) {
+      const monthName = MONTHS.find(x => x.value === m)?.label ?? '';
+      const formattedMonth = String(m).padStart(2, '0');
+      const startDate = `${y}-${formattedMonth}-01`;
+      const lastDay = new Date(y, m, 0).getDate();
+      const endDate = `${y}-${formattedMonth}-${String(lastDay).padStart(2, '0')}`;
+
+      updated.name = `${monthName} ${y}`;
+      updated.start_date = startDate;
+      updated.end_date = endDate;
+    }
+    return updated;
+  }
+
   function openCreate() {
     setEditing(null);
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = now.getMonth() + 1;
-    const monthName = MONTHS.find(m => m.value === month)?.label ?? '';
-    setForm({
-      ...emptyForm,
-      name: `${monthName} ${year}`,
-      start_date: `${year}-${String(month).padStart(2, '0')}-01`,
-      end_date: `${year}-${String(month).padStart(2, '0')}-28`,
-      work_month: String(month),
-      work_year: String(year),
-    });
+    
+    // Buscar el último periodo creado para sugerir de forma inteligente el siguiente mes consecutivo en orden
+    let nextMonth = 1;
+    let nextYear = 2026;
+
+    if (items.length > 0) {
+      // Tomamos el periodo más reciente registrado
+      const latest = items[0];
+      if (latest.work_month != null && latest.work_year != null) {
+        if (latest.work_month === 12) {
+          nextMonth = 1;
+          nextYear = latest.work_year + 1; // Si era diciembre, avanza al siguiente año fiscal en orden
+        } else {
+          nextMonth = latest.work_month + 1; // Mes siguiente consecutivo (Ej: Sep -> Oct)
+          nextYear = latest.work_year;       // Mantiene el año fiscal actual de trabajo
+        }
+      }
+    }
+
+    const initialForm = updatePeriodDatesAndName(String(nextMonth), String(nextYear), emptyForm);
+    setForm(initialForm);
     setError('');
     setModalOpen(true);
   }
@@ -313,28 +342,38 @@ export default function CalendarioPage() {
         )}
       </Card>
 
-      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editing ? 'Editar Periodo' : 'Nuevo Periodo'} size="md">
+      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editing ? 'Editar Periodo' : 'Nuevo Periodo (Siguiente Consecutivo)'} size="md">
         <form onSubmit={handleSubmit} className="space-y-5">
-          <div>
-            <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><CalendarDays className="w-4 h-4" /> Datos del Periodo</h3>
-            <div className="grid grid-cols-1 gap-4">
-              <Input label="Nombre del Periodo *" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required placeholder="Ej: Septiembre 2026" />
-              <div className="grid grid-cols-2 gap-4">
-                <Input label="Fecha de Inicio *" type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} required />
-                <Input label="Fecha de Fin *" type="date" value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} required />
-              </div>
+          <div className="space-y-4">
+            <Input label="Nombre del Periodo (Automático)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required placeholder="Ej: Octubre 2026" />
+            <div className="grid grid-cols-2 gap-4">
+              <Input label="Fecha de Inicio *" type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} required />
+              <Input label="Fecha de Fin *" type="date" value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} required />
             </div>
           </div>
 
           <div>
-            <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><CalendarDays className="w-4 h-4" /> Periodo de Trabajo de Cartera</h3>
+            <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2"><CalendarDays className="w-4 h-4" /> Periodo de Trabajo (Secuencia Consecutiva y Año Fiscal)</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Select label="Mes de Trabajo *" value={form.work_month} onChange={(e) => setForm({ ...form, work_month: e.target.value })}>
-                <option value="">— Seleccionar —</option>
+              <Select 
+                label="Mes Siguiente Consecutivo *" 
+                value={form.work_month} 
+                onChange={(e) => setForm(updatePeriodDatesAndName(e.target.value, form.work_year, form))}
+              >
                 {MONTHS.map(m => <option key={m.value} value={String(m.value)}>{m.label}</option>)}
               </Select>
-              <Input label="Año de Trabajo *" type="number" min="2000" max="2100" value={form.work_year} onChange={(e) => setForm({ ...form, work_year: e.target.value })} placeholder="Ej: 2026" />
+              <Input 
+                label="Año Fiscal de Trabajo *" 
+                type="number" 
+                min="2000" 
+                max="2100" 
+                value={form.work_year} 
+                onChange={(e) => setForm(updatePeriodDatesAndName(form.work_month, e.target.value, form))} 
+                placeholder="Ej: 2026" 
+              />
             </div>
+            <p className="text-xs text-gray-500 mt-1.5">El sistema sugiere automáticamente el mes consecutivo en orden estricto, respetando el año fiscal sin amarrarse a la fecha del sistema.</p>
+            
             <label className="flex items-center gap-2 cursor-pointer mt-3 rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
               <input
                 type="checkbox"
@@ -370,7 +409,7 @@ export default function CalendarioPage() {
           )}
         </p>
         <div className="flex justify-end gap-3">
-          <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancelar</Button>
+          <Button variant="outline" onClick={() => deleteTarget && handleDelete()}>Cancelar</Button>
           <Button variant="danger" onClick={handleDelete}>Sí, Eliminar</Button>
         </div>
       </Modal>
