@@ -131,9 +131,10 @@ export default function ConceptosPage() {
       discount_counterpart_account_id: form.discount_counterpart_account_id || null,
     };
 
-    // Solo incluimos third_account_id si la base de datos lo soporta o lo agregamos opcionalmente
     if (form.account_class === 'orden' && form.third_account_id) {
       payload.third_account_id = form.third_account_id;
+    } else {
+      payload.third_account_id = null;
     }
 
     try {
@@ -153,7 +154,6 @@ export default function ConceptosPage() {
         parentId = created.id;
       }
 
-      // Auto-create late-interest sub-concept if this is a main concept (not already a late interest concept)
       if (parentId && !editing?.is_late_interest) {
         const lateInterestCode = `MORA_${form.code.toUpperCase()}`;
         const lateInterestName = `Intereses de Mora por ${form.name}`;
@@ -431,14 +431,13 @@ export default function ConceptosPage() {
             </Select>
           </div>
 
-          {/* Campo dinámico para la tercera cuenta exclusiva de Cuentas de Orden */}
+          {/* Campo dinámico para la tercera cuenta en Cuentas de Orden (con todas las cuentas activas disponibles) */}
           {form.account_class === 'orden' && (
             <div className="rounded-lg bg-purple-50 border border-purple-200 px-4 py-4 space-y-3">
               <p className="text-sm font-semibold text-purple-900">Tercera Cuenta Contable (Automatización)</p>
-              <p className="text-xs text-purple-700">Parametrice una cuenta adicional de orden para la automatización en procesos futuros como recibos de caja.</p>
               <Select label="Tercera Cuenta Contable" value={form.third_account_id} onChange={(e) => setForm({ ...form, third_account_id: e.target.value })}>
                 <option value="">— Seleccionar —</option>
-                {filteredAccounts(form.account_class).map(a => (
+                {accounts.map(a => (
                   <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
                 ))}
               </Select>
