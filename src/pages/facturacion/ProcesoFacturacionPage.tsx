@@ -102,7 +102,6 @@ export default function ProcesoFacturacionPage() {
   const [interestRate, setInterestRate] = useState('0.50');
   const [graceDays, setGraceDays] = useState('5');
   
-  // Periodo dinámico obtenido desde el módulo de Calendario (revenue_periods)
   const [billingPeriod, setBillingPeriod] = useState('2026-09'); 
   const [cutoffRule, setCutoffRule] = useState<CutoffRule>('cierre_mes_anterior');
   const [customStartDate, setCustomStartDate] = useState('');
@@ -124,13 +123,11 @@ export default function ProcesoFacturacionPage() {
 
   const [discountRows, setDiscountRows] = useState<DiscountRow[]>([]);
 
-  // Carga segura y lectura directa del periodo activo parametrizado en el Calendario (revenue_periods)
   const loadData = useCallback(async () => {
     if (!activeOrg) return;
     setLoading(true);
 
     try {
-      // Consultar el periodo de trabajo activo parametrizado en el módulo de Calendario
       const { data: activePeriodData } = await supabase
         .from('revenue_periods')
         .select('work_month, work_year')
@@ -211,7 +208,6 @@ export default function ProcesoFacturacionPage() {
 
   useEffect(() => { if (activeOrg) loadData(); }, [activeOrg, loadData]);
 
-  // Hidratación automática: Verifica si ya existe facturación previa para este periodo y auto-restaura el estado
   useEffect(() => {
     async function checkExistingPeriodHydration() {
       if (!activeOrg || !billingPeriod || units.length === 0) return;
@@ -373,6 +369,7 @@ export default function ProcesoFacturacionPage() {
         chargeLines,
         interestAmount,
         discountAmount: 0,
+        // CORRECCIÓN: netTotal incluye obligatoriamente priorBalance + currentCharges + interestAmount
         netTotal: round2(priorBalance + currentCharges + interestAmount),
         rowId: unit.id,
       };
@@ -521,7 +518,6 @@ export default function ProcesoFacturacionPage() {
         <p className="text-gray-500 mt-1">Generación de facturación con cuotas, novedades, intereses de mora y descuentos</p>
       </div>
 
-      {/* Stepper */}
       <div className="mb-6">
         <div className="flex items-center gap-2 overflow-x-auto pb-2">
           {STEPS.map((step, idx) => (
@@ -567,7 +563,6 @@ export default function ProcesoFacturacionPage() {
         </div>
       ) : (
         <>
-          {/* Step 1 */}
           {currentStep === 1 && (
             <>
           <Card className="mb-6">
@@ -804,7 +799,6 @@ export default function ProcesoFacturacionPage() {
           </>
           )}
 
-          {/* Step 2: Discount Configuration */}
           {currentStep === 2 && hasDiscounts && (
             <Card>
               <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
@@ -904,7 +898,6 @@ export default function ProcesoFacturacionPage() {
             </Card>
           )}
 
-          {/* Step 3: Formats & Email */}
           {currentStep === 3 && (
             <Paso2FormatoEnvio
               liquidation={liquidation.map(r => ({
@@ -930,7 +923,6 @@ export default function ProcesoFacturacionPage() {
             />
           )}
 
-          {/* Step 4: Completion */}
           {currentStep === 4 && (
             <Card>
               <div className="text-center py-16">
@@ -948,7 +940,6 @@ export default function ProcesoFacturacionPage() {
         </>
       )}
 
-      {/* Warning Modal */}
       <Modal
         open={warningOpen}
         onClose={() => setWarningOpen(false)}
