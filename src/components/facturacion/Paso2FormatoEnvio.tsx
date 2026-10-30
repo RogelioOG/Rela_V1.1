@@ -407,7 +407,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (!jeErr && je) {
           const linesToInsights = [];
 
-          // 1. Procesar cada concepto regular de la liquidación
+          // 1. Procesar estrictamente los conceptos regulares (Administración, etc.)
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode?.toUpperCase());
@@ -418,7 +418,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                 conceptDef?.is_late_interest === true || 
                 conceptDef?.causa_intereses === true;
 
-              if (isInterestConcept) continue;
+              if (isInterestConcept) continue; // Excluimos los intereses de aquí para evitar mezclas o duplicados
 
               const debitAccId = conceptDef?.counterpart_account_id || defaultReceivableAcc?.id;
               const creditAccId = conceptDef?.income_account_id || defaultIncomeAcc?.id;
@@ -446,11 +446,10 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // Fallback seguro: si por alguna razón no se agregaron líneas de cargos pero hay un cargo general en la fila
+          // Fallback en caso de que chargeLines esté vacío pero existan currentCharges
           if (linesToInsights.length === 0 && row.currentCharges > 0) {
-            const firstConcept = row.chargeLines?.[0] ? conceptMap.get(row.chargeLines[0].conceptId) : null;
-            const debitAccId = firstConcept?.counterpart_account_id || defaultReceivableAcc?.id;
-            const creditAccId = firstConcept?.income_account_id || defaultIncomeAcc?.id;
+            const debitAccId = defaultReceivableAcc?.id;
+            const creditAccId = defaultIncomeAcc?.id;
 
             if (debitAccId) {
               linesToInsights.push({
@@ -472,7 +471,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // 2. Procesar Intereses de Mora de forma única
+          // 2. Procesar Intereses de Mora de forma independiente, limpia y exacta (1 sola vez)
           if (row.interestAmount && row.interestAmount > 0) {
             const interestConceptDef = 
               conceptMap.get('MORA_ADM') || 
@@ -480,8 +479,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                 c => c.code?.toUpperCase() === 'MORA_ADM' || c.is_late_interest === true || c.causa_intereses === true
               );
 
-            const debitAccId = interestConceptDef?.counterpart_account_id; 
-            const creditAccId = interestConceptDef?.income_account_id;     
+            const debitAccId = interestConceptDef?.counterpart_account_id; // ej: 86200501 (Débito)
+            const creditAccId = interestConceptDef?.income_account_id;     // ej: 81200501 (Crédito)
 
             if (debitAccId && creditAccId) {
               linesToInsights.push({
