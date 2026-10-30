@@ -378,7 +378,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
           row,
         });
 
-        // Búsqueda estricta del tercero por el ID del inmueble (Torre-Unidad o Unidad) o ID directo
+        // Búsqueda estricta del tercero por el ID del inmueble o documento
         let assignedThirdPartyId = row.unit.third_party_id || null;
         if (!assignedThirdPartyId && thirdParties.length > 0) {
           const expectedUnitIdIdentifier = row.unit.tower 
@@ -419,12 +419,16 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (!jeErr && je && defaultReceivableAcc) {
           const linesToInsert = [];
 
-          // 1. Débito a la cuenta por cobrar (Contrapartida configurada en el concepto, ej: 13452501)
+          // 1. Débito a la cuenta por cobrar (Tomando estrictamente la contrapartida configurada en el concepto, ej: 13452501)
           let receivableAccId = defaultReceivableAcc.id;
           if (row.chargeLines && row.chargeLines.length > 0) {
             const firstConcept = conceptMap.get(row.chargeLines[0].conceptId) || conceptMap.get(row.chargeLines[0].conceptCode?.toUpperCase());
-            if (firstConcept?.counterparty_account_id) {
-              receivableAccId = firstConcept.counterparty_account_id;
+            if (firstConcept) {
+              receivableAccId = 
+                firstConcept.counterparty_account_id || 
+                (firstConcept as any).account_counterparty_id || 
+                (firstConcept as any).contraparty_id || 
+                defaultReceivableAcc.id;
             }
           }
 
@@ -453,15 +457,38 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // 3. Crédito específico por Intereses de Mora respetando su parametrización (Cuentas de Orden / Contra-cuenta)
+          // 3. Manejo correcto de Intereses de Mora (respetando la cuenta de orden/ingreso y su contrapartida cruzada)
           if (row.interestAmount && row.interestAmount > 0) {
-            const interestConceptDef = Array.from(conceptMap.values()).find(c => c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés'));
-            const interestAccId = interestConceptDef?.income_account_id || interestConceptDef?.account_id || accounts.find(a => a.code.startsWith('8') || a.code.startsWith('42'))?.id || defaultIncomeAcc?.id;
+            const interestConceptDef = Array.from(conceptMap.values()).find(
+              c => c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés') || c.name?.toLowerCase().includes('mora')
+            );
 
-            if (interestAccId) {
+            const interestIncomeAccId = 
+              interestConceptDef?.income_account_id || 
+              interestConceptDef?.account_id || 
+              accounts.find(a => a.code.startsWith('8') || a.code.startsWith('42'))?.id || 
+              defaultIncomeAcc?.id;
+
+            const interestCounterAccId = 
+              interestConceptDef?.counterparty_account_id || 
+              (interestConceptDef as any)?.account_counterparty_id || 
+              accounts.find(a => a.code.startsWith('86') || a.code.startsWith('13'))?.id || 
+              defaultReceivableAcc.id;
+
+            if (interestIncomeAccId && interestCounterAccId) {
+              // Contrapartida del interés (Débito)
               linesToInsert.push({
                 journal_entry_id: je.id,
-                account_id: interestAccId,
+                account_id: interestCounterAccId,
+                debit: row.interestAmount,
+                credit: 0,
+                third_party_id: assignedThirdPartyId,
+              });
+
+              // Ingreso u orden del interés (Crédito)
+              linesToInsert.push({
+                journal_entry_id: je.id,
+                account_id: interestIncomeAccId,
                 debit: 0,
                 credit: row.interestAmount,
                 third_party_id: assignedThirdPartyId,
