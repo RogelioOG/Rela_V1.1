@@ -415,6 +415,7 @@ export default function ProcesoFacturacionPage() {
   }
 
   function computeTierDiscount(currentCharges: number, chargeLines: ChargeLine[], tier: DiscountTier): number {
+    const val = parseFloat(String(tier.discount_value)) || 0;
     if (tier.discount_type === 'porcentaje') {
       const baseConceptIds = tier.calculation_base_concept_ids;
       const base = baseConceptIds && baseConceptIds.length > 0
@@ -422,9 +423,9 @@ export default function ProcesoFacturacionPage() {
             .filter(l => baseConceptIds.includes(l.conceptId))
             .reduce((s, l) => s + l.amount, 0))
         : currentCharges;
-      return round2(base * tier.discount_value / 100);
+      return round2(base * val / 100);
     } else {
-      return Math.min(tier.discount_value, currentCharges);
+      return Math.min(val, currentCharges);
     }
   }
 
@@ -457,7 +458,7 @@ export default function ProcesoFacturacionPage() {
               validUntilDay: tier.valid_until_day,
               baseAmount: r.currentCharges,
               discountAmount: discVal,
-              overrideString: '',
+              overrideString: String(discVal),
             };
           });
           const totalDisc = round2(tierDiscounts.reduce((sum, td) => sum + td.discountAmount, 0));
@@ -991,7 +992,7 @@ export default function ProcesoFacturacionPage() {
               <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
                 <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
                   <Layers className="w-5 h-5 text-blue-600" />
-                  Paso 2: Descuentos por Propiedad (Múltiples Escalones Editables)
+                  Paso 2: Descuentos por Propiedad (Múltiples Escalones con Cálculo Automático)
                 </h2>
                 <div className="flex items-center gap-2">
                   {activeTiers.map((t, index) => (
@@ -1004,7 +1005,7 @@ export default function ProcesoFacturacionPage() {
               <div className="p-5">
                 <div className="mb-4 rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
                   <p className="text-sm text-blue-800">
-                    Cada columna de descuento es editable de manera independiente. Ingrese o modifique el valor directamente en la casilla de cada escalón para ajustar el descuento por propiedad.
+                    Los valores se calculan automáticamente según la parametrización de cada escalón y pueden editarse de manera independiente en cada celda.
                   </p>
                 </div>
                 {discountRows.length === 0 ? (
@@ -1038,8 +1039,7 @@ export default function ProcesoFacturacionPage() {
                             </td>
                             {activeTiers.map(tier => {
                               const tierDetail = row.tierDiscounts.find(d => d.tierId === tier.id);
-                              const discAmt = tierDetail ? tierDetail.discountAmount : 0;
-                              const inputVal = tierDetail?.overrideString !== undefined ? tierDetail.overrideString : (discAmt > 0 ? String(discAmt) : '');
+                              const inputVal = tierDetail?.overrideString !== undefined ? tierDetail.overrideString : String(tierDetail?.discountAmount || 0);
                               return (
                                 <td key={tier.id} className="px-4 py-3 text-right">
                                   <div className="flex items-center justify-end gap-1">
