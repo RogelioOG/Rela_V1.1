@@ -355,7 +355,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
       const concepts = conceptsData || [];
       const thirdParties = thirdPartiesData || [];
 
-      // Mapeo directo por ID y por código de concepto
+      // Mapeo exhaustivo de conceptos
       const conceptMap = new Map<string, any>();
       for (const c of concepts) {
         conceptMap.set(c.id, c);
@@ -405,17 +405,17 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (!jeErr && je) {
           const linesToInsights = [];
 
-          // 1. Obtener la contrapartida exacta parametrizada en el concepto de cobro (Ej: 13452501)
+          // 1. Obtener la contrapartida exacta usando el nombre real de la columna: counterpart_account_id
           let receivableAccId = defaultReceivableAcc?.id;
           if (row.chargeLines && row.chargeLines.length > 0) {
             const firstCl = row.chargeLines[0];
             const conceptDef = conceptMap.get(firstCl.conceptId) || conceptMap.get(firstCl.conceptCode?.toUpperCase());
-            if (conceptDef && conceptDef.counterparty_account_id) {
-              receivableAccId = conceptDef.counterparty_account_id;
+            if (conceptDef && conceptDef.counterpart_account_id) {
+              receivableAccId = conceptDef.counterpart_account_id;
             }
           }
 
-          // Débito único a la cuenta por cobrar por el total neto
+          // Débito a cartera por el neto total
           linesToInsights.push({
             journal_entry_id: je.id,
             account_id: receivableAccId,
@@ -424,7 +424,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             third_party_id: assignedThirdPartyId,
           });
 
-          // 2. Créditos por cada concepto de la liquidación (ej: Cuota de Administración -> 41701001)
+          // 2. Créditos por cada concepto de cargo (ej: 41701001)
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode?.toUpperCase());
@@ -441,10 +441,10 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // 3. Crédito por Intereses de Mora (utilizando la cuenta de ingreso/orden parametrizada, ej: 81200501)
+          // 3. Crédito por Intereses de Mora utilizando la cuenta configurada en su concepto
           if (row.interestAmount && row.interestAmount > 0) {
             const interestConceptDef = Array.from(conceptMap.values()).find(
-              c => c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés') || c.name?.toLowerCase().includes('mora')
+              c => c.is_late_interest === true || c.causa_intereses === true || c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés')
             );
             const interestAccId = interestConceptDef?.income_account_id || accounts.find(a => a.code.startsWith('8') || a.code.startsWith('42'))?.id;
 
@@ -478,7 +478,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
     setFinalizing(false);
   }
-  
+
   async function handleDeleteBatch() {
     if (!confirm('¿Está seguro de eliminar toda la facturación de este periodo en bloque? Se reversarán los asientos contables y se liberarán los consecutivos.')) return;
     setDeletingBatch(true);
