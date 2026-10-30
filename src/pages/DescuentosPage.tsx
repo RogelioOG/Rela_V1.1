@@ -18,12 +18,14 @@ interface TierFormState {
   valid_until_day: string;
   is_active: boolean;
   calculation_base_concept_ids: string[];
+  revenue_period_id?: string | null;
 }
 
 export default function DescuentosPage() {
   const { activeOrg } = useOrg();
   const [tiers, setTiers] = useState<DiscountTier[]>([]);
   const [concepts, setConcepts] = useState<BillingConcept[]>([]);
+  const [activePeriodId, setActivePeriodId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [tierForms, setTierForms] = useState<TierFormState[]>([]);
   const [savingTiers, setSavingTiers] = useState(false);
@@ -32,6 +34,17 @@ export default function DescuentosPage() {
   const loadInitial = useCallback(async () => {
     if (!activeOrg) return;
     setLoading(true);
+    
+    // Consultamos el periodo de trabajo activo para obtener su ID
+    const { data: periodData } = await supabase
+      .from('revenue_periods')
+      .select('id')
+      .eq('organization_id', activeOrg.id)
+      .eq('is_work_period_active', true)
+      .maybeSingle();
+
+    setActivePeriodId(periodData?.id || null);
+
     const [{ data: tierData }, { data: conceptData }] = await Promise.all([
       supabase
         .from('discount_tiers')
@@ -46,6 +59,7 @@ export default function DescuentosPage() {
         .order('is_default', { ascending: false })
         .order('name'),
     ]);
+    
     setConcepts(conceptData || []);
     const list = (tierData || []) as DiscountTier[];
     setTiers(list);
@@ -58,6 +72,7 @@ export default function DescuentosPage() {
       valid_until_day: String(t.valid_until_day),
       is_active: t.is_active,
       calculation_base_concept_ids: t.calculation_base_concept_ids || [],
+      revenue_period_id: t.revenue_period_id || periodData?.id || null,
     })));
     setLoading(false);
   }, [activeOrg]);
@@ -79,11 +94,12 @@ export default function DescuentosPage() {
         valid_until_day: '5',
         is_active: true,
         calculation_base_concept_ids: [],
+        revenue_period_id: activePeriodId,
       }];
     });
   }
 
-  function updateTier(idx: number, field: keyof TierFormState, value: string | boolean | number | string[]) {
+  function updateTier(idx: number, field: keyof TierFormState, value: string | boolean | number | string[] | null) {
     setTierForms(prev => {
       const updated = [...prev];
       updated[idx] = { ...updated[idx], [field]: value };
@@ -126,6 +142,7 @@ export default function DescuentosPage() {
         const form = tierForms[i];
         const payload = {
           organization_id: activeOrg.id,
+          revenue_period_id: form.revenue_period_id || activePeriodId || null,
           tier_order: i + 1,
           name: form.name?.trim() || `Escalón ${i + 1}`,
           discount_type: form.discount_type,
