@@ -255,8 +255,8 @@ export default function ProcesoFacturacionPage() {
     const m = new Map<string, any>();
     for (const c of concepts) {
       m.set(c.id, c);
-      if (c.code) m.set(c.code, c);
-      if (c.name) m.set(c.name.toLowerCase(), c);
+      if (c.code) m.set(c.code.trim().toUpperCase(), c);
+      if (c.name) m.set(c.name.trim().toLowerCase(), c);
     }
     return m;
   }, [concepts]);
@@ -507,7 +507,7 @@ export default function ProcesoFacturacionPage() {
     setCurrentStep(3);
   }
 
-  // FUNCIÓN CENTRAL CORREGIDA: PARTIDA DOBLE CUADRADA, LECTURA DE CSV Y UNIQUE_IDENTIFIER
+  // FUNCIÓN CENTRAL CORREGIDA: LECTURA EXACTA DE INCOME_ACCOUNT_ID Y PARTIDA DOBLE CUADRADA
   async function handleFinalizeProcess() {
     if (!activeOrg) return;
     setFinalizing(true);
@@ -552,7 +552,6 @@ export default function ProcesoFacturacionPage() {
           row,
         });
 
-        // Identificador único del inmueble desde la tabla units (unique_identifier)
         const unitIdentifier = row.unit.unique_identifier || (row.unit.tower && row.unit.tower.trim() !== '' ? `${row.unit.tower}-${row.unit.unit_label}` : row.unit.unit_label);
 
         await supabase.from('dues').insert({
@@ -577,7 +576,7 @@ export default function ProcesoFacturacionPage() {
         if (!jeErr && je && defaultReceivableAcc) {
           const linesToInsert = [];
 
-          // 1. DÉBITO A CARTERA: Por el valor neto exacto
+          // 1. DÉBITO A CARTERA (Cuenta 13): Por el valor neto exacto
           linesToInsert.push({
             journal_entry_id: je.id,
             account_id: defaultReceivableAcc.id,
@@ -585,7 +584,7 @@ export default function ProcesoFacturacionPage() {
             credit: 0,
           });
 
-          // 2. DÉBITO POR DESCUENTO: Si hay descuento por pronto pago, se registra para equilibrar
+          // 2. DÉBITO POR DESCUENTO: Si hay descuento por pronto pago
           if (row.discountAmount && row.discountAmount > 0) {
             linesToInsert.push({
               journal_entry_id: je.id,
@@ -595,12 +594,12 @@ export default function ProcesoFacturacionPage() {
             });
           }
 
-          // 3. CRÉDITOS POR CARGOS DEL PERIODO (Tomados estrictamente de income_account_id del CSV)
+          // 3. CRÉDITOS POR CARGOS DEL PERIODO (Tomados estrictamente de income_account_id de cada concepto en el CSV)
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               if (cl.conceptCode === 'IM' || cl.conceptId === 'interest-mora-id') continue;
 
-              const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode) || (cl.conceptName ? conceptMap.get(cl.conceptName.toLowerCase()) : null);
+              const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode?.toUpperCase()) || (cl.conceptName ? conceptMap.get(cl.conceptName.toLowerCase()) : null);
               const targetAccId = conceptDef?.income_account_id || defaultIncomeAcc?.id;
 
               if (targetAccId && cl.amount > 0) {
@@ -614,9 +613,9 @@ export default function ProcesoFacturacionPage() {
             }
           }
 
-          // 4. CRÉDITO POR INTERESES DE MORA (Respetando la cuenta parametrizada)
+          // 4. CRÉDITO POR INTERESES DE MORA (Usando la cuenta parametrizada del concepto MORA_ADM: income_account_id)
           if (row.interestAmount && row.interestAmount > 0) {
-            const interestConceptDef = Array.from(conceptMap.values()).find(c => 
+            const interestConceptDef = conceptMap.get('MORA_ADM') || Array.from(conceptMap.values()).find(c => 
               c.code === 'MORA_ADM' || c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés')
             );
 
@@ -1113,7 +1112,7 @@ export default function ProcesoFacturacionPage() {
                   <CheckCircle2 className="w-8 h-8 text-green-600" />
                 </div>
                 <h2 className="text-xl font-bold text-gray-900 mb-2">Proceso de Facturación Completado</h2>
-                <p className="text-gray-500 mb-6">Las cuentas de cobro han sido generadas y los asientos contables registrados con sus cuentas y partida doble perfectamente cuadrada.</p>
+                <p className="text-gray-500 mb-6">Las cuentas de cobro han sido generadas y los asientos contables registrados tomando las cuentas parametrizadas y partida doble perfecta.</p>
                 <Button onClick={() => { setCurrentStep(1); setReviewed(false); setIsFinalized(false); setLiquidation([]); setDiscountRows([]); }}>
                   <RefreshCw className="w-4 h-4" /> Iniciar Nuevo Proceso
                 </Button>
@@ -1137,7 +1136,7 @@ export default function ProcesoFacturacionPage() {
                 Se detectaron {defaultedAgreements.length} acuerdo(s) de pago incumplido(s)
               </p>
               <p className="text-sm text-red-700 mt-1">
-                Los siguientes propiedades tienen acuerdos de pago en estado de incumplimiento.
+                Las siguientes propiedades tienen acuerdos de pago en estado de incumplimiento.
                 Revise la situación antes de proceder con la facturación.
               </p>
             </div>
