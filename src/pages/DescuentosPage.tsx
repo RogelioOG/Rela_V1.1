@@ -29,8 +29,6 @@ export default function DescuentosPage() {
   const [savingTiers, setSavingTiers] = useState(false);
   const [tierMsg, setTierMsg] = useState('');
 
-  useEffect(() => { if (activeOrg) loadInitial(); }, [activeOrg, loadInitial]);
-
   const loadInitial = useCallback(async () => {
     if (!activeOrg) return;
     setLoading(true);
@@ -63,6 +61,12 @@ export default function DescuentosPage() {
     })));
     setLoading(false);
   }, [activeOrg]);
+
+  useEffect(() => { 
+    if (activeOrg) {
+      loadInitial(); 
+    }
+  }, [activeOrg, loadInitial]);
 
   function addTier() {
     setTierForms(prev => {
@@ -122,7 +126,7 @@ export default function DescuentosPage() {
         const form = tierForms[i];
         const payload = {
           organization_id: activeOrg.id,
-          tier_order: i + 1, // Forzamos un orden secuencial limpio basado en la posición actual
+          tier_order: i + 1,
           name: form.name?.trim() || `Escalón ${i + 1}`,
           discount_type: form.discount_type,
           discount_value: parseFloat(form.discount_value) || 0,
@@ -172,7 +176,6 @@ export default function DescuentosPage() {
         <div className="flex items-center justify-center py-20"><Loader2 className="w-6 h-6 text-blue-600 animate-spin" /></div>
       ) : (
         <div className="space-y-6">
-          {/* Tier Configuration */}
           <Card>
             <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2"><Layers className="w-5 h-5 text-blue-600" /> Escalones de Descuento</h2>
@@ -202,7 +205,6 @@ export default function DescuentosPage() {
                         <Input label="Válido Hasta el Día" type="number" min="1" max="31" value={tier.valid_until_day} onChange={(e) => updateTier(idx, 'valid_until_day', e.target.value)} />
                       </div>
 
-                      {/* Calculation base multi-select — only for percentage type */}
                       {tier.discount_type === 'porcentaje' && (
                         <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50/50 p-3">
                           <p className="text-xs font-semibold text-gray-700 mb-2">Base de Cálculo — Conceptos a los que aplica el porcentaje:</p>
@@ -259,7 +261,6 @@ export default function DescuentosPage() {
             </div>
           </Card>
 
-          {/* Tier Summary */}
           {activeTiers.length > 0 && (
             <Card>
               <div className="px-6 py-4 border-b border-gray-200">
