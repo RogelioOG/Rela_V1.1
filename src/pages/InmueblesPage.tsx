@@ -236,7 +236,6 @@ export default function InmueblesPage() {
       return;
     }
 
-    // Unique identifier check (Torre + Unidad)
     const isDuplicate = await checkDuplicateIdentifier(form.tower, form.unit_label, editing?.id);
     if (isDuplicate) {
       const identifier = buildUniqueIdentifier(form.tower, form.unit_label);
@@ -262,6 +261,7 @@ export default function InmueblesPage() {
       payment_reference: form.payment_reference || null,
       owner_name: ownerName,
       owner_document: ownerDoc,
+      owner_document_type: primaryOwner.document_type,
       owner_phone: ownerPhone,
       is_active: form.is_active,
     };
@@ -397,12 +397,10 @@ export default function InmueblesPage() {
         rowData[colName] = value;
       });
 
-      // Required: Unidad
       if (!rowData['Unidad']) {
         const colIdx = colMap['Unidad'];
         rowErrors.push({ row: rowNum, col: colIdx, cellRef: `${colLetter(colIdx)}${rowNum}`, message: 'La identificación de la unidad es obligatoria' });
       }
-      // Required: Coeficiente — must be numeric > 0
       const coefStr = rowData['Coeficiente'];
       const coefNum = parseFloat(coefStr);
       if (!coefStr) {
@@ -413,7 +411,6 @@ export default function InmueblesPage() {
         rowErrors.push({ row: rowNum, col: colIdx, cellRef: `${colLetter(colIdx)}${rowNum}`, message: `Celda ${colLetter(colIdx)}${rowNum}: Debe ser un valor numérico mayor que cero` });
       }
 
-      // Area Construida — optional but if present must be numeric
       const areaStr = rowData['Area Construida'];
       if (areaStr) {
         const areaNum = parseFloat(areaStr);
@@ -423,14 +420,12 @@ export default function InmueblesPage() {
         }
       }
 
-      // Tipo — must be valid
       const tipoVal = rowData['Tipo'].toLowerCase();
       if (rowData['Tipo'] && !UNIT_TYPES.includes(tipoVal)) {
         const colIdx = colMap['Tipo'];
         rowErrors.push({ row: rowNum, col: colIdx, cellRef: `${colLetter(colIdx)}${rowNum}`, message: `Celda ${colLetter(colIdx)}${rowNum}: Tipo no válido. Valores permitidos: ${UNIT_TYPES.join(', ')}` });
       }
 
-      // Propietario 1 — required document type and document number
       const docType1 = rowData['Tipo Doc Prop 1'].toUpperCase();
       if (docType1 && !DOC_TYPES.includes(docType1)) {
         const colIdx = colMap['Tipo Doc Prop 1'];
@@ -445,7 +440,6 @@ export default function InmueblesPage() {
         rowErrors.push({ row: rowNum, col: colIdx, cellRef: `${colLetter(colIdx)}${rowNum}`, message: 'Debe ingresar nombres o razón social del propietario 1' });
       }
 
-      // Propietario 2 — optional, but if document present, validate type
       const docType2 = rowData['Tipo Doc Prop 2'].toUpperCase();
       if (docType2 && !DOC_TYPES.includes(docType2)) {
         const colIdx = colMap['Tipo Doc Prop 2'];
@@ -460,7 +454,6 @@ export default function InmueblesPage() {
       parsed.push({ rowIndex: rowNum, data: rowData, errors: rowErrors });
     }
 
-    // Check for duplicate identifiers within the uploaded file itself
     const seenIdentifiers = new Set<string>();
     for (const r of parsed) {
       const identifier = buildUniqueIdentifier(r.data['Torre'] || '', r.data['Unidad']);
@@ -505,7 +498,6 @@ export default function InmueblesPage() {
     setUploadMsg('');
 
     try {
-      // Check for duplicates against existing units in DB
       const incomingIdentifiers = parsedRows.map(r => buildUniqueIdentifier(r.data['Torre'] || '', r.data['Unidad']));
       const { data: existingUnits } = await supabase
         .from('units')
@@ -537,6 +529,7 @@ export default function InmueblesPage() {
           payment_reference: d['Referencia de Pago'] || null,
           owner_name: owner1Name,
           owner_document: d['Documento Prop 1'] || '',
+          owner_document_type: d['Tipo Doc Prop 1'].toUpperCase(),
           owner_phone: d['Telefono Prop 1'] || '',
           is_active: true,
         };
@@ -564,7 +557,6 @@ export default function InmueblesPage() {
 
       createdUnits.forEach((unit, idx) => {
         const d = parsedRows[idx].data;
-        // Owner 1
         ownerInserts.push({
           organization_id: activeOrg.id,
           unit_id: unit.id,
@@ -578,7 +570,6 @@ export default function InmueblesPage() {
           phone: d['Telefono Prop 1'] || '',
           is_primary: true,
         });
-        // Owner 2 — only if document or name present
         if (d['Documento Prop 2'] || d['Nombres Prop 2'] || d['Razon Social Prop 2']) {
           ownerInserts.push({
             organization_id: activeOrg.id,
@@ -818,7 +809,7 @@ export default function InmueblesPage() {
               <table className="w-full text-xs">
                 <thead className="sticky top-0 bg-gray-50">
                   <tr>
-                    {EXPECTED_COLUMNS.map((col, idx) => (
+                    {EXPECTED_COLUMNS.map((col) => (
                       <th key={col} className="text-left font-semibold text-gray-600 px-3 py-2 whitespace-nowrap">{col}</th>
                     ))}
                   </tr>
