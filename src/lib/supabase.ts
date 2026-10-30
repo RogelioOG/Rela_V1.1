@@ -151,6 +151,7 @@ export interface Unit {
   created_at: string;
   updated_at: string;
   unique_identifier?: string;
+  third_party_id?: string | null;
   unit_owners?: UnitOwner[];
 }
 
