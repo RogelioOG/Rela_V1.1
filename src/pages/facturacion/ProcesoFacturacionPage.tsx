@@ -75,6 +75,20 @@ function isEligibleDue(dueDate: string, cutoffDate: Date): boolean {
   return due.getTime() < cutoffDate.getTime();
 }
 
+// Función auxiliar de ordenamiento natural estricto (ej: 1-101, 1-102 ... 1-1001)
+function sortLiquidationRows(rows: LiquidationRow[]): LiquidationRow[] {
+  return [...rows].sort((a, b) => {
+    const tA = (a.unit.tower || '').trim();
+    const tB = (b.unit.tower || '').trim();
+    if (tA !== tB) {
+      return tA.localeCompare(tB, undefined, { numeric: true, sensitivity: 'base' });
+    }
+    const uA = (a.unit.unit_label || '').trim();
+    const uB = (b.unit.unit_label || '').trim();
+    return uA.localeCompare(uB, undefined, { numeric: true, sensitivity: 'base' });
+  });
+}
+
 const STEPS = [
   { num: 1, label: 'Configuración de Intereses' },
   { num: 2, label: 'Descuentos por Propiedad' },
@@ -355,9 +369,10 @@ export default function ProcesoFacturacionPage() {
     return map;
   }, [dues, interestRate, graceDays, effectiveCutoffDate]);
 
+  // Aplicamos el ordenamiento natural estricto a las filas calculadas
   const computedLiquidation: LiquidationRow[] = useMemo(() => {
     const rate = parseFloat(interestRate) || 0;
-    return units.map(unit => {
+    const rawRows = units.map(unit => {
       const chargeLines = unitChargeLinesMap.get(unit.id) || [];
       const currentCharges = round2(chargeLines.reduce((s, l) => s + l.amount, 0));
       const priorBalance = unitPriorBalanceMap.get(unit.id) || 0;
@@ -376,6 +391,8 @@ export default function ProcesoFacturacionPage() {
         rowId: unit.id,
       };
     }).filter(r => r.currentCharges > 0 || r.priorBalance > 0 || r.interestAmount > 0);
+
+    return sortLiquidationRows(rawRows);
   }, [units, unitChargeLinesMap, unitPriorBalanceMap, unitInterestMap, interestRate]);
 
   const totalPriorBalance = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.priorBalance, 0), [reviewed, liquidation, computedLiquidation]);
@@ -507,7 +524,6 @@ export default function ProcesoFacturacionPage() {
     setCurrentStep(3);
   }
 
-// FUNCIÓN CENTRAL CORREGIDA: USO DIRECTO DE third_party_id DE LA UNIDAD
   async function handleFinalizeProcess() {
     if (!activeOrg) return;
     setFinalizing(true);
@@ -532,7 +548,6 @@ export default function ProcesoFacturacionPage() {
       let nextSeq = docConfig?.next_consecutive || 61;
       setCurrentNextSeq(nextSeq);
 
-      // Cargar cuentas contables de la organización
       const { data: accountsData } = await supabase
         .from('accounts')
         .select('*')
@@ -562,11 +577,8 @@ export default function ProcesoFacturacionPage() {
         });
 
         const unitIdentifier = row.unit.unique_identifier || (row.unit.tower && row.unit.tower.trim() !== '' ? `${row.unit.tower}-${row.unit.unit_label}` : row.unit.unit_label);
-
-        // Tomamos directamente el tercero asociado a la unidad
         const assignedThirdPartyId = row.unit.third_party_id || null;
 
-        // 1. Insertar la cuota pendiente en dues
         await supabase.from('dues').insert({
           organization_id: activeOrg.id,
           unit_id: row.unit.id,
@@ -577,7 +589,6 @@ export default function ProcesoFacturacionPage() {
           due_date: periodEndDate,
         });
 
-        // 2. Crear encabezado del asiento contable
         const { data: je, error: jeErr } = await supabase.from('journal_entries').insert({
           organization_id: activeOrg.id,
           date: periodEndDate,
@@ -590,7 +601,6 @@ export default function ProcesoFacturacionPage() {
         if (!jeErr && je && defaultReceivableAcc) {
           const linesToInsert = [];
 
-          // A. Débito a Cartera (Cuenta 13)
           if (row.netTotal > 0) {
             linesToInsert.push({
               journal_entry_id: je.id,
@@ -601,7 +611,6 @@ export default function ProcesoFacturacionPage() {
             });
           }
 
-          // B. Débito por Descuento por pronto pago (si aplica)
           if (row.discountAmount && row.discountAmount > 0) {
             linesToInsert.push({
               journal_entry_id: je.id,
@@ -612,7 +621,6 @@ export default function ProcesoFacturacionPage() {
             });
           }
 
-          // C. Créditos por Cargos del Periodo (Administración, Extraordinarias, etc.)
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               if (cl.amount <= 0) continue;
@@ -632,7 +640,6 @@ export default function ProcesoFacturacionPage() {
             }
           }
 
-          // D. Crédito por Intereses de Mora
           if (row.interestAmount && row.interestAmount > 0) {
             const interestAccId = moraConceptDef?.income_account_id || 
                                   accounts.find(a => a.code.startsWith('42') || a.code.startsWith('8'))?.id || 
@@ -649,7 +656,6 @@ export default function ProcesoFacturacionPage() {
             }
           }
 
-          // Inserción de líneas contables
           await supabase.from('journal_lines').insert(linesToInsert);
         }
       }
