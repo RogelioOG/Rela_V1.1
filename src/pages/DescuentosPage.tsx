@@ -29,7 +29,7 @@ export default function DescuentosPage() {
   const [savingTiers, setSavingTiers] = useState(false);
   const [tierMsg, setTierMsg] = useState('');
 
-  useEffect(() => { if (activeOrg) loadInitial(); }, [activeOrg]);
+  useEffect(() => { if (activeOrg) loadInitial(); }, [activeOrg, loadInitial]);
 
   const loadInitial = useCallback(async () => {
     if (!activeOrg) return;
@@ -65,16 +65,18 @@ export default function DescuentosPage() {
   }, [activeOrg]);
 
   function addTier() {
-    const nextOrder = tierForms.length > 0 ? Math.max(...tierForms.map(t => t.tier_order)) + 1 : 1;
-    setTierForms([...tierForms, {
-      tier_order: nextOrder,
-      name: `Escalón ${nextOrder}`,
-      discount_type: 'porcentaje',
-      discount_value: '0',
-      valid_until_day: '5',
-      is_active: true,
-      calculation_base_concept_ids: [],
-    }]);
+    setTierForms(prev => {
+      const nextOrder = prev.length > 0 ? Math.max(...prev.map(t => t.tier_order)) + 1 : 1;
+      return [...prev, {
+        tier_order: nextOrder,
+        name: `Escalón ${nextOrder}`,
+        discount_type: 'porcentaje',
+        discount_value: '0',
+        valid_until_day: '5',
+        is_active: true,
+        calculation_base_concept_ids: [],
+      }];
+    });
   }
 
   function updateTier(idx: number, field: keyof TierFormState, value: string | boolean | number | string[]) {
@@ -110,22 +112,27 @@ export default function DescuentosPage() {
       const existingIds = tiers.map(t => t.id);
       const formIds = tierForms.filter(f => f.id).map(f => f.id);
       const toDelete = existingIds.filter(id => !formIds.includes(id));
+      
       if (toDelete.length > 0) {
-        await supabase.from('discount_tiers').delete().in('id', toDelete);
+        const { error: delErr } = await supabase.from('discount_tiers').delete().in('id', toDelete);
+        if (delErr) throw delErr;
       }
-      for (const form of tierForms) {
+
+      for (let i = 0; i < tierForms.length; i++) {
+        const form = tierForms[i];
         const payload = {
           organization_id: activeOrg.id,
-          tier_order: form.tier_order,
-          name: form.name,
+          tier_order: i + 1, // Forzamos un orden secuencial limpio basado en la posición actual
+          name: form.name?.trim() || `Escalón ${i + 1}`,
           discount_type: form.discount_type,
           discount_value: parseFloat(form.discount_value) || 0,
           valid_until_day: parseInt(form.valid_until_day) || 1,
           is_active: form.is_active,
           calculation_base_concept_ids: form.discount_type === 'porcentaje'
-            ? form.calculation_base_concept_ids
+            ? (form.calculation_base_concept_ids || [])
             : [],
         };
+
         if (form.id) {
           const { error } = await supabase.from('discount_tiers').update(payload).eq('id', form.id);
           if (error) throw error;
@@ -134,12 +141,13 @@ export default function DescuentosPage() {
           if (error) throw error;
         }
       }
+
       await loadInitial();
       setTierMsg('Descuentos guardados correctamente.');
-      setSavingTiers(false);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Error al guardar los descuentos';
       setTierMsg(`Error: ${msg}`);
+    } finally {
       setSavingTiers(false);
     }
   }
@@ -179,9 +187,9 @@ export default function DescuentosPage() {
               ) : (
                 <div className="space-y-3">
                   {tierForms.map((tier, idx) => (
-                    <div key={idx} className="rounded-lg border border-gray-200 p-4 bg-gray-50">
+                    <div key={tier.id || `new-${idx}`} className="rounded-lg border border-gray-200 p-4 bg-gray-50">
                       <div className="flex items-center justify-between mb-3">
-                        <span className="text-xs font-semibold text-gray-600 uppercase">Escalón {tier.tier_order}</span>
+                        <span className="text-xs font-semibold text-gray-600 uppercase">Escalón {idx + 1}</span>
                         <button type="button" onClick={() => removeTier(idx)} className="text-red-500 hover:text-red-700"><Trash2 className="w-4 h-4" /></button>
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
