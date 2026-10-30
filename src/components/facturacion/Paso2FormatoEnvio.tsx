@@ -407,7 +407,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (!jeErr && je) {
           const linesToInsights = [];
 
-          // 1. Procesar únicamente los cargos regulares (excluyendo cualquier concepto de interés explícito para evitar duplicidad)
+          // 1. Procesar cada concepto regular de la liquidación
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode?.toUpperCase());
@@ -418,7 +418,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                 conceptDef?.is_late_interest === true || 
                 conceptDef?.causa_intereses === true;
 
-              if (isInterestConcept) continue; // Salta este bucle para los intereses, ya que se procesarán abajo una sola vez
+              if (isInterestConcept) continue;
 
               const debitAccId = conceptDef?.counterpart_account_id || defaultReceivableAcc?.id;
               const creditAccId = conceptDef?.income_account_id || defaultIncomeAcc?.id;
@@ -446,7 +446,33 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // 2. Procesar Intereses de Mora de forma limpia y única exactamente una vez
+          // Fallback seguro: si por alguna razón no se agregaron líneas de cargos pero hay un cargo general en la fila
+          if (linesToInsights.length === 0 && row.currentCharges > 0) {
+            const firstConcept = row.chargeLines?.[0] ? conceptMap.get(row.chargeLines[0].conceptId) : null;
+            const debitAccId = firstConcept?.counterpart_account_id || defaultReceivableAcc?.id;
+            const creditAccId = firstConcept?.income_account_id || defaultIncomeAcc?.id;
+
+            if (debitAccId) {
+              linesToInsights.push({
+                journal_entry_id: je.id,
+                account_id: debitAccId,
+                debit: row.currentCharges,
+                credit: 0,
+                third_party_id: assignedThirdPartyId,
+              });
+            }
+            if (creditAccId) {
+              linesToInsights.push({
+                journal_entry_id: je.id,
+                account_id: creditAccId,
+                debit: 0,
+                credit: row.currentCharges,
+                third_party_id: assignedThirdPartyId,
+              });
+            }
+          }
+
+          // 2. Procesar Intereses de Mora de forma única
           if (row.interestAmount && row.interestAmount > 0) {
             const interestConceptDef = 
               conceptMap.get('MORA_ADM') || 
