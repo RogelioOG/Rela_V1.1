@@ -327,6 +327,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     setError('');
 
     try {
+      // Fecha del asiento contable establecida exactamente en el primer día del periodo (ej: 2026-09-01)
       const periodStartDate = `${billingPeriod}-01`;
 
       const [yearStr, monthStr] = billingPeriod.split('-');
@@ -397,7 +398,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
         const { data: je, error: jeErr } = await supabase.from('journal_entries').insert({
           organization_id: org.id,
-          date: periodStartDate,
+          date: periodStartDate, // Asignando el primer día del periodo
           description: `Causación Cuota de Cobro ${invoiceNumber} - ${row.unit.tower ? row.unit.tower + '-' : ''}${row.unit.unit_label} Periodo ${billingPeriod}`,
           document_type: 'CC',
           document_number: nextSeq + i,
@@ -407,22 +408,11 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (!jeErr && je) {
           const linesToInsights = [];
 
-          // 1. Procesar cada concepto de cargo regular, EXCLUYENDO el de intereses para evitar el doble conteo
+          // 1. Procesar cada concepto de cargo por su valor bruto original
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode?.toUpperCase());
               
-              // Verificamos si este conceptLine específico es el de intereses de mora
-              const isInterestLine = 
-                cl.conceptCode?.toUpperCase() === 'MORA_ADM' || 
-                conceptDef?.code?.toUpperCase() === 'MORA_ADM' || 
-                conceptDef?.is_late_interest === true || 
-                conceptDef?.causa_intereses === true;
-
-              if (isInterestLine) {
-                continue; // SALTAMOS ESTA LÍNEA porque los intereses se procesan limpios abajo
-              }
-
               const debitAccId = conceptDef?.counterpart_account_id || defaultReceivableAcc?.id;
               const creditAccId = conceptDef?.income_account_id || defaultIncomeAcc?.id;
 
@@ -449,7 +439,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // 2. Procesar Intereses de Mora de forma limpia y única (usando el valor exacto row.interestAmount)
+          // 2. Procesar Intereses de Mora de forma limpia y sin duplicidad (tomados directamente de su parametrización)
           if (row.interestAmount && row.interestAmount > 0) {
             const interestConceptDef = 
               conceptMap.get('MORA_ADM') || 
