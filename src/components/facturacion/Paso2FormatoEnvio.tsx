@@ -441,14 +441,16 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // 3. Manejo correcto de Intereses de Mora cruzando sus cuentas de orden (Débito y Crédito)
+          // 3. Manejo infalible de Intereses de Mora buscando directamente el código 'MORA_ADM' o banderas de interés
           if (row.interestAmount && row.interestAmount > 0) {
-            const interestConceptDef = Array.from(conceptMap.values()).find(
-              c => c.is_late_interest === true || c.causa_intereses === true || c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés')
-            );
+            const interestConceptDef = 
+              conceptMap.get('MORA_ADM') || 
+              Array.from(conceptMap.values()).find(
+                c => c.code?.toUpperCase() === 'MORA_ADM' || c.is_late_interest === true || c.causa_intereses === true || c.name?.toLowerCase().includes('interés')
+              );
 
-            const interestIncomeAccId = interestConceptDef?.income_account_id; // Cuenta de orden principal (ej: 81200501)[cite: 11]
-            const interestCounterAccId = interestConceptDef?.counterpart_account_id; // Contra-cuenta de orden (ej: 86200501)[cite: 11]
+            const interestIncomeAccId = interestConceptDef?.income_account_id; // Cuenta de orden principal (ej: 81200501)[cite: 10, 11]
+            const interestCounterAccId = interestConceptDef?.counterpart_account_id; // Contra-cuenta de orden (ej: 86200501)[cite: 10, 11]
 
             if (interestIncomeAccId && interestCounterAccId) {
               // Contra-cuenta de orden al Débito
