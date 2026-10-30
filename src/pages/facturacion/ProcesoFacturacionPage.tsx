@@ -102,6 +102,7 @@ interface TierDiscountDetail {
   validUntilDay: number;
   baseAmount: number;
   discountAmount: number;
+  overrideString?: string;
 }
 
 interface DiscountRow {
@@ -112,8 +113,6 @@ interface DiscountRow {
   tierDiscounts: TierDiscountDetail[];
   totalDiscountAmount: number;
   netAmount: number;
-  manualOverride: boolean;
-  overrideDiscount: string;
   chargeLines: ChargeLine[];
 }
 
@@ -458,6 +457,7 @@ export default function ProcesoFacturacionPage() {
               validUntilDay: tier.valid_until_day,
               baseAmount: r.currentCharges,
               discountAmount: discVal,
+              overrideString: '',
             };
           });
           const totalDisc = round2(tierDiscounts.reduce((sum, td) => sum + td.discountAmount, 0));
@@ -469,8 +469,6 @@ export default function ProcesoFacturacionPage() {
             tierDiscounts,
             totalDiscountAmount: totalDisc,
             netAmount: round2(r.currentCharges - totalDisc),
-            manualOverride: false,
-            overrideDiscount: '',
             chargeLines: r.chargeLines,
           };
         });
@@ -500,30 +498,22 @@ export default function ProcesoFacturacionPage() {
     );
   }
 
-  function applyManualDiscount(idx: number, discountStr: string) {
+  function handleTierDiscountChange(rowIdx: number, tierId: string, valueStr: string) {
     setDiscountRows(prev => {
       const updated = [...prev];
-      const row = updated[idx];
-      if (discountStr === '') {
-        const autoTotalDisc = round2(row.tierDiscounts.reduce((sum, td) => sum + td.discountAmount, 0));
-        updated[idx] = {
-          ...row,
-          totalDiscountAmount: autoTotalDisc,
-          netAmount: round2(row.baseAmount - autoTotalDisc),
-          manualOverride: false,
-          overrideDiscount: '',
-        };
-      } else {
-        const overrideVal = parseFloat(discountStr) || 0;
-        const newTotalDisc = Math.min(overrideVal, row.baseAmount);
-        updated[idx] = {
-          ...row,
-          totalDiscountAmount: newTotalDisc,
-          netAmount: round2(row.baseAmount - newTotalDisc),
-          manualOverride: true,
-          overrideDiscount: discountStr,
-        };
-      }
+      const row = { ...updated[rowIdx] };
+      const newTiers = row.tierDiscounts.map(td => {
+        if (td.tierId === tierId) {
+          const val = valueStr === '' ? computeTierDiscount(row.baseAmount, row.chargeLines, discountTiers.find(t => t.id === tierId)!) : (parseFloat(valueStr) || 0);
+          return { ...td, discountAmount: val, overrideString: valueStr };
+        }
+        return td;
+      });
+      const newTotal = round2(newTiers.reduce((s, t) => s + t.discountAmount, 0));
+      row.tierDiscounts = newTiers;
+      row.totalDiscountAmount = newTotal;
+      row.netAmount = round2(row.baseAmount - newTotal);
+      updated[rowIdx] = row;
       return updated;
     });
   }
@@ -705,8 +695,6 @@ export default function ProcesoFacturacionPage() {
     });
     return totals;
   }, [discountRows, activeTiers]);
-  const totalDiscountAmount = useMemo(() => discountRows.reduce((s, r) => s + r.totalDiscountAmount, 0), [discountRows]);
-  const totalDiscountNet = useMemo(() => discountRows.reduce((s, r) => s + r.netAmount, 0), [discountRows]);
 
   if (!activeOrg) return <NoOrgSelected />;
 
@@ -1003,7 +991,7 @@ export default function ProcesoFacturacionPage() {
               <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
                 <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
                   <Layers className="w-5 h-5 text-blue-600" />
-                  Paso 2: Descuentos por Propiedad (Múltiples Escalones)
+                  Paso 2: Descuentos por Propiedad (Múltiples Escalones Editables)
                 </h2>
                 <div className="flex items-center gap-2">
                   {activeTiers.map((t, index) => (
@@ -1016,7 +1004,7 @@ export default function ProcesoFacturacionPage() {
               <div className="p-5">
                 <div className="mb-4 rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
                   <p className="text-sm text-blue-800">
-                    Cada nuevo escalón de descuento aparece discriminado en su propia columna (Descuento 1, Descuento 2, etc.), sin combinarse. Puede ajustar manualmente el descuento total por propiedad de ser necesario.
+                    Cada columna de descuento es editable de manera independiente. Ingrese o modifique el valor directamente en la casilla de cada escalón para ajustar el descuento por propiedad.
                   </p>
                 </div>
                 {discountRows.length === 0 ? (
@@ -1037,15 +1025,13 @@ export default function ProcesoFacturacionPage() {
                               <span className="text-[10px] text-gray-500 normal-case">({t.name} - {t.discount_type === 'porcentaje' ? `${t.discount_value}%` : formatCOP(t.discount_value)})</span>
                             </th>
                           ))}
-                          <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Neto con Descuento</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
-                        {discountRows.map((row, idx) => (
-                          <tr key={row.unitId} className={`hover:bg-gray-50 ${row.manualOverride ? 'bg-amber-50' : ''}`}>
+                        {discountRows.map((row, rowIdx) => (
+                          <tr key={row.unitId} className="hover:bg-gray-50">
                             <td className="px-4 py-3">
                               <p className="font-medium text-gray-900">{row.tower} {row.unitLabel}</p>
-                              {row.manualOverride && <Badge variant="yellow">Manual</Badge>}
                             </td>
                             <td className="px-4 py-3 text-right text-gray-700">
                               {formatCOP(row.baseAmount)}
@@ -1053,29 +1039,23 @@ export default function ProcesoFacturacionPage() {
                             {activeTiers.map(tier => {
                               const tierDetail = row.tierDiscounts.find(d => d.tierId === tier.id);
                               const discAmt = tierDetail ? tierDetail.discountAmount : 0;
+                              const inputVal = tierDetail?.overrideString !== undefined ? tierDetail.overrideString : (discAmt > 0 ? String(discAmt) : '');
                               return (
-                                <td key={tier.id} className="px-4 py-3 text-right text-gray-700 font-medium">
-                                  {discAmt > 0 ? `-${formatCOP(discAmt)}` : '—'}
+                                <td key={tier.id} className="px-4 py-3 text-right">
+                                  <div className="flex items-center justify-end gap-1">
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      value={inputVal}
+                                      onChange={(e) => handleTierDiscountChange(rowIdx, tier.id, e.target.value)}
+                                      placeholder="0"
+                                      className="w-28 rounded border border-gray-300 px-2 py-1 text-xs text-right focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                    />
+                                    <span className="text-xs text-gray-400">COP</span>
+                                  </div>
                                 </td>
                               );
                             })}
-                            <td className="px-4 py-3 text-right font-semibold text-gray-900">
-                              <div className="flex flex-col items-end gap-1">
-                                <span>{formatCOP(row.netAmount)}</span>
-                                <div className="flex items-center gap-1">
-                                  <input
-                                    type="number"
-                                    step="0.01"
-                                    value={row.manualOverride ? row.overrideDiscount : row.totalDiscountAmount > 0 ? String(row.totalDiscountAmount) : ''}
-                                    onChange={(e) => applyManualDiscount(idx, e.target.value)}
-                                    placeholder="Ajuste total"
-                                    className="w-24 rounded border border-gray-300 px-2 py-0.5 text-[11px] text-right focus:outline-none focus:ring-1 focus:ring-blue-500"
-                                    title="Ajuste manual de descuento total"
-                                  />
-                                  <span className="text-[10px] text-gray-400">COP</span>
-                                </div>
-                              </div>
-                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -1088,7 +1068,6 @@ export default function ProcesoFacturacionPage() {
                               -{formatCOP(totalDiscountAmountsByTier[tier.id] || 0)}
                             </td>
                           ))}
-                          <td className="px-4 py-3 text-right text-green-700">{formatCOP(totalDiscountNet)}</td>
                         </tr>
                       </tfoot>
                     </table>
@@ -1159,6 +1138,7 @@ export default function ProcesoFacturacionPage() {
                 billingPeriod={billingPeriod}
                 onBack={() => setCurrentStep(hasDiscounts ? 2 : 1)}
                 onComplete={() => setCurrentStep(4)}
+                discountTiers={activeTiers}
               />
             </div>
           )}
