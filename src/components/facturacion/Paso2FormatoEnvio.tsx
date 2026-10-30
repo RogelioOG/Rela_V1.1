@@ -3,7 +3,7 @@ import {
   FileText, Eye, Download, Mail, Send, CheckCircle2, AlertTriangle,
   Search, Loader2, Info, Layers, FileStack, Users, Trash2
 } from 'lucide-react';
-import { Unit, Due, PaymentAgreement, BillingConcept, ThirdParty } from '@/lib/supabase';
+import { Unit, Due, PaymentAgreement, BillingConcept, DiscountTier, ThirdParty } from '@/lib/supabase';
 import { Organization, supabase } from '@/lib/supabase';
 import { Card, CardBody } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -57,7 +57,7 @@ type TemplateId = 'clasico' | 'moderno' | 'detallado';
 const TEMPLATES: { id: TemplateId; name: string; description: string }[] = [
   { id: 'clasico', name: 'Clásico', description: 'Formato tradicional con encabezado corporativo y tabla compacta.' },
   { id: 'moderno', name: 'Moderno', description: 'Diseño limpio con secciones resaltadas y tipografía actualizada.' },
-  { id: 'detallado', name: 'Detallado', description: 'Incluye desglose completo de conceptos, intereses, descuentos discriminados y acuerdo de pago.' },
+  { id: 'detallado', name: 'Detallado', description: 'Incluye desglose completo de conceptos, intereses, primer descuento activo y acuerdo de pago.' },
 ];
 
 const templateLabels: Record<TemplateId, string> = {
@@ -68,6 +68,22 @@ const templateLabels: Record<TemplateId, string> = {
 
 function round2(v: number): number { return Math.round(v * 100) / 100; }
 
+function computeFirstTierDiscount(row: LiquidationRow, discountTiers: DiscountTier[]): { discountVal: number; tierName: string } {
+  const firstTier = discountTiers[0];
+  if (!firstTier) return { discountVal: 0, tierName: '' };
+  let val = 0;
+  if (firstTier.discount_type === 'porcentaje') {
+    const baseConceptIds = firstTier.calculation_base_concept_ids;
+    const base = baseConceptIds && baseConceptIds.length > 0
+      ? round2(row.chargeLines.filter(l => baseConceptIds.includes(l.conceptId)).reduce((s, l) => s + l.amount, 0))
+      : row.currentCharges;
+    val = round2(base * firstTier.discount_value / 100);
+  } else {
+    val = Math.min(firstTier.discount_value, row.currentCharges);
+  }
+  return { discountVal: val, tierName: firstTier.name };
+}
+
 function buildPdfHtml(
   row: LiquidationRow,
   template: TemplateId,
@@ -75,6 +91,7 @@ function buildPdfHtml(
   billingPeriod: string,
   agreements: PaymentAgreement[],
   invoiceNumber: string = 'CC-0061',
+  discountTiers: DiscountTier[] = [],
 ): string {
   const orgName = org?.name || 'Organización';
   const orgAddress = org?.address || '';
@@ -89,8 +106,10 @@ function buildPdfHtml(
     : 'Sin acuerdo de pago vigente.';
 
   const hasPriorBalance = row.priorBalance > 0;
-  const hasDiscount = row.discountAmount > 0;
+  const { discountVal: firstTierDiscount, tierName: firstTierName } = computeFirstTierDiscount(row, discountTiers);
+  const hasDiscount = firstTierDiscount > 0;
   const grossTotal = round2(row.currentCharges + row.priorBalance + row.interestAmount);
+  const netTotalVisual = round2(grossTotal - firstTierDiscount);
 
   const header = template === 'moderno'
     ? `<div style="background:#1e40af;color:#fff;padding:20px 28px;border-radius:8px 8px 0 0;display:flex;justify-content:space-between;align-items:center;">
@@ -119,7 +138,7 @@ function buildPdfHtml(
   const detailSection = template === 'detallado' ? `
     <table style="width:100%;border-collapse:collapse;margin-top:12px;font-size:11px;">
       <thead><tr style="background:#f1f5f9;">
-        <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Concepto / Escalón</th>
+        <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Concepto / Primer Escalón Activo</th>
         <th style="text-align:right;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Valor</th>
       </tr></thead>
       <tbody>
@@ -127,8 +146,8 @@ function buildPdfHtml(
         ${chargeLineRows}
         ${row.interestAmount > 0 ? `<tr><td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;">Interés de mora (${row.interestRate.toFixed(2)}%)</td><td style="text-align:right;padding:6px 8px;border-bottom:1px solid #f1f5f9;">${formatCOP(row.interestAmount)}</td></tr>` : ''}
         <tr style="font-weight:600;background:#f8fafc;"><td style="padding:6px 8px;">Valor Total (Sin Descuentos)</td><td style="text-align:right;padding:6px 8px;">${formatCOP(grossTotal)}</td></tr>
-        ${hasDiscount ? `<tr style="color:#dc2626;background:#fef2f2;"><td style="padding:6px 8px;border-bottom:1px solid #fee2e2;">Descuentos por Pronto Pago (Discriminados por Escalón)</td><td style="text-align:right;padding:6px 8px;border-bottom:1px solid #fee2e2;">-${formatCOP(row.discountAmount)}</td></tr>` : ''}
-        <tr style="font-weight:700;background:#eff6ff;font-size:12px;color:#1e40af;"><td style="padding:8px;">VALOR NETO A PAGAR</td><td style="text-align:right;padding:8px;">${formatCOP(row.netTotal)}</td></tr>
+        ${hasDiscount ? `<tr style="color:#dc2626;background:#fef2f2;"><td style="padding:6px 8px;border-bottom:1px solid #fee2e2;">Descuento (${firstTierName || 'Primer Escalón Activo'})</td><td style="text-align:right;padding:6px 8px;border-bottom:1px solid #fee2e2;">-${formatCOP(firstTierDiscount)}</td></tr>` : ''}
+        <tr style="font-weight:700;background:#eff6ff;font-size:12px;color:#1e40af;"><td style="padding:8px;">VALOR NETO A PAGAR</td><td style="text-align:right;padding:8px;">${formatCOP(netTotalVisual)}</td></tr>
       </tbody>
     </table>
     <div style="margin-top:14px;padding:10px 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:11px;color:#92400e;">
@@ -138,8 +157,8 @@ function buildPdfHtml(
     <div style="font-size:12px;display:flex;justify-content:space-between;"><span>Cargos del periodo:</span><strong>${formatCOP(row.currentCharges)}</strong></div>
     ${row.interestAmount > 0 ? `<div style="font-size:12px;display:flex;justify-content:space-between;"><span>Interés de mora (${row.interestRate.toFixed(2)}%):</span><strong>${formatCOP(row.interestAmount)}</strong></div>` : ''}
     <div style="margin-top:6px;padding-top:6px;border-top:1px dashed #cbd5e1;font-size:12px;display:flex;justify-content:space-between;"><span>Total sin descuento:</span><strong>${formatCOP(grossTotal)}</strong></div>
-    ${hasDiscount ? `<div style="font-size:12px;display:flex;justify-content:space-between;color:#dc2626;"><span>Descuentos por pronto pago (Escalones):</span><strong>-${formatCOP(row.discountAmount)}</strong></div>` : ''}
-    <div style="margin-top:8px;padding-top:8px;border-top:2px solid #1e40af;font-size:14px;font-weight:700;display:flex;justify-content:space-between;color:#1e40af;"><span>VALOR NETO A PAGAR:</span><span>${formatCOP(row.netTotal)}</span></div>`;
+    ${hasDiscount ? `<div style="font-size:12px;display:flex;justify-content:space-between;color:#dc2626;"><span>Descuento (${firstTierName || 'Primer Escalón'}):</span><strong>-${formatCOP(firstTierDiscount)}</strong></div>` : ''}
+    <div style="margin-top:8px;padding-top:8px;border-top:2px solid #1e40af;font-size:14px;font-weight:700;display:flex;justify-content:space-between;color:#1e40af;"><span>VALOR NETO A PAGAR:</span><span>${formatCOP(netTotalVisual)}</span></div>`;
 
   return `
   <html><head><meta charset="utf-8"><title>Cuenta de Cobro ${invoiceNumber} - ${row.unit.tower} ${row.unit.unit_label}</title>
@@ -164,7 +183,7 @@ function buildPdfHtml(
           <strong>Periodo de la cuota:</strong> ${row.due.period} · Vence: ${formatShortDate(row.due.due_date)}
         </div>
         ${detailSection}
-        <div class="footer">Documento generado por Rela ERP — MOD-05 Proceso de Facturación con Descuentos por Escalones.</div>
+        <div class="footer">Documento generado por Rela ERP — MOD-05 Proceso de Facturación.</div>
       </div>
     </div>
   </body></html>`;
@@ -187,9 +206,10 @@ interface Props {
   billingPeriod: string;
   onBack: () => void;
   onComplete: () => void;
+  discountTiers?: DiscountTier[];
 }
 
-export default function Paso2FormatoEnvio({ liquidation, agreements, org, billingPeriod, onBack, onComplete }: Props) {
+export default function Paso2FormatoEnvio({ liquidation, agreements, org, billingPeriod, onBack, onComplete, discountTiers = [] }: Props) {
   const [template, setTemplate] = useState<TemplateId>('detallado');
   const [previewRow, setPreviewRow] = useState<LiquidationRow | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -286,12 +306,12 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
   function openPreviewPdf() {
     if (!previewRow) return;
-    const html = buildPdfHtml(previewRow, template, org, billingPeriod, agreements, `CC-${String(currentNextSeq).padStart(4, '0')}`);
+    const html = buildPdfHtml(previewRow, template, org, billingPeriod, agreements, `CC-${String(currentNextSeq).padStart(4, '0')}`, discountTiers);
     openPrintWindow(html);
   }
 
   function downloadSingle(row: LiquidationRow, invNum = `CC-${String(currentNextSeq).padStart(4, '0')}`) {
-    const html = buildPdfHtml(row, template, org, billingPeriod, agreements, invNum);
+    const html = buildPdfHtml(row, template, org, billingPeriod, agreements, invNum, discountTiers);
     openPrintWindow(html);
   }
 
@@ -302,7 +322,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     if (rows.length === 0) { setError('Seleccione al menos una cuenta para descargar el PDF consolidado.'); return; }
     const pages = rows.map((r, idx) => {
       const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
-      return buildPdfHtml(r, template, org, billingPeriod, agreements, invNum);
+      return buildPdfHtml(r, template, org, billingPeriod, agreements, invNum, discountTiers);
     }).join('<div style="page-break-after:always;"></div>');
     const html = `<html><head><meta charset="utf-8"><title>Cuentas de Cobro Consolidadas - ${billingPeriod}</title></head><body>${pages}</body></html>`;
     if (!openPrintWindow(html)) setError('No se pudo abrir la ventana de impresión.');
@@ -315,7 +335,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     if (targets.length === 0) { setError('Seleccione al menos una cuenta para descargar.'); return; }
     targets.forEach((t, idx) => {
       setTimeout(() => {
-        const html = buildPdfHtml(t.row, template, org, billingPeriod, agreements, t.invoiceNumber);
+        const html = buildPdfHtml(t.row, template, org, billingPeriod, agreements, t.invoiceNumber, discountTiers);
         openPrintWindow(html);
       }, idx * 600);
     });
@@ -614,7 +634,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
             <FileText className="w-5 h-5 text-blue-600" />
-            {isFinalized ? 'Historial de Cuentas Generadas' : 'Cuentas de Cobro a Generar'}
+            {isFinalized ? 'Historial de Cuentas Generadas' : 'Cuentas de Cobro a Generar (Visualización con Primer Descuento Activo)'}
           </h2>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={selectAllVisible}>Seleccionar visibles</Button>
@@ -644,7 +664,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Consecutivo / Propiedad</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3 hidden sm:table-cell">Saldo Anterior</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Cargos Periodo</th>
-                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3 hidden md:table-cell">Descuentos (Escalones)</th>
+                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3 hidden md:table-cell">1er Descuento Activo</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Neto a Pagar</th>
                   <th className="text-center text-xs font-semibold text-gray-600 uppercase px-4 py-3">Acciones</th>
                 </tr>
@@ -653,6 +673,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                 {liquidation.map((row, idx) => {
                   const rowId = row.rowId || row.due.id;
                   const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
+                  const { discountVal: firstDisc } = computeFirstTierDiscount(row, discountTiers);
+                  const visualNet = round2(row.currentCharges + row.priorBalance + row.interestAmount - firstDisc);
                   return (
                     <tr key={rowId} className="hover:bg-gray-50">
                       <td className="px-4 py-3">
@@ -673,9 +695,9 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                       </td>
                       <td className="px-4 py-3 text-right text-sm text-gray-900">{formatCOP(row.currentCharges)}</td>
                       <td className="px-4 py-3 text-right text-sm text-red-600 hidden md:table-cell">
-                        {row.discountAmount > 0 ? `-${formatCOP(row.discountAmount)}` : '—'}
+                        {firstDisc > 0 ? `-${formatCOP(firstDisc)}` : '—'}
                       </td>
-                      <td className="px-4 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(row.netTotal)}</td>
+                      <td className="px-4 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(visualNet)}</td>
                       <td className="px-4 py-3 text-center">
                         <div className="flex items-center justify-center gap-1">
                           <button onClick={() => handlePreview(row)} className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50" title="Ver PDF">
@@ -777,10 +799,10 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               </div>
               <div className="border-t pt-2 space-y-1">
                 <div className="flex justify-between"><span>Cargos del periodo:</span><strong>{formatCOP(previewRow.currentCharges)}</strong></div>
-                {previewRow.discountAmount > 0 && (
-                  <div className="flex justify-between text-red-600"><span>Descuentos (Escalones):</span><strong>-{formatCOP(previewRow.discountAmount)}</strong></div>
+                {computeFirstTierDiscount(previewRow, discountTiers).discountVal > 0 && (
+                  <div className="flex justify-between text-red-600"><span>1er Descuento Activo:</span><strong>-{formatCOP(computeFirstTierDiscount(previewRow, discountTiers).discountVal)}</strong></div>
                 )}
-                <div className="flex justify-between font-bold text-blue-700 border-t pt-1"><span>Neto a Pagar:</span><span>{formatCOP(previewRow.netTotal)}</span></div>
+                <div className="flex justify-between font-bold text-blue-700 border-t pt-1"><span>Neto a Pagar:</span><span>{formatCOP(round2(previewRow.currentCharges + previewRow.priorBalance + previewRow.interestAmount - computeFirstTierDiscount(previewRow, discountTiers).discountVal))}</span></div>
               </div>
             </div>
             <div className="flex justify-end"><Button variant="outline" onClick={() => setPreviewRow(null)}>Cerrar</Button></div>
