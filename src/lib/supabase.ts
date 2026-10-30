@@ -144,6 +144,7 @@ export interface Unit {
   coefficient: number;
   owner_name: string;
   owner_document: string;
+  owner_document_type?: string;
   owner_phone: string;
   payment_reference: string | null;
   built_area: number | null;
