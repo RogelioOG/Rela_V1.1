@@ -57,7 +57,7 @@ type TemplateId = 'clasico' | 'moderno' | 'detallado';
 const TEMPLATES: { id: TemplateId; name: string; description: string }[] = [
   { id: 'clasico', name: 'Clásico', description: 'Formato tradicional con encabezado corporativo y tabla compacta.' },
   { id: 'moderno', name: 'Moderno', description: 'Diseño limpio con secciones resaltadas y tipografía actualizada.' },
-  { id: 'detallado', name: 'Detallado', description: 'Incluye desglose completo de conceptos, intereses, descuentos y acuerdo de pago.' },
+  { id: 'detallado', name: 'Detallado', description: 'Incluye desglose completo de conceptos, intereses, descuentos discriminados y acuerdo de pago.' },
 ];
 
 const templateLabels: Record<TemplateId, string> = {
@@ -119,15 +119,15 @@ function buildPdfHtml(
   const detailSection = template === 'detallado' ? `
     <table style="width:100%;border-collapse:collapse;margin-top:12px;font-size:11px;">
       <thead><tr style="background:#f1f5f9;">
-        <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Concepto</th>
+        <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Concepto / Escalón</th>
         <th style="text-align:right;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Valor</th>
       </tr></thead>
       <tbody>
         ${hasPriorBalance ? `<tr><td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;">Saldo anterior (periodos vencidos)</td><td style="text-align:right;padding:6px 8px;border-bottom:1px solid #f1f5f9;">${formatCOP(row.priorBalance)}</td></tr>` : ''}
         ${chargeLineRows}
         ${row.interestAmount > 0 ? `<tr><td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;">Interés de mora (${row.interestRate.toFixed(2)}%)</td><td style="text-align:right;padding:6px 8px;border-bottom:1px solid #f1f5f9;">${formatCOP(row.interestAmount)}</td></tr>` : ''}
-        <tr style="font-weight:600;background:#f8fafc;"><td style="padding:6px 8px;">Valor Total (Sin Descuento)</td><td style="text-align:right;padding:6px 8px;">${formatCOP(grossTotal)}</td></tr>
-        ${hasDiscount ? `<tr style="color:#dc2626;background:#fef2f2;"><td style="padding:6px 8px;border-bottom:1px solid #fee2e2;">Descuento por Pronto Pago (Aplica hasta fecha límite)</td><td style="text-align:right;padding:6px 8px;border-bottom:1px solid #fee2e2;">-${formatCOP(row.discountAmount)}</td></tr>` : ''}
+        <tr style="font-weight:600;background:#f8fafc;"><td style="padding:6px 8px;">Valor Total (Sin Descuentos)</td><td style="text-align:right;padding:6px 8px;">${formatCOP(grossTotal)}</td></tr>
+        ${hasDiscount ? `<tr style="color:#dc2626;background:#fef2f2;"><td style="padding:6px 8px;border-bottom:1px solid #fee2e2;">Descuentos por Pronto Pago (Discriminados por Escalón)</td><td style="text-align:right;padding:6px 8px;border-bottom:1px solid #fee2e2;">-${formatCOP(row.discountAmount)}</td></tr>` : ''}
         <tr style="font-weight:700;background:#eff6ff;font-size:12px;color:#1e40af;"><td style="padding:8px;">VALOR NETO A PAGAR</td><td style="text-align:right;padding:8px;">${formatCOP(row.netTotal)}</td></tr>
       </tbody>
     </table>
@@ -138,7 +138,7 @@ function buildPdfHtml(
     <div style="font-size:12px;display:flex;justify-content:space-between;"><span>Cargos del periodo:</span><strong>${formatCOP(row.currentCharges)}</strong></div>
     ${row.interestAmount > 0 ? `<div style="font-size:12px;display:flex;justify-content:space-between;"><span>Interés de mora (${row.interestRate.toFixed(2)}%):</span><strong>${formatCOP(row.interestAmount)}</strong></div>` : ''}
     <div style="margin-top:6px;padding-top:6px;border-top:1px dashed #cbd5e1;font-size:12px;display:flex;justify-content:space-between;"><span>Total sin descuento:</span><strong>${formatCOP(grossTotal)}</strong></div>
-    ${hasDiscount ? `<div style="font-size:12px;display:flex;justify-content:space-between;color:#dc2626;"><span>Descuento por pronto pago:</span><strong>-${formatCOP(row.discountAmount)}</strong></div>` : ''}
+    ${hasDiscount ? `<div style="font-size:12px;display:flex;justify-content:space-between;color:#dc2626;"><span>Descuentos por pronto pago (Escalones):</span><strong>-${formatCOP(row.discountAmount)}</strong></div>` : ''}
     <div style="margin-top:8px;padding-top:8px;border-top:2px solid #1e40af;font-size:14px;font-weight:700;display:flex;justify-content:space-between;color:#1e40af;"><span>VALOR NETO A PAGAR:</span><span>${formatCOP(row.netTotal)}</span></div>`;
 
   return `
@@ -164,7 +164,7 @@ function buildPdfHtml(
           <strong>Periodo de la cuota:</strong> ${row.due.period} · Vence: ${formatShortDate(row.due.due_date)}
         </div>
         ${detailSection}
-        <div class="footer">Documento generado por Rela ERP — MOD-05 Proceso de Facturación.</div>
+        <div class="footer">Documento generado por Rela ERP — MOD-05 Proceso de Facturación con Descuentos por Escalones.</div>
       </div>
     </div>
   </body></html>`;
@@ -357,7 +357,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
       const concepts = conceptsData || [];
       const thirdParties = thirdPartiesData || [];
 
-      // Mapeo exhaustivo de conceptos
       const conceptMap = new Map<string, any>();
       for (const c of concepts) {
         conceptMap.set(c.id, c);
@@ -407,9 +406,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (!jeErr && je) {
           const linesToInsights = [];
 
-          // PROCESAMIENTO UNIFICADO: Recorremos cada línea de chargeLines (que ya trae los conceptos 
-          // de administración, intereses u otros de forma individual) y registramos su débito y crédito 
-          // basándonos en la parametrización específica de cada concepto, sin quemar nada ni duplicar bloques.
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode?.toUpperCase());
@@ -440,7 +436,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // Fallback de seguridad por si alguna fila no trae chargeLines desglosadas pero sí currentCharges
           if (linesToInsights.length === 0 && row.currentCharges > 0) {
             const debitAccId = defaultReceivableAcc?.id;
             const creditAccId = defaultIncomeAcc?.id;
@@ -649,7 +644,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Consecutivo / Propiedad</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3 hidden sm:table-cell">Saldo Anterior</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Cargos Periodo</th>
-                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3 hidden md:table-cell">Descuento Pronto Pago</th>
+                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3 hidden md:table-cell">Descuentos (Escalones)</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Neto a Pagar</th>
                   <th className="text-center text-xs font-semibold text-gray-600 uppercase px-4 py-3">Acciones</th>
                 </tr>
@@ -783,7 +778,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               <div className="border-t pt-2 space-y-1">
                 <div className="flex justify-between"><span>Cargos del periodo:</span><strong>{formatCOP(previewRow.currentCharges)}</strong></div>
                 {previewRow.discountAmount > 0 && (
-                  <div className="flex justify-between text-red-600"><span>Descuento pronto pago:</span><strong>-{formatCOP(previewRow.discountAmount)}</strong></div>
+                  <div className="flex justify-between text-red-600"><span>Descuentos (Escalones):</span><strong>-{formatCOP(previewRow.discountAmount)}</strong></div>
                 )}
                 <div className="flex justify-between font-bold text-blue-700 border-t pt-1"><span>Neto a Pagar:</span><span>{formatCOP(previewRow.netTotal)}</span></div>
               </div>
