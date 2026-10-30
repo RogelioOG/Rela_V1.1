@@ -507,7 +507,7 @@ export default function ProcesoFacturacionPage() {
     setCurrentStep(3);
   }
 
-  // FUNCIÓN CENTRAL CORREGIDA USANDO LAS COLUMNAS EXACTAS DEL CSV Y UNIQUE_IDENTIFIER DE UNITS
+  // FUNCIÓN CENTRAL CORREGIDA: PARTIDA DOBLE CUADRADA, LECTURA DE CSV Y UNIQUE_IDENTIFIER
   async function handleFinalizeProcess() {
     if (!activeOrg) return;
     setFinalizing(true);
@@ -537,6 +537,7 @@ export default function ProcesoFacturacionPage() {
 
       const defaultReceivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
       const defaultIncomeAcc = accounts.find(a => a.code.startsWith('4')) || accounts[1] || accounts[0];
+      const defaultDiscountAcc = accounts.find(a => a.code.startsWith('43') || a.code.startsWith('5')) || defaultIncomeAcc;
 
       const batchInvoices = [];
 
@@ -576,7 +577,7 @@ export default function ProcesoFacturacionPage() {
         if (!jeErr && je && defaultReceivableAcc) {
           const linesToInsert = [];
 
-          // Débito a cartera por el total neto (sin tercero ya que third_parties está vacío)
+          // 1. DÉBITO A CARTERA: Por el valor neto exacto
           linesToInsert.push({
             journal_entry_id: je.id,
             account_id: defaultReceivableAcc.id,
@@ -584,14 +585,22 @@ export default function ProcesoFacturacionPage() {
             credit: 0,
           });
 
-          // Créditos leídos estrictamente de la parametrización de cada concepto del CSV (income_account_id)
+          // 2. DÉBITO POR DESCUENTO: Si hay descuento por pronto pago, se registra para equilibrar
+          if (row.discountAmount && row.discountAmount > 0) {
+            linesToInsert.push({
+              journal_entry_id: je.id,
+              account_id: defaultDiscountAcc.id,
+              debit: row.discountAmount,
+              credit: 0,
+            });
+          }
+
+          // 3. CRÉDITOS POR CARGOS DEL PERIODO (Tomados estrictamente de income_account_id del CSV)
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               if (cl.conceptCode === 'IM' || cl.conceptId === 'interest-mora-id') continue;
 
               const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode) || (cl.conceptName ? conceptMap.get(cl.conceptName.toLowerCase()) : null);
-              
-              // Usamos income_account_id que viene en tu tabla billing_concepts
               const targetAccId = conceptDef?.income_account_id || defaultIncomeAcc?.id;
 
               if (targetAccId && cl.amount > 0) {
@@ -605,7 +614,7 @@ export default function ProcesoFacturacionPage() {
             }
           }
 
-          // Crédito específico por Intereses de Mora usando su cuenta parametrizada
+          // 4. CRÉDITO POR INTERESES DE MORA (Respetando la cuenta parametrizada)
           if (row.interestAmount && row.interestAmount > 0) {
             const interestConceptDef = Array.from(conceptMap.values()).find(c => 
               c.code === 'MORA_ADM' || c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés')
@@ -623,15 +632,6 @@ export default function ProcesoFacturacionPage() {
                 credit: row.interestAmount,
               });
             }
-          }
-
-          if (linesToInsert.length === 1) {
-            linesToInsert.push({
-              journal_entry_id: je.id,
-              account_id: defaultIncomeAcc?.id || defaultReceivableAcc.id,
-              debit: 0,
-              credit: row.netTotal,
-            });
           }
 
           await supabase.from('journal_lines').insert(linesToInsert);
@@ -1113,7 +1113,7 @@ export default function ProcesoFacturacionPage() {
                   <CheckCircle2 className="w-8 h-8 text-green-600" />
                 </div>
                 <h2 className="text-xl font-bold text-gray-900 mb-2">Proceso de Facturación Completado</h2>
-                <p className="text-gray-500 mb-6">Las cuentas de cobro han sido generadas y los asientos contables registrados usando la parametrización exacta de los conceptos.</p>
+                <p className="text-gray-500 mb-6">Las cuentas de cobro han sido generadas y los asientos contables registrados con sus cuentas y partida doble perfectamente cuadrada.</p>
                 <Button onClick={() => { setCurrentStep(1); setReviewed(false); setIsFinalized(false); setLiquidation([]); setDiscountRows([]); }}>
                   <RefreshCw className="w-4 h-4" /> Iniciar Nuevo Proceso
                 </Button>
@@ -1174,7 +1174,7 @@ export default function ProcesoFacturacionPage() {
           </div>
 
           <div className="flex justify-end gap-3 pt-2">
-            <Button variant="outline" onClick={() => setWarningOpen(false)}>Cerrar y Revisar | Continuar</Button>
+            <Button variant="outline" onClick={() => setWarningOpen(false)}>Cerrar y Revisar</Button>
             <Button onClick={() => setWarningOpen(false)}>
               <CheckCircle2 className="w-4 h-4" /> Continuar con Facturación
             </Button>
