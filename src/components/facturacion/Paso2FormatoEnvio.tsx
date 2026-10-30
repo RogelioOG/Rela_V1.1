@@ -407,8 +407,10 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (!jeErr && je) {
           const linesToInsights = [];
 
-          // 1. Procesar los cargos regulares asegurando que si un concepto en chargeLines es de intereses,
-          // se ignore para evitar duplicarlo, ya que los intereses se agregan de forma limpia abajo.
+          // 1. Procesar los cargos regulares del periodo. 
+          // AQUÍ ESTÁ LA CLAVE: Si la línea dentro de chargeLines es un concepto de interés de mora, 
+          // la saltamos (continue) para que NO se sume a los ingresos de administración ni se duplique, 
+          // ya que los intereses se registrarán limpiamente en su propio bloque inferior.
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode?.toUpperCase());
@@ -420,7 +422,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                 conceptDef?.causa_intereses === true;
 
               if (isInterestLine) {
-                continue; // Evita duplicar el concepto de intereses en las líneas regulares
+                continue; // Salta esta línea para que los intereses no entren por error a la cuenta de administración
               }
 
               const debitAccId = conceptDef?.counterpart_account_id || defaultReceivableAcc?.id;
@@ -449,33 +451,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // Fallback de seguridad: si tras el filtro el array quedó vacío pero hay cargos generales en la fila
-          if (linesToInsights.length === 0 && row.currentCharges > 0) {
-            const firstConcept = row.chargeLines?.[0] ? conceptMap.get(row.chargeLines[0].conceptId) : null;
-            const debitAccId = firstConcept?.counterpart_account_id || defaultReceivableAcc?.id;
-            const creditAccId = firstConcept?.income_account_id || defaultIncomeAcc?.id;
-
-            if (debitAccId) {
-              linesToInsights.push({
-                journal_entry_id: je.id,
-                account_id: debitAccId,
-                debit: row.currentCharges,
-                credit: 0,
-                third_party_id: assignedThirdPartyId,
-              });
-            }
-            if (creditAccId) {
-              linesToInsights.push({
-                journal_entry_id: je.id,
-                account_id: creditAccId,
-                debit: 0,
-                credit: row.currentCharges,
-                third_party_id: assignedThirdPartyId,
-              });
-            }
-          }
-
-          // 2. Procesar Intereses de Mora de forma totalmente independiente y exacta (1 sola vez)
+          // 2. Procesar Intereses de Mora de forma independiente y exacta (exactamente una sola vez)
           if (row.interestAmount && row.interestAmount > 0) {
             const interestConceptDef = 
               conceptMap.get('MORA_ADM') || 
