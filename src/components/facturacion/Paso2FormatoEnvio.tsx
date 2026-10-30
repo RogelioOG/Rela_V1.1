@@ -327,6 +327,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     setError('');
 
     try {
+      // Fecha del asiento contable establecida exactamente en el primer día del periodo (ej: 2026-09-01)
       const periodStartDate = `${billingPeriod}-01`;
 
       const [yearStr, monthStr] = billingPeriod.split('-');
@@ -397,7 +398,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
         const { data: je, error: jeErr } = await supabase.from('journal_entries').insert({
           organization_id: org.id,
-          date: periodStartDate,
+          date: periodStartDate, // Asignando el primer día del periodo
           description: `Causación Cuota de Cobro ${invoiceNumber} - ${row.unit.tower ? row.unit.tower + '-' : ''}${row.unit.unit_label} Periodo ${billingPeriod}`,
           document_type: 'CC',
           document_number: nextSeq + i,
@@ -407,24 +408,15 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (!jeErr && je) {
           const linesToInsights = [];
 
-          // 1. Procesar cada concepto regular por separado (Ej: Administración por sus $250.000 exactos)
+          // 1. Procesar cada concepto de cargo por su valor bruto original
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode?.toUpperCase());
               
-              const isInterestConcept = 
-                cl.conceptCode?.toUpperCase() === 'MORA_ADM' || 
-                conceptDef?.code?.toUpperCase() === 'MORA_ADM' || 
-                conceptDef?.is_late_interest === true || 
-                conceptDef?.causa_intereses === true;
-
-              if (isInterestConcept) continue; // Excluimos los intereses para procesarlos abajo en su bloque único
-
               const debitAccId = conceptDef?.counterpart_account_id || defaultReceivableAcc?.id;
               const creditAccId = conceptDef?.income_account_id || defaultIncomeAcc?.id;
 
               if (cl.amount > 0) {
-                // Débito a la cuenta por cobrar específica del concepto (ej: 13452501)
                 if (debitAccId) {
                   linesToInsights.push({
                     journal_entry_id: je.id,
@@ -434,7 +426,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                     third_party_id: assignedThirdPartyId,
                   });
                 }
-                // Crédito al ingreso específico del concepto (ej: 41701001)
                 if (creditAccId) {
                   linesToInsights.push({
                     journal_entry_id: je.id,
@@ -448,32 +439,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // Fallback en caso de que chargeLines esté vacío pero existan currentCharges
-          if (linesToInsights.length === 0 && row.currentCharges > 0) {
-            const debitAccId = defaultReceivableAcc?.id;
-            const creditAccId = defaultIncomeAcc?.id;
-
-            if (debitAccId) {
-              linesToInsights.push({
-                journal_entry_id: je.id,
-                account_id: debitAccId,
-                debit: row.currentCharges,
-                credit: 0,
-                third_party_id: assignedThirdPartyId,
-              });
-            }
-            if (creditAccId) {
-              linesToInsights.push({
-                journal_entry_id: je.id,
-                account_id: creditAccId,
-                debit: 0,
-                credit: row.currentCharges,
-                third_party_id: assignedThirdPartyId,
-              });
-            }
-          }
-
-          // 2. Procesar Intereses de Mora de forma totalmente independiente y limpia (Ej: 86 debito $3.000, 81 credito $3.000)
+          // 2. Procesar Intereses de Mora de forma limpia y sin duplicidad (tomados directamente de su parametrización)
           if (row.interestAmount && row.interestAmount > 0) {
             const interestConceptDef = 
               conceptMap.get('MORA_ADM') || 
