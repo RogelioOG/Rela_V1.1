@@ -352,18 +352,18 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
       ]);
 
       const accounts = accountsData || [];
-      const concepts = conceptsData || [] as BillingConcept[];
-      const thirdParties = thirdPartiesData || [] as ThirdParty[];
+      const concepts = conceptsData || [];
+      const thirdParties = thirdPartiesData || [];
 
-      // Mapeo exhaustivo de conceptos para extraer sus cuentas parametrizadas
-      const conceptMap = new Map<string, BillingConcept>();
+      // Mapeo directo por ID y por código de concepto
+      const conceptMap = new Map<string, any>();
       for (const c of concepts) {
         conceptMap.set(c.id, c);
         if (c.code) conceptMap.set(c.code.toUpperCase(), c);
       }
 
-      const defaultReceivableAcc = accounts.find(a => a.code.startsWith('1345') || a.code.startsWith('13')) || accounts[0];
-      const defaultIncomeAcc = accounts.find(a => a.code.startsWith('4170') || a.code.startsWith('4')) || accounts[1] || accounts[0];
+      const defaultReceivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
+      const defaultIncomeAcc = accounts.find(a => a.code.startsWith('4')) || accounts[1] || accounts[0];
 
       const batchInvoices = [];
 
@@ -372,25 +372,11 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         const invoiceNumber = `CC-${String(nextSeq + i).padStart(4, '0')}`;
         const rowId = row.rowId || 'inv-' + Math.random().toString(36).substring(2, 9);
 
-        batchInvoices.push({
-          id: rowId,
-          invoiceNumber,
-          row,
-        });
+        batchInvoices.push({ id: rowId, invoiceNumber, row });
 
-        // Búsqueda estricta del tercero por el ID del inmueble o documento
         let assignedThirdPartyId = row.unit.third_party_id || null;
         if (!assignedThirdPartyId && thirdParties.length > 0) {
-          const expectedUnitIdIdentifier = row.unit.tower 
-            ? `${row.unit.tower}-${row.unit.unit_label}`.trim() 
-            : `${row.unit.unit_label}`.trim();
-
-          const tpMatch = thirdParties.find(t => 
-            t.document_number === row.unit.owner_document || 
-            t.document_number === expectedUnitIdIdentifier || 
-            t.name?.toLowerCase() === row.unit.owner_name?.toLowerCase() ||
-            t.name?.toLowerCase() === expectedUnitIdIdentifier.toLowerCase()
-          );
+          const tpMatch = thirdParties.find(t => t.document_number === row.unit.owner_document);
           if (tpMatch) assignedThirdPartyId = tpMatch.id;
         }
         if (!assignedThirdPartyId && thirdParties.length > 0) {
@@ -416,23 +402,21 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
           is_manual: true,
         }).select().single();
 
-        if (!jeErr && je && defaultReceivableAcc) {
-          const linesToInsert = [];
+        if (!jeErr && je) {
+          const linesToInsights = [];
 
-          // 1. Débito a la cuenta por cobrar (Tomando estrictamente la contrapartida configurada en el concepto, ej: 13452501)
-          let receivableAccId = defaultReceivableAcc.id;
+          // 1. Obtener la contrapartida exacta parametrizada en el concepto de cobro (Ej: 13452501)
+          let receivableAccId = defaultReceivableAcc?.id;
           if (row.chargeLines && row.chargeLines.length > 0) {
-            const firstConcept = conceptMap.get(row.chargeLines[0].conceptId) || conceptMap.get(row.chargeLines[0].conceptCode?.toUpperCase());
-            if (firstConcept) {
-              receivableAccId = 
-                firstConcept.counterparty_account_id || 
-                (firstConcept as any).account_counterparty_id || 
-                (firstConcept as any).contraparty_id || 
-                defaultReceivableAcc.id;
+            const firstCl = row.chargeLines[0];
+            const conceptDef = conceptMap.get(firstCl.conceptId) || conceptMap.get(firstCl.conceptCode?.toUpperCase());
+            if (conceptDef && conceptDef.counterparty_account_id) {
+              receivableAccId = conceptDef.counterparty_account_id;
             }
           }
 
-          linesToInsert.push({
+          // Débito único a la cuenta por cobrar por el total neto
+          linesToInsights.push({
             journal_entry_id: je.id,
             account_id: receivableAccId,
             debit: row.netTotal,
@@ -440,13 +424,13 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             third_party_id: assignedThirdPartyId,
           });
 
-          // 2. Créditos tomados ESTRICTAMENTE de la parametrización de cada concepto de ingreso (ej: 41701001)
+          // 2. Créditos por cada concepto de la liquidación (ej: Cuota de Administración -> 41701001)
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode?.toUpperCase());
-              const targetAccId = conceptDef?.income_account_id || conceptDef?.account_id || defaultIncomeAcc?.id;
+              const targetAccId = conceptDef?.income_account_id || defaultIncomeAcc?.id;
               if (targetAccId && cl.amount > 0) {
-                linesToInsert.push({
+                linesToInsights.push({
                   journal_entry_id: je.id,
                   account_id: targetAccId,
                   debit: 0,
@@ -457,38 +441,17 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // 3. Manejo correcto de Intereses de Mora (respetando la cuenta de orden/ingreso y su contrapartida cruzada)
+          // 3. Crédito por Intereses de Mora (utilizando la cuenta de ingreso/orden parametrizada, ej: 81200501)
           if (row.interestAmount && row.interestAmount > 0) {
             const interestConceptDef = Array.from(conceptMap.values()).find(
               c => c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés') || c.name?.toLowerCase().includes('mora')
             );
+            const interestAccId = interestConceptDef?.income_account_id || accounts.find(a => a.code.startsWith('8') || a.code.startsWith('42'))?.id;
 
-            const interestIncomeAccId = 
-              interestConceptDef?.income_account_id || 
-              interestConceptDef?.account_id || 
-              accounts.find(a => a.code.startsWith('8') || a.code.startsWith('42'))?.id || 
-              defaultIncomeAcc?.id;
-
-            const interestCounterAccId = 
-              interestConceptDef?.counterparty_account_id || 
-              (interestConceptDef as any)?.account_counterparty_id || 
-              accounts.find(a => a.code.startsWith('86') || a.code.startsWith('13'))?.id || 
-              defaultReceivableAcc.id;
-
-            if (interestIncomeAccId && interestCounterAccId) {
-              // Contrapartida del interés (Débito)
-              linesToInsert.push({
+            if (interestAccId) {
+              linesToInsights.push({
                 journal_entry_id: je.id,
-                account_id: interestCounterAccId,
-                debit: row.interestAmount,
-                credit: 0,
-                third_party_id: assignedThirdPartyId,
-              });
-
-              // Ingreso u orden del interés (Crédito)
-              linesToInsert.push({
-                journal_entry_id: je.id,
-                account_id: interestIncomeAccId,
+                account_id: interestAccId,
                 debit: 0,
                 credit: row.interestAmount,
                 third_party_id: assignedThirdPartyId,
@@ -496,17 +459,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          if (linesToInsert.length === 1) {
-            linesToInsert.push({
-              journal_entry_id: je.id,
-              account_id: defaultIncomeAcc?.id || defaultReceivableAcc.id,
-              debit: 0,
-              credit: row.netTotal,
-              third_party_id: assignedThirdPartyId,
-            });
-          }
-
-          await supabase.from('journal_lines').insert(linesToInsert);
+          await supabase.from('journal_lines').insert(linesToInsights);
         }
       }
 
@@ -520,12 +473,12 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
       setIsFinalized(true);
     } catch (e) {
       console.warn('Error al registrar asientos contables en bloque:', e);
-      setError('Ocurrió un inconveniente al contabilizar, pero se generó localmente.');
+      setError('Ocurrió un inconveniente al contabilizar.');
     }
 
     setFinalizing(false);
   }
-
+  
   async function handleDeleteBatch() {
     if (!confirm('¿Está seguro de eliminar toda la facturación de este periodo en bloque? Se reversarán los asientos contables y se liberarán los consecutivos.')) return;
     setDeletingBatch(true);
