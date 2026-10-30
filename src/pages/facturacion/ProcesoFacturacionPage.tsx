@@ -507,7 +507,7 @@ export default function ProcesoFacturacionPage() {
     setCurrentStep(3);
   }
 
-  // FUNCIÓN CENTRAL CORREGIDA Y AUDITADA PARA PARTIDA DOBLE Y CUENTAS PARAMETRIZADAS
+// FUNCIÓN CENTRAL CORREGIDA: USO DIRECTO DE third_party_id DE LA UNIDAD
   async function handleFinalizeProcess() {
     if (!activeOrg) return;
     setFinalizing(true);
@@ -532,7 +532,12 @@ export default function ProcesoFacturacionPage() {
       let nextSeq = docConfig?.next_consecutive || 61;
       setCurrentNextSeq(nextSeq);
 
-      const { data: accountsData } = await supabase.from('accounts').select('*').eq('organization_id', activeOrg.id);
+      // Cargar cuentas contables de la organización
+      const { data: accountsData } = await supabase
+        .from('accounts')
+        .select('*')
+        .eq('organization_id', activeOrg.id);
+
       const accounts = accountsData || [];
 
       const defaultReceivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
@@ -558,6 +563,10 @@ export default function ProcesoFacturacionPage() {
 
         const unitIdentifier = row.unit.unique_identifier || (row.unit.tower && row.unit.tower.trim() !== '' ? `${row.unit.tower}-${row.unit.unit_label}` : row.unit.unit_label);
 
+        // Tomamos directamente el tercero asociado a la unidad
+        const assignedThirdPartyId = row.unit.third_party_id || null;
+
+        // 1. Insertar la cuota pendiente en dues
         await supabase.from('dues').insert({
           organization_id: activeOrg.id,
           unit_id: row.unit.id,
@@ -568,6 +577,7 @@ export default function ProcesoFacturacionPage() {
           due_date: periodEndDate,
         });
 
+        // 2. Crear encabezado del asiento contable
         const { data: je, error: jeErr } = await supabase.from('journal_entries').insert({
           organization_id: activeOrg.id,
           date: periodEndDate,
@@ -580,24 +590,29 @@ export default function ProcesoFacturacionPage() {
         if (!jeErr && je && defaultReceivableAcc) {
           const linesToInsert = [];
 
+          // A. Débito a Cartera (Cuenta 13)
           if (row.netTotal > 0) {
             linesToInsert.push({
               journal_entry_id: je.id,
               account_id: defaultReceivableAcc.id,
               debit: row.netTotal,
               credit: 0,
+              third_party_id: assignedThirdPartyId,
             });
           }
 
+          // B. Débito por Descuento por pronto pago (si aplica)
           if (row.discountAmount && row.discountAmount > 0) {
             linesToInsert.push({
               journal_entry_id: je.id,
               account_id: defaultDiscountAcc.id,
               debit: row.discountAmount,
               credit: 0,
+              third_party_id: assignedThirdPartyId,
             });
           }
 
+          // C. Créditos por Cargos del Periodo (Administración, Extraordinarias, etc.)
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               if (cl.amount <= 0) continue;
@@ -611,11 +626,13 @@ export default function ProcesoFacturacionPage() {
                   account_id: targetAccId,
                   debit: 0,
                   credit: cl.amount,
+                  third_party_id: assignedThirdPartyId,
                 });
               }
             }
           }
 
+          // D. Crédito por Intereses de Mora
           if (row.interestAmount && row.interestAmount > 0) {
             const interestAccId = moraConceptDef?.income_account_id || 
                                   accounts.find(a => a.code.startsWith('42') || a.code.startsWith('8'))?.id || 
@@ -627,10 +644,12 @@ export default function ProcesoFacturacionPage() {
                 account_id: interestAccId,
                 debit: 0,
                 credit: row.interestAmount,
+                third_party_id: assignedThirdPartyId,
               });
             }
           }
 
+          // Inserción de líneas contables
           await supabase.from('journal_lines').insert(linesToInsert);
         }
       }
@@ -651,7 +670,7 @@ export default function ProcesoFacturacionPage() {
 
     setFinalizing(false);
   }
-
+  
   const totalDiscountBase = useMemo(() => discountRows.reduce((s, r) => s + r.baseAmount, 0), [discountRows]);
   const totalDiscountAmount = useMemo(() => discountRows.reduce((s, r) => s + r.discountAmount, 0), [discountRows]);
   const totalDiscountNet = useMemo(() => discountRows.reduce((s, r) => s + r.netAmount, 0), [discountRows]);
