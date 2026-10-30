@@ -405,67 +405,59 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (!jeErr && je) {
           const linesToInsights = [];
 
-          // 1. Obtener la contrapartida exacta usando counterpart_account_id
-          let receivableAccId = defaultReceivableAcc?.id;
-          if (row.chargeLines && row.chargeLines.length > 0) {
-            const firstCl = row.chargeLines[0];
-            const conceptDef = conceptMap.get(firstCl.conceptId) || conceptMap.get(firstCl.conceptCode?.toUpperCase());
-            if (conceptDef && conceptDef.counterpart_account_id) {
-              receivableAccId = conceptDef.counterpart_account_id;
-            }
-          }
-
-          // Débito a cartera por el neto total
-          linesToInsights.push({
-            journal_entry_id: je.id,
-            account_id: receivableAccId,
-            debit: row.netTotal,
-            credit: 0,
-            third_party_id: assignedThirdPartyId,
-          });
-
-          // 2. Créditos por cada concepto de cargo (ej: 41701001)
+          // 1. Procesar cada concepto de cargo por su valor bruto original (sin restar el descuento)
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
               const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode?.toUpperCase());
-              const targetAccId = conceptDef?.income_account_id || defaultIncomeAcc?.id;
-              if (targetAccId && cl.amount > 0) {
-                linesToInsights.push({
-                  journal_entry_id: je.id,
-                  account_id: targetAccId,
-                  debit: 0,
-                  credit: cl.amount,
-                  third_party_id: assignedThirdPartyId,
-                });
+              
+              const debitAccId = conceptDef?.counterpart_account_id || defaultReceivableAcc?.id;
+              const creditAccId = conceptDef?.income_account_id || defaultIncomeAcc?.id;
+
+              if (cl.amount > 0) {
+                if (debitAccId) {
+                  linesToInsights.push({
+                    journal_entry_id: je.id,
+                    account_id: debitAccId,
+                    debit: cl.amount,
+                    credit: 0,
+                    third_party_id: assignedThirdPartyId,
+                  });
+                }
+                if (creditAccId) {
+                  linesToInsights.push({
+                    journal_entry_id: je.id,
+                    account_id: creditAccId,
+                    debit: 0,
+                    credit: cl.amount,
+                    third_party_id: assignedThirdPartyId,
+                  });
+                }
               }
             }
           }
 
-          // 3. Manejo infalible de Intereses de Mora buscando directamente el código 'MORA_ADM' o banderas de interés
+          // 2. Procesar Intereses de Mora por su valor real bruto
           if (row.interestAmount && row.interestAmount > 0) {
             const interestConceptDef = 
               conceptMap.get('MORA_ADM') || 
               Array.from(conceptMap.values()).find(
-                c => c.code?.toUpperCase() === 'MORA_ADM' || c.is_late_interest === true || c.causa_intereses === true || c.name?.toLowerCase().includes('interés')
+                c => c.code?.toUpperCase() === 'MORA_ADM' || c.is_late_interest === true || c.causa_intereses === true
               );
 
-            const interestIncomeAccId = interestConceptDef?.income_account_id; // Cuenta de orden principal (ej: 81200501)[cite: 10, 11]
-            const interestCounterAccId = interestConceptDef?.counterpart_account_id; // Contra-cuenta de orden (ej: 86200501)[cite: 10, 11]
+            const debitAccId = interestConceptDef?.counterpart_account_id; 
+            const creditAccId = interestConceptDef?.income_account_id;     
 
-            if (interestIncomeAccId && interestCounterAccId) {
-              // Contra-cuenta de orden al Débito
+            if (debitAccId && creditAccId) {
               linesToInsights.push({
                 journal_entry_id: je.id,
-                account_id: interestCounterAccId,
+                account_id: debitAccId,
                 debit: row.interestAmount,
                 credit: 0,
                 third_party_id: assignedThirdPartyId,
               });
-
-              // Cuenta de orden principal al Crédito
               linesToInsights.push({
                 journal_entry_id: je.id,
-                account_id: interestIncomeAccId,
+                account_id: creditAccId,
                 debit: 0,
                 credit: row.interestAmount,
                 third_party_id: assignedThirdPartyId,
