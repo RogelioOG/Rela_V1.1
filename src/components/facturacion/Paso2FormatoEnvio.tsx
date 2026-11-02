@@ -245,7 +245,7 @@ function buildPdfHtml(
 
   const detailSection = `
     <div style="margin-top:16px;">
-      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Estado de Cuenta Comparativo</div>
+      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Estado de Cuenta</div>
       <table style="width:100%;border-collapse:collapse;font-size:12px;">
         <thead>
           <tr style="background:#f8fafc;color:#475569;font-size:11px;text-transform:uppercase;">
@@ -777,7 +777,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
             <FileText className="w-5 h-5 text-blue-600" />
-            {isFinalized ? 'Historial de Cuentas Generadas' : 'Cuentas de Cobro a Generar (Tabla de 4 Columnas)'}
+            {isFinalized ? 'Historial de Cuentas Generadas' : 'Cuentas de Cobro a Generar'}
           </h2>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={selectAllVisible}>Seleccionar visibles</Button>
@@ -974,7 +974,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               </div>
 
               <div className="space-y-1">
-                <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta Comparativo (4 Columnas):</p>
+                <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta (4 Columnas):</p>
                 <div className="border rounded overflow-hidden text-xs">
                   <table className="w-full text-left border-collapse">
                     <thead>
