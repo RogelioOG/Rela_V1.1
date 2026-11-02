@@ -30,6 +30,7 @@ export interface LiquidationRow {
   chargeLines: ChargeLine[];
   interestAmount: number;
   discountAmount: number;
+  customTierDiscounts?: Record<string, number>;
   netTotal: number;
   rowId: string;
 }
@@ -523,10 +524,21 @@ export default function ProcesoFacturacionPage() {
     setLiquidation(prev => prev.map(row => {
       const dRow = discountRows.find(d => d.unitId === row.unit.id);
       if (!dRow) return row;
+
+      // Mapeamos individualmente los valores de cada escalón editado
+      const customTierDiscountsMap: Record<string, number> = {};
+      dRow.tierDiscounts.forEach(td => {
+        customTierDiscountsMap[td.tierId] = td.discountAmount;
+      });
+
+      // El primer escalón es el referente para la vista de resumen
+      const firstTierDisc = dRow.tierDiscounts.length > 0 ? dRow.tierDiscounts[0].discountAmount : 0;
+
       return {
         ...row,
-        discountAmount: dRow.totalDiscountAmount,
-        netTotal: round2(row.priorBalance + row.currentCharges + row.interestAmount - dRow.totalDiscountAmount),
+        discountAmount: firstTierDisc, // Solo el Escalón 1 para la liquidación resumida
+        customTierDiscounts: customTierDiscountsMap, // Guarda el mapa exacto de escalones editados
+        netTotal: round2(row.priorBalance + row.currentCharges + row.interestAmount - firstTierDisc),
       };
     }));
     setCurrentStep(3);
@@ -1058,6 +1070,7 @@ export default function ProcesoFacturacionPage() {
                     chargeLines: linesWithInterest,
                     interestAmount: r.interestAmount,
                     discountAmount: r.discountAmount,
+                    customTierDiscounts: r.customTierDiscounts,
                     netTotal: r.netTotal,
                     totalWithInterest: r.netTotal,
                     baseAmount: totalChargesWithInterest,
