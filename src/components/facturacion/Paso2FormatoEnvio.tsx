@@ -1,13 +1,13 @@
 import { useMemo, useState, useEffect } from 'react';
 import {
   FileText, Eye, Download, Mail, Send, CheckCircle2, AlertTriangle,
-  Search, Loader2, Info, Layers, FileStack, Users, Trash2
+  Loader2, Layers, FileStack, Trash2, Calendar
 } from 'lucide-react';
-import { Unit, Due, PaymentAgreement, BillingConcept, DiscountTier, ThirdParty } from '@/lib/supabase';
+import { Unit, Due, PaymentAgreement, DiscountTier } from '@/lib/supabase';
 import { Organization, supabase } from '@/lib/supabase';
 import { Card, CardBody } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
-import { Input, Select } from '@/components/ui/Input';
+import { Input } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { formatCOP, formatShortDate } from '@/lib/format';
@@ -57,7 +57,7 @@ type TemplateId = 'clasico' | 'moderno' | 'detallado';
 const TEMPLATES: { id: TemplateId; name: string; description: string }[] = [
   { id: 'clasico', name: 'Clásico', description: 'Formato tradicional con encabezado corporativo y tabla compacta.' },
   { id: 'moderno', name: 'Moderno', description: 'Diseño limpio con secciones resaltadas y tipografía actualizada.' },
-  { id: 'detallado', name: 'Detallado', description: 'Incluye desglose completo de conceptos, intereses, primer descuento activo y acuerdo de pago.' },
+  { id: 'detallado', name: 'Detallado', description: 'Incluye desglose completo de conceptos, intereses, todos los descuentos con su fecha límite y acuerdo de pago.' },
 ];
 
 const templateLabels: Record<TemplateId, string> = {
@@ -68,20 +68,39 @@ const templateLabels: Record<TemplateId, string> = {
 
 function round2(v: number): number { return Math.round(v * 100) / 100; }
 
-function computeFirstTierDiscount(row: LiquidationRow, discountTiers: DiscountTier[]): { discountVal: number; tierName: string } {
-  const firstTier = discountTiers[0];
-  if (!firstTier) return { discountVal: 0, tierName: '' };
-  let val = 0;
-  if (firstTier.discount_type === 'porcentaje') {
-    const baseConceptIds = firstTier.calculation_base_concept_ids;
-    const base = baseConceptIds && baseConceptIds.length > 0
-      ? round2(row.chargeLines.filter(l => baseConceptIds.includes(l.conceptId)).reduce((s, l) => s + l.amount, 0))
-      : row.currentCharges;
-    val = round2(base * firstTier.discount_value / 100);
-  } else {
-    val = Math.min(firstTier.discount_value, row.currentCharges);
-  }
-  return { discountVal: val, tierName: firstTier.name };
+export interface CalculatedDiscount {
+  tierId: string;
+  tierName: string;
+  discountVal: number;
+  validUntilDay: number;
+  payWithDiscount: number;
+}
+
+function computeAllTierDiscounts(row: LiquidationRow, discountTiers: DiscountTier[]): CalculatedDiscount[] {
+  if (!discountTiers || discountTiers.length === 0) return [];
+
+  const grossTotal = round2(row.currentCharges + row.priorBalance + row.interestAmount);
+
+  return discountTiers.map(tier => {
+    let val = 0;
+    if (tier.discount_type === 'porcentaje') {
+      const baseConceptIds = tier.calculation_base_concept_ids;
+      const base = baseConceptIds && baseConceptIds.length > 0
+        ? round2(row.chargeLines.filter(l => baseConceptIds.includes(l.conceptId)).reduce((s, l) => s + l.amount, 0))
+        : row.currentCharges;
+      val = round2(base * tier.discount_value / 100);
+    } else {
+      val = Math.min(tier.discount_value, row.currentCharges);
+    }
+
+    return {
+      tierId: tier.id,
+      tierName: tier.name,
+      discountVal: val,
+      validUntilDay: tier.valid_until_day,
+      payWithDiscount: round2(grossTotal - val),
+    };
+  });
 }
 
 function buildPdfHtml(
@@ -92,12 +111,17 @@ function buildPdfHtml(
   agreements: PaymentAgreement[],
   invoiceNumber: string = 'CC-0061',
   discountTiers: DiscountTier[] = [],
+  issueDateStr: string = '',
+  dueDateStr: string = '',
 ): string {
   const orgName = org?.name || 'Organización';
   const orgAddress = org?.address || '';
   const orgPhone = org?.phone || '';
   const orgEmail = org?.email || '';
-  const today = formatShortDate(new Date().toISOString());
+
+  const issueDateFormatted = issueDateStr ? formatShortDate(issueDateStr) : formatShortDate(new Date().toISOString());
+  const dueDateFormatted = dueDateStr ? formatShortDate(dueDateStr) : (row.due?.due_date ? formatShortDate(row.due.due_date) : 'N/A');
+
   const unitAgreements = agreements.filter(a => a.unit_id === row.unit.id);
   const agreementNote = unitAgreements.length > 0
     ? unitAgreements.map(a =>
@@ -106,10 +130,8 @@ function buildPdfHtml(
     : 'Sin acuerdo de pago vigente.';
 
   const hasPriorBalance = row.priorBalance > 0;
-  const { discountVal: firstTierDiscount, tierName: firstTierName } = computeFirstTierDiscount(row, discountTiers);
-  const hasDiscount = firstTierDiscount > 0;
+  const calculatedDiscounts = computeAllTierDiscounts(row, discountTiers);
   const grossTotal = round2(row.currentCharges + row.priorBalance + row.interestAmount);
-  const netTotalVisual = round2(grossTotal - firstTierDiscount);
 
   const header = template === 'moderno'
     ? `<div style="background:#1e40af;color:#fff;padding:20px 28px;border-radius:8px 8px 0 0;display:flex;justify-content:space-between;align-items:center;">
@@ -132,33 +154,66 @@ function buildPdfHtml(
        </div>`;
 
   const chargeLineRows = row.chargeLines.map(line =>
-    `<tr><td style="padding:5px 8px;border-bottom:1px solid #f1f5f9;">${line.conceptName}</td><td style="text-align:right;padding:5px 8px;border-bottom:1px solid #f1f5f9;">${formatCOP(line.amount)}</td></tr>`
+    `<tr><td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#334155;">${line.conceptName}</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;font-weight:600;color:#0f172a;">${formatCOP(line.amount)}</td></tr>`
   ).join('');
 
-  const detailSection = template === 'detallado' ? `
-    <table style="width:100%;border-collapse:collapse;margin-top:12px;font-size:11px;">
-      <thead><tr style="background:#f1f5f9;">
-        <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Concepto / Primer Escalón Activo</th>
-        <th style="text-align:right;padding:6px 8px;border-bottom:1px solid #e2e8f0;">Valor</th>
-      </tr></thead>
-      <tbody>
-        ${hasPriorBalance ? `<tr><td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;">Saldo anterior (periodos vencidos)</td><td style="text-align:right;padding:6px 8px;border-bottom:1px solid #f1f5f9;">${formatCOP(row.priorBalance)}</td></tr>` : ''}
-        ${chargeLineRows}
-        ${row.interestAmount > 0 ? `<tr><td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;">Interés de mora (${row.interestRate.toFixed(2)}%)</td><td style="text-align:right;padding:6px 8px;border-bottom:1px solid #f1f5f9;">${formatCOP(row.interestAmount)}</td></tr>` : ''}
-        <tr style="font-weight:600;background:#f8fafc;"><td style="padding:6px 8px;">Valor Total (Sin Descuentos)</td><td style="text-align:right;padding:6px 8px;">${formatCOP(grossTotal)}</td></tr>
-        ${hasDiscount ? `<tr style="color:#dc2626;background:#fef2f2;"><td style="padding:6px 8px;border-bottom:1px solid #fee2e2;">Descuento (${firstTierName || 'Primer Escalón Activo'})</td><td style="text-align:right;padding:6px 8px;border-bottom:1px solid #fee2e2;">-${formatCOP(firstTierDiscount)}</td></tr>` : ''}
-        <tr style="font-weight:700;background:#eff6ff;font-size:12px;color:#1e40af;"><td style="padding:8px;">VALOR NETO A PAGAR</td><td style="text-align:right;padding:8px;">${formatCOP(netTotalVisual)}</td></tr>
-      </tbody>
-    </table>
-    <div style="margin-top:14px;padding:10px 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:11px;color:#92400e;">
-      <strong>Nota del acuerdo de pago:</strong><br/>${agreementNote}
-    </div>` : `
-    <div style="margin-top:12px;display:flex;justify-content:space-between;font-size:12px;"><span>Saldo anterior:</span><strong>${formatCOP(row.priorBalance)}</strong></div>
-    <div style="font-size:12px;display:flex;justify-content:space-between;"><span>Cargos del periodo:</span><strong>${formatCOP(row.currentCharges)}</strong></div>
-    ${row.interestAmount > 0 ? `<div style="font-size:12px;display:flex;justify-content:space-between;"><span>Interés de mora (${row.interestRate.toFixed(2)}%):</span><strong>${formatCOP(row.interestAmount)}</strong></div>` : ''}
-    <div style="margin-top:6px;padding-top:6px;border-top:1px dashed #cbd5e1;font-size:12px;display:flex;justify-content:space-between;"><span>Total sin descuento:</span><strong>${formatCOP(grossTotal)}</strong></div>
-    ${hasDiscount ? `<div style="font-size:12px;display:flex;justify-content:space-between;color:#dc2626;"><span>Descuento (${firstTierName || 'Primer Escalón'}):</span><strong>-${formatCOP(firstTierDiscount)}</strong></div>` : ''}
-    <div style="margin-top:8px;padding-top:8px;border-top:2px solid #1e40af;font-size:14px;font-weight:700;display:flex;justify-content:space-between;color:#1e40af;"><span>VALOR NETO A PAGAR:</span><span>${formatCOP(netTotalVisual)}</span></div>`;
+  const discountsRowsHtml = calculatedDiscounts.map(disc => `
+    <tr style="background:#f0fdf4;border-bottom:1px solid #dcfce7;">
+      <td style="padding:8px 10px;color:#166534;font-size:11px;">
+        Descuento: <strong>${disc.tierName}</strong> (Válido hasta el día ${disc.valid_until_day} del mes)
+      </td>
+      <td style="text-align:right;padding:8px 10px;color:#166534;font-weight:700;font-size:12px;">
+        -${formatCOP(disc.discountVal)}
+      </td>
+    </tr>
+    <tr style="background:#dcfce7;border-bottom:2px solid #bbf7d0;">
+      <td style="padding:8px 10px;color:#14532d;font-weight:700;font-size:13px;">
+        VALOR A PAGAR CON DESCUENTO (Hasta día ${disc.valid_until_day})
+      </td>
+      <td style="text-align:right;padding:8px 10px;color:#15803d;font-weight:800;font-size:15px;">
+        ${formatCOP(disc.payWithDiscount)}
+      </td>
+    </tr>
+  `).join('');
+
+  const detailSection = `
+    <div style="margin-top:16px;">
+      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Desglose de Cargos del Periodo</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead>
+          <tr style="background:#f8fafc;color:#475569;font-size:11px;text-transform:uppercase;">
+            <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Concepto</th>
+            <th style="text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Valor</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${hasPriorBalance ? `<tr><td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c;font-weight:600;">Saldo Anterior Pendiente</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c;font-weight:700;">${formatCOP(row.priorBalance)}</td></tr>` : ''}
+          ${chargeLineRows}
+          ${row.interestAmount > 0 ? `<tr><td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#d97706;font-weight:600;">Interés de Mora (${row.interestRate.toFixed(2)}%)</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#d97706;font-weight:700;">${formatCOP(row.interestAmount)}</td></tr>` : ''}
+        </tbody>
+      </table>
+    </div>
+
+    <div style="margin-top:16px;border:2px solid #1e40af;border-radius:8px;overflow:hidden;">
+      <div style="background:#eff6ff;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #bfdbfe;">
+        <span style="font-size:14px;font-weight:800;color:#1e3a8a;">VALOR A PAGAR (SIN DESCUENTO):</span>
+        <span style="font-size:18px;font-weight:900;color:#1e40af;">${formatCOP(grossTotal)}</span>
+      </div>
+
+      ${calculatedDiscounts.length > 0 ? `
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <tbody>
+            ${discountsRowsHtml}
+          </tbody>
+        </table>
+      ` : ''}
+    </div>
+
+    ${template === 'detallado' ? `
+      <div style="margin-top:14px;padding:10px 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:11px;color:#92400e;">
+        <strong>Estado de Acuerdos de Pago:</strong><br/>${agreementNote}
+      </div>
+    ` : ''}`;
 
   return `
   <html><head><meta charset="utf-8"><title>Cuenta de Cobro ${invoiceNumber} - ${row.unit.tower} ${row.unit.unit_label}</title>
@@ -168,22 +223,32 @@ function buildPdfHtml(
     .body { padding:20px 28px; }
     h1 { font-size:18px; margin:0 0 4px; }
     .meta { font-size:11px; color:#6b7280; margin-bottom:12px; }
-    .prop { background:#f8fafc; padding:12px 16px; border-radius:6px; margin-bottom:12px; font-size:13px; }
-    .footer { margin-top:20px; font-size:10px; color:#9ca3af; border-top:1px solid #f1f5f9; padding-top:10px; }
+    .prop { background:#f8fafc; padding:12px 16px; border-radius:6px; margin-bottom:12px; font-size:12px; border:1px solid #e2e8f0; }
+    .footer { margin-top:20px; font-size:10px; color:#9ca3af; border-top:1px solid #f1f5f9; padding-top:10px; text-align:center; }
   </style></head>
   <body>
     <div class="doc">
       ${header}
       <div class="body">
         <h1>CUENTA DE COBRO N° ${invoiceNumber}</h1>
-        <div class="meta">Periodo: ${billingPeriod} · Fecha de emisión: ${today} · Formato: ${templateLabels[template]}</div>
+        <div class="meta">Periodo: ${billingPeriod} · Formato: ${templateLabels[template]}</div>
+        
         <div class="prop">
-          <strong>Propiedad:</strong> ${row.unit.tower} ${row.unit.unit_label}<br/>
-          <strong>Propietario:</strong> ${row.unit.owner_name || 'N/A'} · CC/NIT: ${row.unit.owner_document || 'N/A'}<br/>
-          <strong>Periodo de la cuota:</strong> ${row.due.period} · Vence: ${formatShortDate(row.due.due_date)}
+          <table style="width:100%;font-size:12px;border-collapse:collapse;">
+            <tr>
+              <td style="padding:2px 0;"><strong>Inmueble:</strong> ${row.unit.tower} ${row.unit.unit_label}</td>
+              <td style="padding:2px 0;text-align:right;"><strong>Fecha Emisión:</strong> ${issueDateFormatted}</td>
+            </tr>
+            <tr>
+              <td style="padding:2px 0;"><strong>Propietario:</strong> ${row.unit.owner_name || 'N/A'} (Doc: ${row.unit.owner_document || 'N/A'})</td>
+              <td style="padding:2px 0;text-align:right;color:#dc2626;"><strong>Fecha Vencimiento:</strong> ${dueDateFormatted}</td>
+            </tr>
+          </table>
         </div>
+
         ${detailSection}
-        <div class="footer">Documento generado por Rela ERP — MOD-05 Proceso de Facturación.</div>
+        
+        <div class="footer">Documento generado por Rela ERP — Módulo de Facturación Pro.</div>
       </div>
     </div>
   </body></html>`;
@@ -209,18 +274,25 @@ interface Props {
   discountTiers?: DiscountTier[];
 }
 
-export default function Paso2FormatoEnvio({ liquidation, agreements, org, billingPeriod, onBack, onComplete, discountTiers = [] }: Props) {
+export default function Paso2FormatoEnvio({ liquidation, agreements, org, billingPeriod, onBack, discountTiers = [] }: Props) {
   const [template, setTemplate] = useState<TemplateId>('detallado');
   const [previewRow, setPreviewRow] = useState<LiquidationRow | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [emailSubject, setEmailSubject] = useState(`Cuenta de Cobro - Periodo ${billingPeriod}`);
   const [emailBody, setEmailBody] = useState('');
-  const [recipientSearch, setRecipientSearch] = useState('');
-  const [recipientFilter, setRecipientFilter] = useState<'all' | 'with_email' | 'without_email'>('all');
   const [simulating, setSimulating] = useState(false);
   const [simResults, setSimResults] = useState<SimResult[] | null>(null);
   const [simModalOpen, setSimModalOpen] = useState(false);
   const [error, setError] = useState('');
+
+  const [issueDate, setIssueDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [dueDate, setDueDate] = useState<string>(() => {
+    const [yStr, mStr] = billingPeriod.split('-');
+    const y = parseInt(yStr, 10);
+    const m = parseInt(mStr, 10);
+    const lastDay = new Date(y, m, 0).getDate();
+    return `${yStr}-${String(mStr).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+  });
 
   const [isFinalized, setIsFinalized] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
@@ -279,18 +351,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     });
   }, [liquidation]);
 
-  const filteredRecipients = useMemo(() => {
-    return recipients.filter(r => {
-      if (recipientFilter === 'with_email' && !r.email) return false;
-      if (recipientFilter === 'without_email' && r.email) return false;
-      if (recipientSearch) {
-        const q = recipientSearch.toLowerCase();
-        if (!`${r.propertyName} ${r.ownerName} ${r.email}`.toLowerCase().includes(q)) return false;
-      }
-      return true;
-    });
-  }, [recipients, recipientFilter, recipientSearch]);
-
   function toggleSelected(rowId: string) {
     setSelected(prev => {
       const next = new Set(prev);
@@ -299,19 +359,19 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     });
   }
 
-  function selectAllVisible() { setSelected(new Set(filteredRecipients.map(r => r.rowId))); }
+  function selectAllVisible() { setSelected(new Set(recipients.map(r => r.rowId))); }
   function clearSelection() { setSelected(new Set()); }
 
   function handlePreview(row: LiquidationRow) { setPreviewRow(row); }
 
   function openPreviewPdf() {
     if (!previewRow) return;
-    const html = buildPdfHtml(previewRow, template, org, billingPeriod, agreements, `CC-${String(currentNextSeq).padStart(4, '0')}`, discountTiers);
+    const html = buildPdfHtml(previewRow, template, org, billingPeriod, agreements, `CC-${String(currentNextSeq).padStart(4, '0')}`, discountTiers, issueDate, dueDate);
     openPrintWindow(html);
   }
 
   function downloadSingle(row: LiquidationRow, invNum = `CC-${String(currentNextSeq).padStart(4, '0')}`) {
-    const html = buildPdfHtml(row, template, org, billingPeriod, agreements, invNum, discountTiers);
+    const html = buildPdfHtml(row, template, org, billingPeriod, agreements, invNum, discountTiers, issueDate, dueDate);
     openPrintWindow(html);
   }
 
@@ -322,7 +382,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     if (rows.length === 0) { setError('Seleccione al menos una cuenta para descargar el PDF consolidado.'); return; }
     const pages = rows.map((r, idx) => {
       const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
-      return buildPdfHtml(r, template, org, billingPeriod, agreements, invNum, discountTiers);
+      return buildPdfHtml(r, template, org, billingPeriod, agreements, invNum, discountTiers, issueDate, dueDate);
     }).join('<div style="page-break-after:always;"></div>');
     const html = `<html><head><meta charset="utf-8"><title>Cuentas de Cobro Consolidadas - ${billingPeriod}</title></head><body>${pages}</body></html>`;
     if (!openPrintWindow(html)) setError('No se pudo abrir la ventana de impresión.');
@@ -335,7 +395,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     if (targets.length === 0) { setError('Seleccione al menos una cuenta para descargar.'); return; }
     targets.forEach((t, idx) => {
       setTimeout(() => {
-        const html = buildPdfHtml(t.row, template, org, billingPeriod, agreements, t.invoiceNumber, discountTiers);
+        const html = buildPdfHtml(t.row, template, org, billingPeriod, agreements, t.invoiceNumber, discountTiers, issueDate, dueDate);
         openPrintWindow(html);
       }, idx * 600);
     });
@@ -347,15 +407,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     setError('');
 
     try {
-      const periodStartDate = `${billingPeriod}-01`;
-
-      const [yearStr, monthStr] = billingPeriod.split('-');
-      const year = parseInt(yearStr, 10);
-      const month = parseInt(monthStr, 10);
-      const lastDayDate = new Date(year, month, 0); 
-      const periodEndDate = !isNaN(lastDayDate.getTime()) 
-        ? lastDayDate.toISOString().slice(0, 10) 
-        : `${billingPeriod}-28`;
+      const periodStartDate = issueDate || `${billingPeriod}-01`;
+      const periodEndDate = dueDate || `${billingPeriod}-28`;
 
       const { data: docConfig } = await supabase
         .from('accounting_documents')
@@ -400,9 +453,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
           const tpMatch = thirdParties.find(t => t.document_number === row.unit.owner_document);
           if (tpMatch) assignedThirdPartyId = tpMatch.id;
         }
-        if (!assignedThirdPartyId && thirdParties.length > 0) {
-          assignedThirdPartyId = thirdParties[0].id;
-        }
 
         await supabase.from('dues').insert({
           organization_id: org.id,
@@ -424,7 +474,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         }).select().single();
 
         if (!jeErr && je) {
-          const linesToInsights = [];
+          const linesToInsert = [];
 
           if (row.chargeLines && row.chargeLines.length > 0) {
             for (const cl of row.chargeLines) {
@@ -435,7 +485,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
               if (cl.amount > 0) {
                 if (debitAccId) {
-                  linesToInsights.push({
+                  linesToInsert.push({
                     journal_entry_id: je.id,
                     account_id: debitAccId,
                     debit: cl.amount,
@@ -444,7 +494,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   });
                 }
                 if (creditAccId) {
-                  linesToInsights.push({
+                  linesToInsert.push({
                     journal_entry_id: je.id,
                     account_id: creditAccId,
                     debit: 0,
@@ -456,12 +506,12 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          if (linesToInsights.length === 0 && row.currentCharges > 0) {
+          if (linesToInsert.length === 0 && row.currentCharges > 0) {
             const debitAccId = defaultReceivableAcc?.id;
             const creditAccId = defaultIncomeAcc?.id;
 
             if (debitAccId) {
-              linesToInsights.push({
+              linesToInsert.push({
                 journal_entry_id: je.id,
                 account_id: debitAccId,
                 debit: row.currentCharges,
@@ -470,7 +520,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               });
             }
             if (creditAccId) {
-              linesToInsights.push({
+              linesToInsert.push({
                 journal_entry_id: je.id,
                 account_id: creditAccId,
                 debit: 0,
@@ -480,7 +530,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          await supabase.from('journal_lines').insert(linesToInsights);
+          await supabase.from('journal_lines').insert(linesToInsert);
         }
       }
 
@@ -601,6 +651,33 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         </div>
       )}
 
+      {/* Tarjeta de Parámetros de Fechas */}
+      <Card>
+        <div className="px-6 py-4 border-b border-gray-200">
+          <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+            <Calendar className="w-5 h-5 text-blue-600" />
+            Fechas del Documento de Facturación
+          </h2>
+          <p className="text-sm text-gray-500 mt-1">Defina la fecha de emisión y vencimiento que aparecerán en todas las Cuentas de Cobro.</p>
+        </div>
+        <CardBody>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Input
+              label="Fecha de Emisión *"
+              type="date"
+              value={issueDate}
+              onChange={(e) => setIssueDate(e.target.value)}
+            />
+            <Input
+              label="Fecha de Vencimiento *"
+              type="date"
+              value={dueDate}
+              onChange={(e) => setDueDate(e.target.value)}
+            />
+          </div>
+        </CardBody>
+      </Card>
+
       <Card>
         <div className="px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
@@ -634,7 +711,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
             <FileText className="w-5 h-5 text-blue-600" />
-            {isFinalized ? 'Historial de Cuentas Generadas' : 'Cuentas de Cobro a Generar (Visualización con Primer Descuento Activo)'}
+            {isFinalized ? 'Historial de Cuentas Generadas' : 'Cuentas de Cobro a Generar (Con Desglose y Escalones)'}
           </h2>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={selectAllVisible}>Seleccionar visibles</Button>
@@ -662,10 +739,9 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                     />
                   </th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Consecutivo / Propiedad</th>
-                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3 hidden sm:table-cell">Saldo Anterior</th>
-                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Cargos Periodo</th>
-                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3 hidden md:table-cell">1er Descuento Activo</th>
-                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Neto a Pagar</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Desglose de Conceptos</th>
+                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Valor sin Descuento</th>
+                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Valores con Descuento</th>
                   <th className="text-center text-xs font-semibold text-gray-600 uppercase px-4 py-3">Acciones</th>
                 </tr>
               </thead>
@@ -673,8 +749,9 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                 {liquidation.map((row, idx) => {
                   const rowId = row.rowId || row.due.id;
                   const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
-                  const { discountVal: firstDisc } = computeFirstTierDiscount(row, discountTiers);
-                  const visualNet = round2(row.currentCharges + row.priorBalance + row.interestAmount - firstDisc);
+                  const grossTotal = round2(row.currentCharges + row.priorBalance + row.interestAmount);
+                  const calculatedDiscounts = computeAllTierDiscounts(row, discountTiers);
+
                   return (
                     <tr key={rowId} className="hover:bg-gray-50">
                       <td className="px-4 py-3">
@@ -690,14 +767,36 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                         <p className="text-sm font-medium text-gray-900">{row.unit.tower} {row.unit.unit_label}</p>
                         <p className="text-xs text-gray-500">{row.unit.owner_name || ''}</p>
                       </td>
-                      <td className="px-4 py-3 text-right text-sm text-gray-700 hidden sm:table-cell">
-                        {row.priorBalance > 0 ? formatCOP(row.priorBalance) : '—'}
+                      <td className="px-4 py-3 text-xs text-gray-600">
+                        <ul className="space-y-0.5">
+                          {row.priorBalance > 0 && (
+                            <li className="text-red-600 font-medium">• Saldo Anterior: {formatCOP(row.priorBalance)}</li>
+                          )}
+                          {row.chargeLines.map((line, lIdx) => (
+                            <li key={lIdx}>• {line.conceptName}: {formatCOP(line.amount)}</li>
+                          ))}
+                          {row.interestAmount > 0 && (
+                            <li className="text-amber-600">• Int. Mora: {formatCOP(row.interestAmount)}</li>
+                          )}
+                        </ul>
                       </td>
-                      <td className="px-4 py-3 text-right text-sm text-gray-900">{formatCOP(row.currentCharges)}</td>
-                      <td className="px-4 py-3 text-right text-sm text-red-600 hidden md:table-cell">
-                        {firstDisc > 0 ? `-${formatCOP(firstDisc)}` : '—'}
+                      <td className="px-4 py-3 text-right text-base font-extrabold text-blue-900">
+                        {formatCOP(grossTotal)}
                       </td>
-                      <td className="px-4 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(visualNet)}</td>
+                      <td className="px-4 py-3 text-right text-xs">
+                        {calculatedDiscounts.length > 0 ? (
+                          <div className="space-y-1">
+                            {calculatedDiscounts.map(d => (
+                              <div key={d.tierId} className="bg-green-50 p-1.5 rounded border border-green-200">
+                                <p className="text-[10px] text-green-700 font-medium">Hasta el día {d.valid_until_day}:</p>
+                                <p className="text-sm font-bold text-green-800">{formatCOP(d.payWithDiscount)}</p>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-gray-400">—</span>
+                        )}
+                      </td>
                       <td className="px-4 py-3 text-center">
                         <div className="flex items-center justify-center gap-1">
                           <button onClick={() => handlePreview(row)} className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50" title="Ver PDF">
@@ -790,19 +889,51 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               <Badge variant="blue">Plantilla: {templateLabels[template]}</Badge>
               <Button size="sm" onClick={openPreviewPdf}><Download className="w-4 h-4" /> Descargar PDF</Button>
             </div>
-            <div className="rounded-lg border border-gray-200 bg-white p-5 max-h-[60vh] overflow-y-auto text-sm">
-              <p className="font-bold text-base mb-1">CUENTA DE COBRO</p>
-              <p className="text-xs text-gray-500 mb-3">Periodo: {billingPeriod}</p>
-              <div className="bg-gray-50 p-3 rounded mb-3">
+            <div className="rounded-lg border border-gray-200 bg-white p-5 max-h-[60vh] overflow-y-auto text-sm space-y-3">
+              <div className="border-b pb-2 flex justify-between items-center">
+                <div>
+                  <p className="font-bold text-base">CUENTA DE COBRO</p>
+                  <p className="text-xs text-gray-500">Periodo: {billingPeriod}</p>
+                </div>
+                <div className="text-right text-xs">
+                  <p><strong>Fecha Emisión:</strong> {issueDate}</p>
+                  <p className="text-red-600"><strong>Fecha Vencimiento:</strong> {dueDate}</p>
+                </div>
+              </div>
+              <div className="bg-gray-50 p-3 rounded">
                 <p><strong>Inmueble:</strong> {previewRow.unit.tower} {previewRow.unit.unit_label}</p>
                 <p><strong>Propietario:</strong> {previewRow.unit.owner_name}</p>
               </div>
-              <div className="border-t pt-2 space-y-1">
-                <div className="flex justify-between"><span>Cargos del periodo:</span><strong>{formatCOP(previewRow.currentCharges)}</strong></div>
-                {computeFirstTierDiscount(previewRow, discountTiers).discountVal > 0 && (
-                  <div className="flex justify-between text-red-600"><span>1er Descuento Activo:</span><strong>-{formatCOP(computeFirstTierDiscount(previewRow, discountTiers).discountVal)}</strong></div>
-                )}
-                <div className="flex justify-between font-bold text-blue-700 border-t pt-1"><span>Neto a Pagar:</span><span>{formatCOP(round2(previewRow.currentCharges + previewRow.priorBalance + previewRow.interestAmount - computeFirstTierDiscount(previewRow, discountTiers).discountVal))}</span></div>
+              <div className="space-y-1">
+                <p className="font-bold text-xs text-gray-700 uppercase">Cargos Discriminados:</p>
+                <div className="bg-gray-50 p-2 rounded text-xs space-y-1">
+                  {previewRow.priorBalance > 0 && (
+                    <div className="flex justify-between text-red-600"><span>Saldo Anterior:</span><strong>{formatCOP(previewRow.priorBalance)}</strong></div>
+                  )}
+                  {previewRow.chargeLines.map((line, lIdx) => (
+                    <div key={lIdx} className="flex justify-between"><span>{line.conceptName}:</span><strong>{formatCOP(line.amount)}</strong></div>
+                  ))}
+                  {previewRow.interestAmount > 0 && (
+                    <div className="flex justify-between text-amber-600"><span>Interés Mora:</span><strong>{formatCOP(previewRow.interestAmount)}</strong></div>
+                  )}
+                </div>
+              </div>
+
+              <div className="border-t pt-2 space-y-2">
+                <div className="flex justify-between font-extrabold text-base text-blue-900 bg-blue-50 p-2 rounded">
+                  <span>VALOR A PAGAR (SIN DESCUENTO):</span>
+                  <span>{formatCOP(round2(previewRow.currentCharges + previewRow.priorBalance + previewRow.interestAmount))}</span>
+                </div>
+
+                {computeAllTierDiscounts(previewRow, discountTiers).map(d => (
+                  <div key={d.tierId} className="flex justify-between items-center bg-green-50 p-2 rounded text-xs border border-green-200">
+                    <div>
+                      <span className="font-bold text-green-800">VALOR A PAGAR CON DESCUENTO</span>
+                      <span className="block text-[10px] text-green-600">(Válido hasta el día {d.valid_until_day})</span>
+                    </div>
+                    <span className="font-extrabold text-sm text-green-700">{formatCOP(d.payWithDiscount)}</span>
+                  </div>
+                ))}
               </div>
             </div>
             <div className="flex justify-end"><Button variant="outline" onClick={() => setPreviewRow(null)}>Cerrar</Button></div>
