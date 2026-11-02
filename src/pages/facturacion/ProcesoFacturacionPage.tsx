@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { Calculator, Loader2, AlertTriangle, CheckCircle2, Percent, RefreshCw, ChevronRight, Calendar, Layers } from 'lucide-react';
+import { Calculator, Loader2, AlertTriangle, CheckCircle2, Percent, RefreshCw, ChevronRight, Calendar, Layers, FileText } from 'lucide-react';
 import { supabase, Unit, Due, PaymentAgreement, AdminQuota, PeriodNovelty, DiscountTier, BillingConcept } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card, CardBody } from '@/components/ui/Card';
@@ -139,7 +139,6 @@ export default function ProcesoFacturacionPage() {
   const [error, setError] = useState('');
 
   const [isFinalized, setIsFinalized] = useState(false);
-  const [finalizing, setFinalizing] = useState(false);
   const [currentNextSeq, setCurrentNextSeq] = useState<number>(1);
 
   const [discountRows, setDiscountRows] = useState<DiscountRow[]>([]);
@@ -156,9 +155,11 @@ export default function ProcesoFacturacionPage() {
         .eq('is_work_period_active', true)
         .maybeSingle();
 
+      let targetPeriod = billingPeriod;
       if (activePeriodData && activePeriodData.work_month != null && activePeriodData.work_year != null) {
         const formattedMonth = String(activePeriodData.work_month).padStart(2, '0');
-        setBillingPeriod(`${activePeriodData.work_year}-${formattedMonth}`);
+        targetPeriod = `${activePeriodData.work_year}-${formattedMonth}`;
+        setBillingPeriod(targetPeriod);
       }
 
       const [
@@ -169,12 +170,12 @@ export default function ProcesoFacturacionPage() {
         { data: noveltyData },
         { data: tierData },
         { data: conceptData },
+        { data: docConfig }
       ] = await Promise.all([
         supabase
           .from('dues')
           .select('*, units(*)')
           .eq('organization_id', activeOrg.id)
-          .neq('status', 'pagada')
           .order('due_date', { ascending: false }),
         supabase
           .from('units')
@@ -196,8 +197,7 @@ export default function ProcesoFacturacionPage() {
         supabase
           .from('period_novelties')
           .select('*, billing_concept:billing_concepts(*), units:units(*)')
-          .eq('organization_id', activeOrg.id)
-          .eq('is_invoiced', false),
+          .eq('organization_id', activeOrg.id),
         supabase
           .from('discount_tiers')
           .select('*')
@@ -211,53 +211,63 @@ export default function ProcesoFacturacionPage() {
           .eq('is_active', true)
           .order('is_default', { ascending: false })
           .order('name'),
+        supabase
+          .from('accounting_documents')
+          .select('next_consecutive')
+          .eq('organization_id', activeOrg.id)
+          .eq('prefix', 'CC')
+          .maybeSingle()
       ]);
 
       setDues((duesData || []) as Due[]);
-      setUnits((unitsData || []) as Unit[]);
+      const loadedUnits = (unitsData || []) as Unit[];
+      setUnits(loadedUnits);
       setAgreements((agrData || []) as PaymentAgreement[]);
       setAdminQuotas((quotaData || []) as AdminQuota[]);
       setNovelties((noveltyData || []) as PeriodNovelty[]);
       setDiscountTiers((tierData || []) as DiscountTier[]);
       setConcepts((conceptData || []) as BillingConcept[]);
+      setCurrentNextSeq(docConfig?.next_consecutive || 1);
+
+      // Verificamos si ya existen dues para este periodo exacto (Facturación ya contabilizada)
+      const periodDues = (duesData || []).filter(d => d.period === targetPeriod);
+      if (periodDues.length > 0 && loadedUnits.length > 0) {
+        setIsFinalized(true);
+        // Reconstruimos la liquidación con las cuentas ya existentes para que el paso 3 funcione directo
+        const reconstructedRows: LiquidationRow[] = periodDues.map(d => {
+          const unitMatch = loadedUnits.find(u => u.id === d.unit_id) || loadedUnits[0];
+          return {
+            due: d,
+            unit: unitMatch,
+            daysLate: 0,
+            interestRate: Number(d.interest_rate) || 0.5,
+            priorBalance: 0,
+            currentCharges: d.amount,
+            chargeLines: [{
+              conceptId: 'loaded',
+              conceptName: 'Cuota / Facturación Periodo',
+              conceptCode: 'CC',
+              amount: d.amount,
+              isQuota: true,
+              isNovelty: false
+            }],
+            interestAmount: 0,
+            discountAmount: 0,
+            netTotal: d.amount,
+            rowId: d.id,
+          };
+        });
+        setLiquidation(reconstructedRows);
+        setReviewed(true);
+      }
     } catch (err) {
       console.warn('Error cargando datos de facturación:', err);
     }
 
     setLoading(false);
-  }, [activeOrg]);
+  }, [activeOrg, billingPeriod]);
 
   useEffect(() => { if (activeOrg) loadData(); }, [activeOrg, loadData]);
-
-  useEffect(() => {
-    async function checkExistingPeriodState() {
-      if (!activeOrg || !billingPeriod || units.length === 0) return;
-      try {
-        const { data: docConfig } = await supabase
-          .from('accounting_documents')
-          .select('next_consecutive')
-          .eq('organization_id', activeOrg.id)
-          .eq('prefix', 'CC')
-          .single();
-
-        const baseSeq = docConfig?.next_consecutive || 1;
-        setCurrentNextSeq(baseSeq);
-
-        const { data: existingDues } = await supabase
-          .from('dues')
-          .select('*, units(*)')
-          .eq('organization_id', activeOrg.id)
-          .eq('period', billingPeriod);
-
-        if (existingDues && existingDues.length > 0) {
-          setIsFinalized(true);
-        }
-      } catch (e) {
-        console.warn('No se pudo verificar el estado previo del periodo:', e);
-      }
-    }
-    checkExistingPeriodState();
-  }, [activeOrg, billingPeriod, units]);
 
   const effectiveCutoffDate = useMemo(() => {
     if (customStartDate) return new Date(customStartDate + 'T00:00:00');
@@ -350,18 +360,20 @@ export default function ProcesoFacturacionPage() {
   const unitPriorBalanceMap = useMemo(() => {
     const map = new Map<string, number>();
     for (const due of dues) {
+      if (due.period === billingPeriod) continue; // Ignoramos el periodo actual para el saldo vencido anterior
       if (!isEligibleDue(due.due_date, effectiveCutoffDate)) continue;
       const existing = map.get(due.unit_id) || 0;
       map.set(due.unit_id, existing + due.balance);
     }
     return map;
-  }, [dues, effectiveCutoffDate]);
+  }, [dues, effectiveCutoffDate, billingPeriod]);
 
   const unitInterestMap = useMemo(() => {
     const rate = parseFloat(interestRate) || 0;
     const grace = parseInt(graceDays) || 0;
     const map = new Map<string, number>();
     for (const due of dues) {
+      if (due.period === billingPeriod) continue;
       if (!isEligibleDue(due.due_date, effectiveCutoffDate)) continue;
       const days = getDaysLate(due.due_date, grace, effectiveCutoffDate);
       const interest = round2(due.balance * (rate / 100) * days);
@@ -369,7 +381,7 @@ export default function ProcesoFacturacionPage() {
       map.set(due.unit_id, existing + interest);
     }
     return map;
-  }, [dues, interestRate, graceDays, effectiveCutoffDate]);
+  }, [dues, interestRate, graceDays, effectiveCutoffDate, billingPeriod]);
 
   const computedLiquidation: LiquidationRow[] = useMemo(() => {
     const rate = parseFloat(interestRate) || 0;
@@ -542,150 +554,6 @@ export default function ProcesoFacturacionPage() {
     setCurrentStep(3);
   }
 
-  async function handleFinalizeProcess() {
-    if (!activeOrg) return;
-    setFinalizing(true);
-    setError('');
-
-    try {
-      const [yearStr, monthStr] = billingPeriod.split('-');
-      const year = parseInt(yearStr, 10);
-      const month = parseInt(monthStr, 10);
-      const lastDayDate = new Date(year, month, 0); 
-      const periodEndDate = !isNaN(lastDayDate.getTime()) 
-        ? lastDayDate.toISOString().slice(0, 10) 
-        : new Date().toISOString().slice(0, 10);
-
-      const { data: docConfig } = await supabase
-        .from('accounting_documents')
-        .select('*')
-        .eq('organization_id', activeOrg.id)
-        .eq('prefix', 'CC')
-        .single();
-
-      let nextSeq = docConfig?.next_consecutive || 61;
-      setCurrentNextSeq(nextSeq);
-
-      const { data: accountsData } = await supabase
-        .from('accounts')
-        .select('*')
-        .eq('organization_id', activeOrg.id);
-
-      const accounts = accountsData || [];
-
-      const defaultReceivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
-      const defaultIncomeAcc = accounts.find(a => a.code.startsWith('4')) || accounts[1] || accounts[0];
-      const defaultDiscountAcc = accounts.find(a => a.code.startsWith('43') || a.code.startsWith('5')) || defaultIncomeAcc;
-
-      const moraConceptDef = concepts.find(c => 
-        c.code === 'MORA_ADM' || c.is_late_interest === true || c.code?.toUpperCase().includes('MORA') || c.name?.toLowerCase().includes('interés')
-      );
-
-      for (let i = 0; i < liquidation.length; i++) {
-        const row = liquidation[i];
-        const invoiceNumber = `CC-${String(nextSeq + i).padStart(4, '0')}`;
-        const rowId = row.rowId || 'inv-' + Math.random().toString(36).substring(2, 9);
-
-        const unitIdentifier = row.unit.unique_identifier || (row.unit.tower && row.unit.tower.trim() !== '' ? `${row.unit.tower}-${row.unit.unit_label}` : row.unit.unit_label);
-        const assignedThirdPartyId = row.unit.third_party_id || null;
-
-        await supabase.from('dues').insert({
-          organization_id: activeOrg.id,
-          unit_id: row.unit.id,
-          period: billingPeriod,
-          amount: row.netTotal,
-          balance: row.netTotal,
-          status: 'pendiente',
-          due_date: periodEndDate,
-        });
-
-        const { data: je, error: jeErr } = await supabase.from('journal_entries').insert({
-          organization_id: activeOrg.id,
-          date: periodEndDate,
-          description: `Causación Cuota de Cobro ${invoiceNumber} - ${unitIdentifier} Periodo ${billingPeriod}`,
-          document_type: 'CC',
-          document_number: nextSeq + i,
-          is_manual: true,
-        }).select().single();
-
-        if (!jeErr && je && defaultReceivableAcc) {
-          const linesToInsert = [];
-
-          if (row.netTotal > 0) {
-            linesToInsert.push({
-              journal_entry_id: je.id,
-              account_id: defaultReceivableAcc.id,
-              debit: row.netTotal,
-              credit: 0,
-              third_party_id: assignedThirdPartyId,
-            });
-          }
-
-          if (row.discountAmount && row.discountAmount > 0) {
-            linesToInsert.push({
-              journal_entry_id: je.id,
-              account_id: defaultDiscountAcc.id,
-              debit: row.discountAmount,
-              credit: 0,
-              third_party_id: assignedThirdPartyId,
-            });
-          }
-
-          if (row.chargeLines && row.chargeLines.length > 0) {
-            for (const cl of row.chargeLines) {
-              if (cl.amount <= 0) continue;
-
-              const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode?.toUpperCase());
-              const targetAccId = conceptDef?.income_account_id || defaultIncomeAcc?.id;
-
-              if (targetAccId) {
-                linesToInsert.push({
-                  journal_entry_id: je.id,
-                  account_id: targetAccId,
-                  debit: 0,
-                  credit: cl.amount,
-                  third_party_id: assignedThirdPartyId,
-                });
-              }
-            }
-          }
-
-          if (row.interestAmount && row.interestAmount > 0) {
-            const interestAccId = moraConceptDef?.income_account_id || 
-                                  accounts.find(a => a.code.startsWith('42') || a.code.startsWith('8'))?.id || 
-                                  defaultIncomeAcc?.id;
-
-            if (interestAccId) {
-              linesToInsert.push({
-                journal_entry_id: je.id,
-                account_id: interestAccId,
-                debit: 0,
-                credit: row.interestAmount,
-                third_party_id: assignedThirdPartyId,
-              });
-            }
-          }
-
-          await supabase.from('journal_lines').insert(linesToInsert);
-        }
-      }
-
-      if (docConfig) {
-        await supabase.from('accounting_documents')
-          .update({ next_consecutive: nextSeq + liquidation.length })
-          .eq('id', docConfig.id);
-      }
-
-      setIsFinalized(true);
-      setCurrentStep(4);
-    } catch (e) {
-      console.warn('Error al registrar asientos contables en bloque:', e);
-      setError('Ocurrió un inconveniente al contabilizar, pero se generó localmente.');
-    }
-
-    setFinalizing(false);
-  }
-  
   const totalDiscountBase = useMemo(() => discountRows.reduce((s, r) => s + r.baseAmount, 0), [discountRows]);
   const totalDiscountAmountsByTier = useMemo(() => {
     const totals: Record<string, number> = {};
@@ -754,183 +622,204 @@ export default function ProcesoFacturacionPage() {
         <>
           {currentStep === 1 && (
             <>
-          <Card className="mb-6">
-            <div className="px-6 py-4 border-b border-gray-200">
-              <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                <Percent className="w-5 h-5 text-blue-600" />
-                Paso 1: Configuración de Intereses
-              </h2>
-              <p className="text-sm text-gray-500 mt-1">
-                Defina los parámetros para el cálculo de intereses de mora. El sistema carga automáticamente las cuotas de administración, novedades del periodo y saldos vencidos.
-              </p>
-            </div>
-            <CardBody>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                <div>
-                  <Input
-                    label="Tasa de Interés de Mora (%)"
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    max="99.99"
-                    value={interestRate}
-                    onChange={(e) => handleInterestRateChange(e.target.value)}
-                    placeholder="Ej: 0.50"
-                  />
-                  <p className="text-xs text-gray-400 mt-1">Parámetro de cálculo. No editable por propiedad.</p>
-                </div>
-                <div>
-                  <Input
-                    label="Días de Gracia"
-                    type="number"
-                    min="0"
-                    value={graceDays}
-                    onChange={(e) => setGraceDays(e.target.value)}
-                    placeholder="Ej: 5"
-                  />
-                  <p className="text-xs text-gray-400 mt-1">Días posteriores al vencimiento sin interés.</p>
-                </div>
-                <div>
-                  <Select
-                    label="Fecha de Corte / Inicio de Cobro"
-                    value={cutoffRule}
-                    onChange={(e) => { setCutoffRule(e.target.value as CutoffRule); setCustomStartDate(''); }}
-                  >
-                    <option value="cierre_mes_anterior">Día de cierre del mes anterior</option>
-                    <option value="inicio_mes_facturar">Día 1 del mes a facturar</option>
-                  </Select>
-                  <p className="text-xs text-gray-400 mt-1">Define el corte de saldos elegibles según el periodo activo ({billingPeriod}).</p>
-                </div>
-              </div>
-
-              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <Input
-                    label="Fecha de Inicio de Cobro Personalizada (opcional)"
-                    type="date"
-                    value={customStartDate}
-                    onChange={(e) => setCustomStartDate(e.target.value)}
-                    placeholder="DD/MM/AAAA"
-                  />
-                  <p className="text-xs text-gray-400 mt-1">
-                    Si se especifica, anula la regla de corte anterior. Solo se liquidan saldos a esta fecha.
+            {isFinalized ? (
+              <Card className="mb-6">
+                <CardBody>
+                  <div className="text-center py-10 space-y-4">
+                    <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-green-100 text-green-700">
+                      <CheckCircle2 className="w-8 h-8" />
+                    </div>
+                    <h3 className="text-lg font-bold text-gray-900">Ya existe una facturación contabilizada para el periodo {billingPeriod}</h3>
+                    <p className="text-sm text-gray-500 max-w-md mx-auto">
+                      El proceso de este periodo ya fue finalizado. Puede avanzar al Paso 3 para consultar, descargar o enviar las cuentas de cobro emitidas.
+                    </p>
+                    <div className="pt-2">
+                      <Button onClick={() => setCurrentStep(3)}>
+                        Ir al Paso 3: Formatos y Envío <ChevronRight className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                </CardBody>
+              </Card>
+            ) : (
+              <Card className="mb-6">
+                <div className="px-6 py-4 border-b border-gray-200">
+                  <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    <Percent className="w-5 h-5 text-blue-600" />
+                    Paso 1: Configuración de Intereses
+                  </h2>
+                  <p className="text-sm text-gray-500 mt-1">
+                    Defina los parámetros para el cálculo de intereses de mora. El sistema carga automáticamente las cuotas de administración, novedades del periodo y saldos vencidos.
                   </p>
                 </div>
-                <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3 flex items-center gap-3">
-                  <Calendar className="w-5 h-5 text-blue-600 flex-shrink-0" />
-                  <div>
-                    <p className="text-xs text-gray-500">Fecha de corte efectiva</p>
-                    <p className="text-sm font-semibold text-gray-900">
-                      {effectiveCutoffDate.toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' })}
-                    </p>
-                    <p className="text-xs text-gray-400 mt-0.5">
-                      {customStartDate ? 'Fecha personalizada (activa)' : cutoffRuleLabels[cutoffRule]}
-                    </p>
+                <CardBody>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div>
+                      <Input
+                        label="Tasa de Interés de Mora (%)"
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max="99.99"
+                        value={interestRate}
+                        onChange={(e) => handleInterestRateChange(e.target.value)}
+                        placeholder="Ej: 0.50"
+                      />
+                      <p className="text-xs text-gray-400 mt-1">Parámetro de cálculo. No editable por propiedad.</p>
+                    </div>
+                    <div>
+                      <Input
+                        label="Días de Gracia"
+                        type="number"
+                        min="0"
+                        value={graceDays}
+                        onChange={(e) => setGraceDays(e.target.value)}
+                        placeholder="Ej: 5"
+                      />
+                      <p className="text-xs text-gray-400 mt-1">Días posteriores al vencimiento sin interés.</p>
+                    </div>
+                    <div>
+                      <Select
+                        label="Fecha de Corte / Inicio de Cobro"
+                        value={cutoffRule}
+                        onChange={(e) => { setCutoffRule(e.target.value as CutoffRule); setCustomStartDate(''); }}
+                      >
+                        <option value="cierre_mes_anterior">Día de cierre del mes anterior</option>
+                        <option value="inicio_mes_facturar">Día 1 del mes a facturar</option>
+                      </Select>
+                      <p className="text-xs text-gray-400 mt-1">Define el corte de saldos elegibles según el periodo activo ({billingPeriod}).</p>
+                    </div>
                   </div>
-                </div>
-              </div>
 
-              <div className="mt-4 flex items-center gap-3">
-                <Button onClick={handleReviewLiquidation} disabled={reviewing}>
-                  {reviewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Calculator className="w-4 h-4" />}
-                  Revisar Liquidación
-                </Button>
-                {reviewed && defaultedAgreements.length === 0 && (
-                  <span className="text-sm text-green-600 flex items-center gap-1">
-                    <CheckCircle2 className="w-4 h-4" /> Revisión completada sin incumplimientos
-                  </span>
-                )}
-                {reviewed && defaultedAgreements.length > 0 && (
-                  <span className="text-sm text-red-600 flex items-center gap-1">
-                    <AlertTriangle className="w-4 h-4" /> {defaultedAgreements.length} acuerdo(s) incumplido(s) detectado(s)
-                  </span>
-                )}
-              </div>
+                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <Input
+                        label="Fecha de Inicio de Cobro Personalizada (opcional)"
+                        type="date"
+                        value={customStartDate}
+                        onChange={(e) => setCustomStartDate(e.target.value)}
+                        placeholder="DD/MM/AAAA"
+                      />
+                      <p className="text-xs text-gray-400 mt-1">
+                        Si se especifica, anula la regla de corte anterior. Solo se liquidan saldos a esta fecha.
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3 flex items-center gap-3">
+                      <Calendar className="w-5 h-5 text-blue-600 flex-shrink-0" />
+                      <div>
+                        <p className="text-xs text-gray-500">Fecha de corte efectiva</p>
+                        <p className="text-sm font-semibold text-gray-900">
+                          {effectiveCutoffDate.toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' })}
+                        </p>
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          {customStartDate ? 'Fecha personalizada (activa)' : cutoffRuleLabels[cutoffRule]}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
 
-              {reviewed && (
-                <div className="mt-4 flex justify-end">
-                  <Button onClick={() => setCurrentStep(hasDiscounts ? 2 : 3)}>
-                    {hasDiscounts ? 'Continuar a Descuentos' : 'Continuar a Formatos'} <ChevronRight className="w-4 h-4" />
+                  <div className="mt-4 flex items-center gap-3">
+                    <Button onClick={handleReviewLiquidation} disabled={reviewing}>
+                      {reviewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Calculator className="w-4 h-4" />}
+                      Revisar Liquidación
+                    </Button>
+                    {reviewed && defaultedAgreements.length === 0 && (
+                      <span className="text-sm text-green-600 flex items-center gap-1">
+                        <CheckCircle2 className="w-4 h-4" /> Revisión completada sin incumplimientos
+                      </span>
+                    )}
+                    {reviewed && defaultedAgreements.length > 0 && (
+                      <span className="text-sm text-red-600 flex items-center gap-1">
+                        <AlertTriangle className="w-4 h-4" /> {defaultedAgreements.length} acuerdo(s) incumplido(s) detectado(s)
+                      </span>
+                    )}
+                  </div>
+
+                  {reviewed && (
+                    <div className="mt-4 flex justify-end">
+                      <Button onClick={() => setCurrentStep(hasDiscounts ? 2 : 3)}>
+                        {hasDiscounts ? 'Continuar a Descuentos' : 'Continuar a Formatos'} <ChevronRight className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  )}
+                </CardBody>
+              </Card>
+            )}
+
+            {reviewed && !isFinalized && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+                <Card><CardBody>
+                  <p className="text-sm text-gray-500">Total Base de Cálculo</p>
+                  <p className="text-xl font-bold text-gray-900">{formatCOP(totalPriorBalance)}</p>
+                </CardBody></Card>
+                <Card><CardBody>
+                  <p className="text-sm text-gray-500">Total Intereses Calculados</p>
+                  <p className="text-xl font-bold text-yellow-600">{formatCOP(totalInterest)}</p>
+                </CardBody></Card>
+              </div>
+            )}
+
+            {reviewed && !isFinalized && (
+              <Card>
+                <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+                  <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    <Calculator className="w-5 h-5 text-blue-600" />
+                    Tabla de Liquidación
+                  </h2>
+                  <Button variant="outline" size="sm" onClick={handleReviewLiquidation}>
+                    <RefreshCw className="w-4 h-4" /> Recalcular
                   </Button>
                 </div>
-              )}
-            </CardBody>
-          </Card>
-
-          {reviewed && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
-              <Card><CardBody>
-                <p className="text-sm text-gray-500">Total Base de Cálculo</p>
-                <p className="text-xl font-bold text-gray-900">{formatCOP(totalPriorBalance)}</p>
-              </CardBody></Card>
-              <Card><CardBody>
-                <p className="text-sm text-gray-500">Total Intereses Calculados</p>
-                <p className="text-xl font-bold text-yellow-600">{formatCOP(totalInterest)}</p>
-              </CardBody></Card>
-            </div>
-          )}
-
-          {reviewed && (
-            <Card>
-              <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                  <Calculator className="w-5 h-5 text-blue-600" />
-                  Tabla de Liquidación
-                </h2>
-                <Button variant="outline" size="sm" onClick={handleReviewLiquidation}>
-                  <RefreshCw className="w-4 h-4" /> Recalcular
-                </Button>
-              </div>
-              {(reviewed ? liquidation : computedLiquidation).length === 0 ? (
-                <div className="text-center py-12">
-                  <p className="text-gray-500">No hay cuotas, novedades ni saldos pendientes para facturar en este periodo</p>
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead>
-                      <tr className="border-b border-gray-200 bg-gray-50">
-                        <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Propiedad</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Base de Cálculo (Saldo)</th>
-                        <th className="text-center text-xs font-semibold text-gray-600 uppercase px-6 py-3">Tasa (%)</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Interés Mora</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {liquidation.map((row) => (
-                        <tr key={row.rowId} className="hover:bg-gray-50">
-                          <td className="px-6 py-3">
-                            <p className="text-sm font-medium text-gray-900">{row.unit.tower} {row.unit.unit_label}</p>
-                            <p className="text-xs text-gray-500">{row.unit.owner_name || ''}</p>
-                          </td>
-                          <td className="px-6 py-3 text-right text-sm text-gray-900">
-                            {formatCOP(row.priorBalance)}
-                          </td>
-                          <td className="px-6 py-3 text-center text-sm text-gray-500">
-                            {row.interestRate.toFixed(2)}
-                          </td>
-                          <td className="px-6 py-3 text-right">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={row.interestAmount}
-                              onChange={(e) => {
-                                const val = Math.round((parseFloat(e.target.value) || 0) * 100) / 100;
-                                handleRowInterestAmountChange(row.unit.id, val);
-                              }}
-                              className="w-24 text-right text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                            />
-                          </td>
+                {(reviewed ? liquidation : computedLiquidation).length === 0 ? (
+                  <div className="text-center py-12">
+                    <p className="text-gray-500">No hay cuotas, novedades ni saldos pendientes para facturar en este periodo</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b border-gray-200 bg-gray-50">
+                          <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Propiedad</th>
+                          <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Base de Cálculo (Saldo)</th>
+                          <th className="text-center text-xs font-semibold text-gray-600 uppercase px-6 py-3">Tasa (%)</th>
+                          <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Interés Mora</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </Card>
-          )}
-          </>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {liquidation.map((row) => (
+                          <tr key={row.rowId} className="hover:bg-gray-50">
+                            <td className="px-6 py-3">
+                              <p className="text-sm font-medium text-gray-900">{row.unit.tower} {row.unit.unit_label}</p>
+                              <p className="text-xs text-gray-500">{row.unit.owner_name || ''}</p>
+                            </td>
+                            <td className="px-6 py-3 text-right text-sm text-gray-900">
+                              {formatCOP(row.priorBalance)}
+                            </td>
+                            <td className="px-6 py-3 text-center text-sm text-gray-500">
+                              {row.interestRate.toFixed(2)}
+                            </td>
+                            <td className="px-6 py-3 text-right">
+                              <input
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                value={row.interestAmount}
+                                onChange={(e) => {
+                                  const val = Math.round((parseFloat(e.target.value) || 0) * 100) / 100;
+                                  handleRowInterestAmountChange(row.unit.id, val);
+                                }}
+                                className="w-24 text-right text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                              />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
+            )}
+            </>
           )}
 
           {currentStep === 2 && hasDiscounts && (
@@ -938,7 +827,7 @@ export default function ProcesoFacturacionPage() {
               <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
                 <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
                   <Layers className="w-5 h-5 text-blue-600" />
-                  Paso 2: Descuentos por Propiedad (Múltiples Escalones con Cálculo Automático)
+                  Paso 2: Descuentos por Propiedad
                 </h2>
                 <div className="flex items-center gap-2">
                   {activeTiers.map((t, index) => (
@@ -949,9 +838,24 @@ export default function ProcesoFacturacionPage() {
                 </div>
               </div>
               <div className="p-5">
-                {discountRows.length === 0 ? (
+                {isFinalized ? (
+                  <div className="text-center py-10 space-y-4">
+                    <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-green-100 text-green-700">
+                      <CheckCircle2 className="w-8 h-8" />
+                    </div>
+                    <h3 className="text-lg font-bold text-gray-900">El periodo ya fue contabilizado</h3>
+                    <p className="text-sm text-gray-500 max-w-md mx-auto">
+                      Los descuentos ya fueron aplicados y facturados. Puede avanzar directamente al Paso 3.
+                    </p>
+                    <div className="pt-2">
+                      <Button onClick={() => setCurrentStep(3)}>
+                        Ir al Paso 3: Formatos y Envío <ChevronRight className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                ) : discountRows.length === 0 ? (
                   <div className="text-center py-12">
-                    <p className="text-gray-500">No hay propiedades con cargos para aplicar descuentos.</p>
+                    <p className="text-gray-500">No hay propiedades con cargos para aplicar descuentos. Vuelva al Paso 1 y asegúrese de liquidar.</p>
                   </div>
                 ) : (
                   <>
@@ -1067,21 +971,6 @@ export default function ProcesoFacturacionPage() {
                 discountTiers={activeTiers}
               />
             </div>
-          )}
-
-          {currentStep === 4 && (
-            <Card>
-              <div className="text-center py-16">
-                <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-green-100 mb-4">
-                  <CheckCircle2 className="w-8 h-8 text-green-600" />
-                </div>
-                <h2 className="text-xl font-bold text-gray-900 mb-2">Proceso de Facturación Completado</h2>
-                <p className="text-gray-500 mb-6">Las cuentas de cobro han sido generadas y los asientos contables registrados con éxito.</p>
-                <Button onClick={() => { setCurrentStep(1); setReviewed(false); setIsFinalized(false); setLiquidation([]); setDiscountRows([]); }}>
-                  <RefreshCw className="w-4 h-4" /> Iniciar Nuevo Proceso
-                </Button>
-              </div>
-            </Card>
           )}
         </>
       )}
