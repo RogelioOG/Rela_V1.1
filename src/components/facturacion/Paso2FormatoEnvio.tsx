@@ -240,7 +240,7 @@ function buildPdfHtml(
 
   const detailSection = `
     <div style="margin-top:16px;">
-      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Estado de Cuenta</div>
+      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Estado de Cuenta Comparativo</div>
       <table style="width:100%;border-collapse:collapse;font-size:12px;">
         <thead>
           <tr style="background:#f8fafc;color:#475569;font-size:11px;text-transform:uppercase;">
@@ -384,7 +384,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         if (existingDues && existingDues.length > 0) {
           const restoredInvoices = liquidation.map((row, idx) => ({
             id: row.rowId || row.due.id,
-            invoiceNumber: `CC-${String(baseSeq + idx).padStart(4, '0')}`,
+            invoiceNumber: `CC-${String(baseSeq - existingDues.length + idx).padStart(4, '0')}`,
             row,
           }));
           setGeneratedInvoices(restoredInvoices);
@@ -702,7 +702,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             </div>
             <div>
               <h3 className="text-base font-bold text-green-900">¡Facturación Generada y Contabilizada con Éxito!</h3>
-              <p className="text-sm text-green-700">Se han emitido {generatedInvoices.length} cuentas de cobro consecutivas (desde CC-{String(currentNextSeq).padStart(4, '0')}) con fecha del periodo {billingPeriod}.</p>
+              <p className="text-sm text-green-700">Se han emitido cuentas de cobro para el periodo {billingPeriod}.</p>
             </div>
           </div>
           <Button variant="danger" size="sm" onClick={handleDeleteBatch} disabled={deletingBatch}>
@@ -772,7 +772,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
             <FileText className="w-5 h-5 text-blue-600" />
-            {isFinalized ? 'Historial de Cuentas Generadas' : 'Cuentas de Cobro a Generar'}
+            {isFinalized ? 'Historial de Cuentas Generadas' : 'Cuentas de Cobro a Generar (Tabla de 4 Columnas)'}
           </h2>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={selectAllVisible}>Seleccionar visibles</Button>
@@ -809,7 +809,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               <tbody className="divide-y divide-gray-100">
                 {liquidation.map((row, idx) => {
                   const rowId = row.rowId || row.due.id;
-                  const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
+                  const invNum = isFinalized ? (generatedInvoices[idx]?.invoiceNumber || `CC-${String(currentNextSeq - liquidation.length + idx).padStart(4, '0')}`) : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
                   const cleanCharges = getCleanChargeLinesAmount(row);
                   const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
                   const allDiscounts = computeAllTierDiscounts(row, discountTiers);
@@ -929,7 +929,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         </CardBody>
       </Card>
 
-      {/* Botón superior eliminado. Solo queda el botón inferior de cierre */}
       <div className="flex justify-between items-center bg-gray-50 p-4 rounded-xl border border-gray-200">
         <Button variant="outline" onClick={onBack}>Volver</Button>
         <div className="flex items-center gap-3">
@@ -970,7 +969,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               </div>
 
               <div className="space-y-1">
-                <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta:</p>
+                <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta Comparativo (4 Columnas):</p>
                 <div className="border rounded overflow-hidden text-xs">
                   <table className="w-full text-left border-collapse">
                     <thead>
