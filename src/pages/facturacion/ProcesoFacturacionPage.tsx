@@ -396,9 +396,8 @@ export default function ProcesoFacturacionPage() {
     return sortLiquidationRows(rawRows);
   }, [units, unitChargeLinesMap, unitPriorBalanceMap, unitInterestMap, interestRate]);
 
-  const totalCurrentCharges = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.currentCharges, 0), [reviewed, liquidation, computedLiquidation]);
+  const totalPriorBalance = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.priorBalance, 0), [reviewed, liquidation, computedLiquidation]);
   const totalInterest = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.interestAmount, 0), [reviewed, liquidation, computedLiquidation]);
-  const totalGeneral = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.netTotal, 0), [reviewed, liquidation, computedLiquidation]);
 
   function handleInterestRateChange(value: string) {
     const parsed = parseFloat(value);
@@ -564,18 +563,10 @@ export default function ProcesoFacturacionPage() {
         c.code === 'MORA_ADM' || c.is_late_interest === true || c.code?.toUpperCase().includes('MORA') || c.name?.toLowerCase().includes('interés')
       );
 
-      const batchInvoices = [];
-
       for (let i = 0; i < liquidation.length; i++) {
         const row = liquidation[i];
         const invoiceNumber = `CC-${String(nextSeq + i).padStart(4, '0')}`;
         const rowId = row.rowId || 'inv-' + Math.random().toString(36).substring(2, 9);
-
-        batchInvoices.push({
-          id: rowId,
-          invoiceNumber,
-          row,
-        });
 
         const unitIdentifier = row.unit.unique_identifier || (row.unit.tower && row.unit.tower.trim() !== '' ? `${row.unit.tower}-${row.unit.unit_label}` : row.unit.unit_label);
         const assignedThirdPartyId = row.unit.third_party_id || null;
@@ -849,22 +840,14 @@ export default function ProcesoFacturacionPage() {
           </Card>
 
           {reviewed && (
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
               <Card><CardBody>
-                <p className="text-sm text-gray-500">Saldos Anteriores</p>
-                <p className="text-xl font-bold text-gray-900">{formatCOP(totalCurrentCharges)}</p>
+                <p className="text-sm text-gray-500">Total Base de Cálculo</p>
+                <p className="text-xl font-bold text-gray-900">{formatCOP(totalPriorBalance)}</p>
               </CardBody></Card>
               <Card><CardBody>
-                <p className="text-sm text-gray-500">Cargos del Periodo</p>
-                <p className="text-xl font-bold text-gray-900">{formatCOP(totalCurrentCharges)}</p>
-              </CardBody></Card>
-              <Card><CardBody>
-                <p className="text-sm text-gray-500">Intereses de Mora</p>
+                <p className="text-sm text-gray-500">Total Intereses Calculados</p>
                 <p className="text-xl font-bold text-yellow-600">{formatCOP(totalInterest)}</p>
-              </CardBody></Card>
-              <Card><CardBody>
-                <p className="text-sm text-gray-500">Total a Facturar</p>
-                <p className="text-xl font-bold text-blue-700">{formatCOP(totalGeneral)}</p>
               </CardBody></Card>
             </div>
           )}
