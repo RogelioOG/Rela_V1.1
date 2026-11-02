@@ -87,7 +87,6 @@ const STEPS = [
   { num: 1, label: 'Configuración de Intereses' },
   { num: 2, label: 'Descuentos por Propiedad' },
   { num: 3, label: 'Formatos y Envío' },
-  { num: 4, label: 'Finalización' },
 ];
 
 interface TierDiscountDetail {
