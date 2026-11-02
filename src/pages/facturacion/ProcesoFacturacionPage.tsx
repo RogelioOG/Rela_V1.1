@@ -525,19 +525,17 @@ export default function ProcesoFacturacionPage() {
       const dRow = discountRows.find(d => d.unitId === row.unit.id);
       if (!dRow) return row;
 
-      // Mapeamos individualmente los valores de cada escalón editado
       const customTierDiscountsMap: Record<string, number> = {};
       dRow.tierDiscounts.forEach(td => {
         customTierDiscountsMap[td.tierId] = td.discountAmount;
       });
 
-      // El primer escalón es el referente para la vista de resumen
       const firstTierDisc = dRow.tierDiscounts.length > 0 ? dRow.tierDiscounts[0].discountAmount : 0;
 
       return {
         ...row,
-        discountAmount: firstTierDisc, // Solo el Escalón 1 para la liquidación resumida
-        customTierDiscounts: customTierDiscountsMap, // Guarda el mapa exacto de escalones editados
+        discountAmount: firstTierDisc,
+        customTierDiscounts: customTierDiscountsMap,
         netTotal: round2(row.priorBalance + row.currentCharges + row.interestAmount - firstTierDisc),
       };
     }));
@@ -1029,21 +1027,6 @@ export default function ProcesoFacturacionPage() {
 
           {currentStep === 3 && (
             <div className="space-y-6">
-              <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-gray-200">
-                <Button variant="outline" onClick={() => setCurrentStep(hasDiscounts ? 2 : 1)}>Volver</Button>
-                <div className="flex items-center gap-3">
-                  {!isFinalized ? (
-                    <Button onClick={handleFinalizeProcess} disabled={finalizing}>
-                      {finalizing ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                      Finalizar y Contabilizar Periodo
-                    </Button>
-                  ) : (
-                    <span className="text-sm font-bold text-green-700 flex items-center gap-1">
-                      <CheckCircle2 className="w-4 h-4" /> Periodo Finalizado y Contabilizado Exitosamente
-                    </span>
-                  )}
-                </div>
-              </div>
               <Paso2FormatoEnvio
                 liquidation={liquidation.map(r => {
                   const linesWithInterest = [...r.chargeLines];
