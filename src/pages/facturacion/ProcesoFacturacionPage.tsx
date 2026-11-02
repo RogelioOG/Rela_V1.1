@@ -440,7 +440,16 @@ export default function ProcesoFacturacionPage() {
       setLiquidation(rows);
 
       if (hasDiscounts) {
+        const firstTierWithBase = activeTiers.find(t => t.calculation_base_concept_ids && t.calculation_base_concept_ids.length > 0);
+        const baseConceptIds = firstTierWithBase?.calculation_base_concept_ids;
+
         const dRows: DiscountRow[] = rows.map(r => {
+          const rowBaseAmount = baseConceptIds && baseConceptIds.length > 0
+            ? round2(r.chargeLines
+                .filter(l => baseConceptIds.includes(l.conceptId))
+                .reduce((s, l) => s + l.amount, 0))
+            : r.currentCharges;
+
           const tierDiscounts: TierDiscountDetail[] = activeTiers.map(tier => {
             const discVal = computeTierDiscount(r.currentCharges, r.chargeLines, tier);
             return {
@@ -448,7 +457,7 @@ export default function ProcesoFacturacionPage() {
               tierName: tier.name,
               tierOrder: tier.tier_order,
               validUntilDay: tier.valid_until_day,
-              baseAmount: r.currentCharges,
+              baseAmount: rowBaseAmount,
               discountAmount: discVal,
               overrideString: String(discVal),
             };
@@ -458,7 +467,7 @@ export default function ProcesoFacturacionPage() {
             unitId: r.unit.id,
             unitLabel: r.unit.unit_label,
             tower: r.unit.tower,
-            baseAmount: r.currentCharges,
+            baseAmount: rowBaseAmount,
             tierDiscounts,
             totalDiscountAmount: totalDisc,
             netAmount: round2(r.currentCharges - totalDisc),
