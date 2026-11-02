@@ -84,35 +84,30 @@ function getCleanChargeLinesAmount(row: LiquidationRow): number {
   );
 }
 
-function computeAllTierDiscounts(row: LiquidationRow, discountTiers: DiscountTier[]): CalculatedDiscount[] {
-  if (!discountTiers || discountTiers.length === 0) return [];
-
+function computeCustomTierDiscounts(row: LiquidationRow, discountTiers: DiscountTier[]): CalculatedDiscount[] {
   const cleanCharges = getCleanChargeLinesAmount(row);
   const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
+  const customDiscount = row.discountAmount || 0;
 
-  return discountTiers.map(tier => {
-    let val = 0;
-    const discountValueNum = parseFloat(String(tier.discount_value)) || 0;
-    const validDay = Number(tier.valid_until_day) || 1;
-
-    if (tier.discount_type === 'porcentaje') {
-      const baseConceptIds = tier.calculation_base_concept_ids;
-      const base = baseConceptIds && baseConceptIds.length > 0
-        ? round2(row.chargeLines.filter(l => baseConceptIds.includes(l.conceptId)).reduce((s, l) => s + l.amount, 0))
-        : cleanCharges;
-      val = round2(base * discountValueNum / 100);
-    } else {
-      val = Math.min(discountValueNum, cleanCharges);
-    }
-
-    return {
-      tierId: tier.id,
-      tierName: tier.name || 'Descuento',
-      discountVal: val,
+  if (discountTiers && discountTiers.length > 0) {
+    const primaryTier = discountTiers[0];
+    const validDay = Number(primaryTier.valid_until_day) || 1;
+    return [{
+      tierId: primaryTier.id,
+      tierName: primaryTier.name || 'Descuento',
+      discountVal: customDiscount,
       validUntilDay: validDay,
-      payWithDiscount: round2(grossTotal - val),
-    };
-  });
+      payWithDiscount: round2(grossTotal - customDiscount),
+    }];
+  }
+
+  return [{
+    tierId: 'custom-tier',
+    tierName: 'Descuento Aplicado',
+    discountVal: customDiscount,
+    validUntilDay: 15,
+    payWithDiscount: round2(grossTotal - customDiscount),
+  }];
 }
 
 function buildPdfHtml(
@@ -142,7 +137,7 @@ function buildPdfHtml(
     ).join('<br/>')
     : '';
 
-  const calculatedDiscounts = computeAllTierDiscounts(row, discountTiers);
+  const calculatedDiscounts = computeCustomTierDiscounts(row, discountTiers);
   const cleanCharges = getCleanChargeLinesAmount(row);
   const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
 
@@ -222,7 +217,7 @@ function buildPdfHtml(
 
   const detailSection = `
     <div style="margin-top:16px;">
-      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Estado de Cuenta</div>
+      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Estado de Cuenta Comparativo</div>
       <table style="width:100%;border-collapse:collapse;font-size:12px;">
         <thead>
           <tr style="background:#f8fafc;color:#475569;font-size:11px;text-transform:uppercase;">
@@ -244,7 +239,7 @@ function buildPdfHtml(
         <span style="font-size:18px;font-weight:900;color:#1e40af;">${formatCOP(grossTotal)}</span>
       </div>
 
-      ${calculatedDiscounts.length > 0 ? `
+      ${calculatedDiscounts.length > 0 && row.discountAmount > 0 ? `
         <table style="width:100%;border-collapse:collapse;font-size:12px;">
           <tbody>
             ${discountsRowsHtml}
@@ -794,7 +789,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
                   const cleanCharges = getCleanChargeLinesAmount(row);
                   const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
-                  const calculatedDiscounts = computeAllTierDiscounts(row, discountTiers);
+                  const calculatedDiscounts = computeCustomTierDiscounts(row, discountTiers);
 
                   return (
                     <tr key={rowId} className="hover:bg-gray-50">
@@ -823,13 +818,16 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                           {row.interestAmount > 0 && (
                             <li className="text-amber-600">• Int. Mora ({row.interestRate.toFixed(2)}%): {formatCOP(row.interestAmount)}</li>
                           )}
+                          {row.discountAmount > 0 && (
+                            <li className="text-green-600 font-medium">• Descuento Aplicado: -{formatCOP(row.discountAmount)}</li>
+                          )}
                         </ul>
                       </td>
                       <td className="px-4 py-3 text-right text-base font-extrabold text-blue-900">
                         {formatCOP(grossTotal)}
                       </td>
                       <td className="px-4 py-3 text-right text-xs">
-                        {calculatedDiscounts.length > 0 ? (
+                        {calculatedDiscounts.length > 0 && row.discountAmount > 0 ? (
                           <div className="space-y-1">
                             {calculatedDiscounts.map(d => (
                               <div key={d.tierId} className="bg-green-50 p-1.5 rounded border border-green-200">
@@ -839,7 +837,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                             ))}
                           </div>
                         ) : (
-                          <span className="text-gray-400">—</span>
+                          <span className="text-gray-400">Sin descuento</span>
                         )}
                       </td>
                       <td className="px-4 py-3 text-center">
@@ -952,7 +950,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               </div>
 
               <div className="space-y-1">
-                <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta (4 Columnas):</p>
+                <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta Comparativo (4 Columnas):</p>
                 <div className="border rounded overflow-hidden text-xs">
                   <table className="w-full text-left border-collapse">
                     <thead>
@@ -1002,7 +1000,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   <span>{formatCOP(round2(getCleanChargeLinesAmount(previewRow) + previewRow.priorBalance + previewRow.interestAmount))}</span>
                 </div>
 
-                {computeAllTierDiscounts(previewRow, discountTiers).map(d => (
+                {computeCustomTierDiscounts(previewRow, discountTiers).map(d => (
                   <div key={d.tierId} className="flex justify-between items-center bg-green-50 p-2 rounded text-xs border border-green-200">
                     <div>
                       <span className="font-bold text-green-800">VALOR A PAGAR CON DESCUENTO</span>
