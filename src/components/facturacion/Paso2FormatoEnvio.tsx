@@ -76,10 +76,19 @@ export interface CalculatedDiscount {
   payWithDiscount: number;
 }
 
+function getCleanChargeLinesAmount(row: LiquidationRow): number {
+  return round2(
+    row.chargeLines
+      .filter(l => !l.conceptCode?.toUpperCase().includes('MORA') && !l.conceptName.toLowerCase().includes('interés de mora'))
+      .reduce((s, l) => s + l.amount, 0)
+  );
+}
+
 function computeAllTierDiscounts(row: LiquidationRow, discountTiers: DiscountTier[]): CalculatedDiscount[] {
   if (!discountTiers || discountTiers.length === 0) return [];
 
-  const grossTotal = round2(row.currentCharges + row.priorBalance + row.interestAmount);
+  const cleanCharges = getCleanChargeLinesAmount(row);
+  const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
 
   return discountTiers.map(tier => {
     let val = 0;
@@ -90,10 +99,10 @@ function computeAllTierDiscounts(row: LiquidationRow, discountTiers: DiscountTie
       const baseConceptIds = tier.calculation_base_concept_ids;
       const base = baseConceptIds && baseConceptIds.length > 0
         ? round2(row.chargeLines.filter(l => baseConceptIds.includes(l.conceptId)).reduce((s, l) => s + l.amount, 0))
-        : row.currentCharges;
+        : cleanCharges;
       val = round2(base * discountValueNum / 100);
     } else {
-      val = Math.min(discountValueNum, row.currentCharges);
+      val = Math.min(discountValueNum, cleanCharges);
     }
 
     return {
@@ -134,7 +143,8 @@ function buildPdfHtml(
     : '';
 
   const calculatedDiscounts = computeAllTierDiscounts(row, discountTiers);
-  const grossTotal = round2(row.currentCharges + row.priorBalance + row.interestAmount);
+  const cleanCharges = getCleanChargeLinesAmount(row);
+  const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
 
   const header = template === 'moderno'
     ? `<div style="background:#1e40af;color:#fff;padding:20px 28px;border-radius:8px 8px 0 0;display:flex;justify-content:space-between;align-items:center;">
@@ -156,7 +166,6 @@ function buildPdfHtml(
         </div>
        </div>`;
 
-  // Construcción de filas con 4 columnas exactas: Detalle/Concepto, Saldo Anterior, Cargos Periodo, Valor Total
   let comparativeRowsHtml = '';
 
   if (row.priorBalance > 0) {
@@ -305,7 +314,7 @@ interface Props {
   org: Organization | null;
   billingPeriod: string;
   onBack: () => void;
-  onComplete: () => void;
+  onComplete?: () => void;
   discountTiers?: DiscountTier[];
 }
 
@@ -784,7 +793,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                 {liquidation.map((row, idx) => {
                   const rowId = row.rowId || row.due.id;
                   const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
-                  const grossTotal = round2(row.currentCharges + row.priorBalance + row.interestAmount);
+                  const cleanCharges = getCleanChargeLinesAmount(row);
+                  const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
                   const calculatedDiscounts = computeAllTierDiscounts(row, discountTiers);
 
                   return (
@@ -941,7 +951,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                 <p><strong>Propietario:</strong> {previewRow.unit.owner_name}</p>
               </div>
 
-              {/* Vista previa con tabla de 4 columnas */}
               <div className="space-y-1">
                 <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta (4 Columnas):</p>
                 <div className="border rounded overflow-hidden text-xs">
@@ -990,7 +999,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               <div className="border-t pt-2 space-y-2">
                 <div className="flex justify-between font-extrabold text-base text-blue-900 bg-blue-50 p-2 rounded">
                   <span>VALOR A PAGAR (SIN DESCUENTO):</span>
-                  <span>{formatCOP(round2(previewRow.currentCharges + previewRow.priorBalance + previewRow.interestAmount))}</span>
+                  <span>{formatCOP(round2(getCleanChargeLinesAmount(previewRow) + previewRow.priorBalance + previewRow.interestAmount))}</span>
                 </div>
 
                 {computeAllTierDiscounts(previewRow, discountTiers).map(d => (
