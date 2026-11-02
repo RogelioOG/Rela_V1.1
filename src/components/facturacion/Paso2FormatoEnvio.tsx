@@ -222,7 +222,7 @@ function buildPdfHtml(
 
   const detailSection = `
     <div style="margin-top:16px;">
-      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Estado de Cuenta</div>
+      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Estado de Cuenta Comparativo</div>
       <table style="width:100%;border-collapse:collapse;font-size:12px;">
         <thead>
           <tr style="background:#f8fafc;color:#475569;font-size:11px;text-transform:uppercase;">
@@ -676,23 +676,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
   return (
     <div className="space-y-6">
-      {/* Botón de acción superior idéntico para agilidad */}
-      <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-gray-200">
-        <Button variant="outline" onClick={onBack}>Volver</Button>
-        <div className="flex items-center gap-3">
-          {!isFinalized ? (
-            <Button onClick={handleFinalizeProcess} disabled={finalizing}>
-              {finalizing ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-              Finalizar y Contabilizar Periodo
-            </Button>
-          ) : (
-            <span className="text-sm font-bold text-green-700 flex items-center gap-1">
-              <CheckCircle2 className="w-4 h-4" /> Periodo Finalizado y Contabilizado Exitosamente
-            </span>
-          )}
-        </div>
-      </div>
-
       {isFinalized && (
         <div className="rounded-xl bg-green-50 border border-green-200 p-5 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -928,7 +911,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         </CardBody>
       </Card>
 
-      {/* Botón de acción inferior idéntico */}
+      {/* Único botón de acción inferior para contabilizar */}
       <div className="flex justify-between items-center bg-gray-50 p-4 rounded-xl border border-gray-200">
         <Button variant="outline" onClick={onBack}>Volver</Button>
         <div className="flex items-center gap-3">
@@ -969,7 +952,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               </div>
 
               <div className="space-y-1">
-                <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta (4 Columnas):</p>
+                <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta Comparativo (4 Columnas):</p>
                 <div className="border rounded overflow-hidden text-xs">
                   <table className="w-full text-left border-collapse">
                     <thead>
