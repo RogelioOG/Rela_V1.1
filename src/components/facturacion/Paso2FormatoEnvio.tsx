@@ -55,9 +55,9 @@ interface SimResult {
 type TemplateId = 'clasico' | 'moderno' | 'detallado';
 
 const TEMPLATES: { id: TemplateId; name: string; description: string }[] = [
-  { id: 'clasico', name: 'Clásico', description: 'Formato tradicional con encabezado corporativo y tabla compacta.' },
+  { id: 'clasico', name: 'Clásico', description: 'Formato tradicional con encabezado corporativo y tabla comparativa.' },
   { id: 'moderno', name: 'Moderno', description: 'Diseño limpio con secciones resaltadas y tipografía actualizada.' },
-  { id: 'detallado', name: 'Detallado', description: 'Incluye desglose completo de conceptos, intereses, todos los descuentos con su fecha límite y acuerdo de pago.' },
+  { id: 'detallado', name: 'Detallado', description: 'Incluye desglose completo de conceptos, intereses, descuentos con fecha límite y acuerdo de pago.' },
 ];
 
 const templateLabels: Record<TemplateId, string> = {
@@ -83,21 +83,24 @@ function computeAllTierDiscounts(row: LiquidationRow, discountTiers: DiscountTie
 
   return discountTiers.map(tier => {
     let val = 0;
+    const discountValueNum = parseFloat(String(tier.discount_value)) || 0;
+    const validDay = Number(tier.valid_until_day) || 1;
+
     if (tier.discount_type === 'porcentaje') {
       const baseConceptIds = tier.calculation_base_concept_ids;
       const base = baseConceptIds && baseConceptIds.length > 0
         ? round2(row.chargeLines.filter(l => baseConceptIds.includes(l.conceptId)).reduce((s, l) => s + l.amount, 0))
         : row.currentCharges;
-      val = round2(base * tier.discount_value / 100);
+      val = round2(base * discountValueNum / 100);
     } else {
-      val = Math.min(tier.discount_value, row.currentCharges);
+      val = Math.min(discountValueNum, row.currentCharges);
     }
 
     return {
       tierId: tier.id,
-      tierName: tier.name,
+      tierName: tier.name || 'Descuento',
       discountVal: val,
-      validUntilDay: tier.valid_until_day,
+      validUntilDay: validDay,
       payWithDiscount: round2(grossTotal - val),
     };
   });
@@ -129,7 +132,6 @@ function buildPdfHtml(
     ).join('<br/>')
     : 'Sin acuerdo de pago vigente.';
 
-  const hasPriorBalance = row.priorBalance > 0;
   const calculatedDiscounts = computeAllTierDiscounts(row, discountTiers);
   const grossTotal = round2(row.currentCharges + row.priorBalance + row.interestAmount);
 
@@ -153,22 +155,51 @@ function buildPdfHtml(
         </div>
        </div>`;
 
-  const chargeLineRows = row.chargeLines.map(line =>
-    `<tr><td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#334155;">${line.conceptName}</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;font-weight:600;color:#0f172a;">${formatCOP(line.amount)}</td></tr>`
-  ).join('');
+  // Construcción de filas de la tabla comparativa (3 columnas: Saldo Anterior, Detalle, Total)
+  let comparativeRowsHtml = '';
+
+  if (row.priorBalance > 0) {
+    comparativeRowsHtml += `
+      <tr>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c;font-weight:600;">${formatCOP(row.priorBalance)}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#334155;">Saldo Anterior (Periodos Vencidos)</td>
+        <td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;font-weight:700;color:#b91c1c;">${formatCOP(row.priorBalance)}</td>
+      </tr>`;
+  }
+
+  for (const line of row.chargeLines) {
+    if (line.conceptCode?.toUpperCase().includes('MORA') || line.conceptName.toLowerCase().includes('interés de mora')) {
+      continue; // Evitar duplicidad con el cálculo dinámico de mora
+    }
+    comparativeRowsHtml += `
+      <tr>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;">$ 0</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#334155;">${line.conceptName}</td>
+        <td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;font-weight:600;color:#0f172a;">${formatCOP(line.amount)}</td>
+      </tr>`;
+  }
+
+  if (row.interestAmount > 0) {
+    comparativeRowsHtml += `
+      <tr>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;">$ 0</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#d97706;">Interés de Mora (Tasa: ${row.interestRate.toFixed(2)}% mes)</td>
+        <td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;font-weight:700;color:#d97706;">${formatCOP(row.interestAmount)}</td>
+      </tr>`;
+  }
 
   const discountsRowsHtml = calculatedDiscounts.map(disc => `
     <tr style="background:#f0fdf4;border-bottom:1px solid #dcfce7;">
-      <td style="padding:8px 10px;color:#166534;font-size:11px;">
-        Descuento: <strong>${disc.tierName}</strong> (Válido hasta el día ${disc.valid_until_day} del mes)
+      <td colspan="2" style="padding:8px 10px;color:#166534;font-size:11px;">
+        Descuento: <strong>${disc.tierName}</strong> (Válido hasta el día ${disc.validUntilDay} del mes)
       </td>
       <td style="text-align:right;padding:8px 10px;color:#166534;font-weight:700;font-size:12px;">
         -${formatCOP(disc.discountVal)}
       </td>
     </tr>
     <tr style="background:#dcfce7;border-bottom:2px solid #bbf7d0;">
-      <td style="padding:8px 10px;color:#14532d;font-weight:700;font-size:13px;">
-        VALOR A PAGAR CON DESCUENTO (Hasta día ${disc.valid_until_day})
+      <td colspan="2" style="padding:8px 10px;color:#14532d;font-weight:700;font-size:13px;">
+        VALOR A PAGAR CON DESCUENTO (Hasta día ${disc.validUntilDay})
       </td>
       <td style="text-align:right;padding:8px 10px;color:#15803d;font-weight:800;font-size:15px;">
         ${formatCOP(disc.payWithDiscount)}
@@ -178,18 +209,17 @@ function buildPdfHtml(
 
   const detailSection = `
     <div style="margin-top:16px;">
-      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Desglose de Cargos del Periodo</div>
+      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Estado de Cuenta Comparativo</div>
       <table style="width:100%;border-collapse:collapse;font-size:12px;">
         <thead>
           <tr style="background:#f8fafc;color:#475569;font-size:11px;text-transform:uppercase;">
-            <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Concepto</th>
-            <th style="text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Valor</th>
+            <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;width:25%;">Saldo Anterior</th>
+            <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;width:50%;">Detalle / Concepto</th>
+            <th style="text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;width:25%;">Valor Total</th>
           </tr>
         </thead>
         <tbody>
-          ${hasPriorBalance ? `<tr><td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c;font-weight:600;">Saldo Anterior Pendiente</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c;font-weight:700;">${formatCOP(row.priorBalance)}</td></tr>` : ''}
-          ${chargeLineRows}
-          ${row.interestAmount > 0 ? `<tr><td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#d97706;font-weight:600;">Interés de Mora (${row.interestRate.toFixed(2)}%)</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#d97706;font-weight:700;">${formatCOP(row.interestAmount)}</td></tr>` : ''}
+          ${comparativeRowsHtml}
         </tbody>
       </table>
     </div>
@@ -739,7 +769,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                     />
                   </th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Consecutivo / Propiedad</th>
-                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Desglose de Conceptos</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Desglose Comparativo (Salarios / Conceptos)</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Valor sin Descuento</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Valores con Descuento</th>
                   <th className="text-center text-xs font-semibold text-gray-600 uppercase px-4 py-3">Acciones</th>
@@ -772,11 +802,12 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                           {row.priorBalance > 0 && (
                             <li className="text-red-600 font-medium">• Saldo Anterior: {formatCOP(row.priorBalance)}</li>
                           )}
-                          {row.chargeLines.map((line, lIdx) => (
-                            <li key={lIdx}>• {line.conceptName}: {formatCOP(line.amount)}</li>
-                          ))}
+                          {row.chargeLines.map((line, lIdx) => {
+                            if (line.conceptCode?.toUpperCase().includes('MORA') || line.conceptName.toLowerCase().includes('interés de mora')) return null;
+                            return <li key={lIdx}>• {line.conceptName}: {formatCOP(line.amount)}</li>;
+                          })}
                           {row.interestAmount > 0 && (
-                            <li className="text-amber-600">• Int. Mora: {formatCOP(row.interestAmount)}</li>
+                            <li className="text-amber-600">• Int. Mora ({row.interestRate.toFixed(2)}%): {formatCOP(row.interestAmount)}</li>
                           )}
                         </ul>
                       </td>
@@ -788,7 +819,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                           <div className="space-y-1">
                             {calculatedDiscounts.map(d => (
                               <div key={d.tierId} className="bg-green-50 p-1.5 rounded border border-green-200">
-                                <p className="text-[10px] text-green-700 font-medium">Hasta el día {d.valid_until_day}:</p>
+                                <p className="text-[10px] text-green-700 font-medium">Hasta el día {d.validUntilDay}:</p>
                                 <p className="text-sm font-bold text-green-800">{formatCOP(d.payWithDiscount)}</p>
                               </div>
                             ))}
@@ -904,18 +935,46 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                 <p><strong>Inmueble:</strong> {previewRow.unit.tower} {previewRow.unit.unit_label}</p>
                 <p><strong>Propietario:</strong> {previewRow.unit.owner_name}</p>
               </div>
+
+              {/* Vista previa con tabla comparativa de 3 columnas */}
               <div className="space-y-1">
-                <p className="font-bold text-xs text-gray-700 uppercase">Cargos Discriminados:</p>
-                <div className="bg-gray-50 p-2 rounded text-xs space-y-1">
-                  {previewRow.priorBalance > 0 && (
-                    <div className="flex justify-between text-red-600"><span>Saldo Anterior:</span><strong>{formatCOP(previewRow.priorBalance)}</strong></div>
-                  )}
-                  {previewRow.chargeLines.map((line, lIdx) => (
-                    <div key={lIdx} className="flex justify-between"><span>{line.conceptName}:</span><strong>{formatCOP(line.amount)}</strong></div>
-                  ))}
-                  {previewRow.interestAmount > 0 && (
-                    <div className="flex justify-between text-amber-600"><span>Interés Mora:</span><strong>{formatCOP(previewRow.interestAmount)}</strong></div>
-                  )}
+                <p className="font-bold text-xs text-gray-700 uppercase">Estado Comparativo (Saldo Anterior / Detalle / Total):</p>
+                <div className="border rounded overflow-hidden text-xs">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-gray-100 text-gray-700 border-b">
+                        <th className="p-2 w-1/4">Saldo Anterior</th>
+                        <th className="p-2 w-1/2">Detalle / Concepto</th>
+                        <th className="p-2 w-1/4 text-right">Valor Total</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {previewRow.priorBalance > 0 && (
+                        <tr className="text-red-600 font-medium">
+                          <td className="p-2">{formatCOP(previewRow.priorBalance)}</td>
+                          <td className="p-2">Saldo Anterior (Vencidos)</td>
+                          <td className="p-2 text-right">{formatCOP(previewRow.priorBalance)}</td>
+                        </tr>
+                      )}
+                      {previewRow.chargeLines.map((line, lIdx) => {
+                        if (line.conceptCode?.toUpperCase().includes('MORA') || line.conceptName.toLowerCase().includes('interés de mora')) return null;
+                        return (
+                          <tr key={lIdx}>
+                            <td className="p-2 text-gray-400">$ 0</td>
+                            <td className="p-2">{line.conceptName}</td>
+                            <td className="p-2 text-right font-medium">{formatCOP(line.amount)}</td>
+                          </tr>
+                        );
+                      })}
+                      {previewRow.interestAmount > 0 && (
+                        <tr className="text-amber-600">
+                          <td className="p-2 text-gray-400">$ 0</td>
+                          <td className="p-2">Interés de Mora (Tasa: {previewRow.interestRate.toFixed(2)}% mes)</td>
+                          <td className="p-2 text-right font-medium">{formatCOP(previewRow.interestAmount)}</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
                 </div>
               </div>
 
@@ -929,7 +988,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   <div key={d.tierId} className="flex justify-between items-center bg-green-50 p-2 rounded text-xs border border-green-200">
                     <div>
                       <span className="font-bold text-green-800">VALOR A PAGAR CON DESCUENTO</span>
-                      <span className="block text-[10px] text-green-600">(Válido hasta el día {d.valid_until_day})</span>
+                      <span className="block text-[10px] text-green-600">(Válido hasta el día {d.validUntilDay})</span>
                     </div>
                     <span className="font-extrabold text-sm text-green-700">{formatCOP(d.payWithDiscount)}</span>
                   </div>
