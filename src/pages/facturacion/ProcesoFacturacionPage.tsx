@@ -1068,7 +1068,6 @@ export default function ProcesoFacturacionPage() {
                 org={activeOrg}
                 billingPeriod={billingPeriod}
                 onBack={() => setCurrentStep(hasDiscounts ? 2 : 1)}
-                onComplete={() => setCurrentStep(4)}
                 discountTiers={activeTiers}
               />
             </div>
