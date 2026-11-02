@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { Calculator, Loader2, AlertTriangle, CheckCircle2, Info, Clock, Percent, RefreshCw, ChevronRight, Calendar, Layers } from 'lucide-react';
-import { supabase, Unit, Due, PaymentAgreement, AdminQuota, AdminQuotaLine, PeriodNovelty, DiscountTier, BillingConcept, ThirdParty } from '@/lib/supabase';
+import { Calculator, Loader2, AlertTriangle, CheckCircle2, Percent, RefreshCw, ChevronRight, Calendar, Layers } from 'lucide-react';
+import { supabase, Unit, Due, PaymentAgreement, AdminQuota, PeriodNovelty, DiscountTier, BillingConcept } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card, CardBody } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -43,11 +43,6 @@ type CutoffRule = 'inicio_mes_facturar' | 'cierre_mes_anterior';
 const cutoffRuleLabels: Record<CutoffRule, string> = {
   inicio_mes_facturar: 'Día 1 del mes a facturar',
   cierre_mes_anterior: 'Día de cierre del mes anterior',
-};
-
-const cutoffRuleHelp: Record<CutoffRule, string> = {
-  inicio_mes_facturar: 'El corte se toma al primer día del periodo a facturar. Solo generan interés los saldos vencidos con fecha de vencimiento anterior al primer día del mes que se está facturando.',
-  cierre_mes_anterior: 'El corte se toma al último día del mes inmediatamente anterior al periodo. Solo generan interés los saldos vencidos con fecha de vencimiento anterior o igual al cierre del mes previo.',
 };
 
 function getDaysLate(dueDate: string, graceDays: number, cutoffDate: Date): number {
@@ -145,7 +140,6 @@ export default function ProcesoFacturacionPage() {
 
   const [isFinalized, setIsFinalized] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
-  const [generatedInvoices, setGeneratedInvoices] = useState<{ id: string; invoiceNumber: string; row: LiquidationRow }[]>([]);
   const [currentNextSeq, setCurrentNextSeq] = useState<number>(1);
 
   const [discountRows, setDiscountRows] = useState<DiscountRow[]>([]);
@@ -402,7 +396,6 @@ export default function ProcesoFacturacionPage() {
     return sortLiquidationRows(rawRows);
   }, [units, unitChargeLinesMap, unitPriorBalanceMap, unitInterestMap, interestRate]);
 
-  const totalPriorBalance = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.priorBalance, 0), [reviewed, liquidation, computedLiquidation]);
   const totalCurrentCharges = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.currentCharges, 0), [reviewed, liquidation, computedLiquidation]);
   const totalInterest = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.interestAmount, 0), [reviewed, liquidation, computedLiquidation]);
   const totalGeneral = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.netTotal, 0), [reviewed, liquidation, computedLiquidation]);
@@ -674,7 +667,6 @@ export default function ProcesoFacturacionPage() {
           .eq('id', docConfig.id);
       }
 
-      setGeneratedInvoices(batchInvoices);
       setIsFinalized(true);
       setCurrentStep(4);
     } catch (e) {
@@ -829,35 +821,6 @@ export default function ProcesoFacturacionPage() {
                 </div>
               </div>
 
-              <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 text-center">
-                  <p className="text-xs text-gray-500">Cuotas activas</p>
-                  <p className="text-lg font-bold text-gray-900">{adminQuotas.length}</p>
-                </div>
-                <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 text-center">
-                  <p className="text-xs text-gray-500">Novedades pendientes</p>
-                  <p className="text-lg font-bold text-gray-900">{novelties.length}</p>
-                </div>
-                <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 text-center">
-                  <p className="text-xs text-gray-500">Saldos vencidos</p>
-                  <p className="text-lg font-bold text-gray-900">{dues.length}</p>
-                </div>
-                <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 text-center">
-                  <p className="text-xs text-gray-500">Escalones de descuento</p>
-                  <p className="text-lg font-bold text-gray-900">{activeTiers.length}</p>
-                </div>
-              </div>
-
-              <div className="mt-3 flex items-start gap-2 px-3 py-2 rounded-lg bg-blue-50 border border-blue-200">
-                <Info className="w-4 h-4 text-blue-600 flex-shrink-0 mt-0.5" />
-                <p className="text-xs text-blue-700">
-                  {customStartDate
-                    ? 'Se está utilizando la fecha personalizada como corte para los intereses de mora, ignorando la regla seleccionada.'
-                    : cutoffRuleHelp[cutoffRule]}
-                  {' El sistema suma automáticamente las cuotas de administración guardadas, las novedades del periodo no facturadas, y los intereses de mora calculados sobre saldos vencidos.'}
-                </p>
-              </div>
-
               <div className="mt-4 flex items-center gap-3">
                 <Button onClick={handleReviewLiquidation} disabled={reviewing}>
                   {reviewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Calculator className="w-4 h-4" />}
@@ -889,7 +852,7 @@ export default function ProcesoFacturacionPage() {
             <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
               <Card><CardBody>
                 <p className="text-sm text-gray-500">Saldos Anteriores</p>
-                <p className="text-xl font-bold text-gray-900">{formatCOP(totalPriorBalance)}</p>
+                <p className="text-xl font-bold text-gray-900">{formatCOP(totalCurrentCharges)}</p>
               </CardBody></Card>
               <Card><CardBody>
                 <p className="text-sm text-gray-500">Cargos del Periodo</p>
@@ -919,11 +882,7 @@ export default function ProcesoFacturacionPage() {
               </div>
               {(reviewed ? liquidation : computedLiquidation).length === 0 ? (
                 <div className="text-center py-12">
-                  <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gray-100 mb-3">
-                    <Clock className="w-7 h-7 text-gray-400" />
-                  </div>
                   <p className="text-gray-500">No hay cuotas, novedades ni saldos pendientes para facturar en este periodo</p>
-                  <p className="text-sm text-gray-400 mt-1">Puede continuar al siguiente paso sin saldos pendientes.</p>
                 </div>
               ) : (
                 <div className="overflow-x-auto">
@@ -931,11 +890,9 @@ export default function ProcesoFacturacionPage() {
                     <thead>
                       <tr className="border-b border-gray-200 bg-gray-50">
                         <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Propiedad</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3 hidden sm:table-cell">Saldo Anterior</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Cargos del Periodo</th>
+                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Base de Cálculo (Saldo)</th>
                         <th className="text-center text-xs font-semibold text-gray-600 uppercase px-6 py-3">Tasa (%)</th>
                         <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Interés Mora</th>
-                        <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Total</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
@@ -945,10 +902,9 @@ export default function ProcesoFacturacionPage() {
                             <p className="text-sm font-medium text-gray-900">{row.unit.tower} {row.unit.unit_label}</p>
                             <p className="text-xs text-gray-500">{row.unit.owner_name || ''}</p>
                           </td>
-                          <td className="px-6 py-3 text-right text-sm text-gray-700 hidden sm:table-cell">
-                            {row.priorBalance > 0 ? formatCOP(row.priorBalance) : '—'}
+                          <td className="px-6 py-3 text-right text-sm text-gray-900">
+                            {formatCOP(row.priorBalance)}
                           </td>
-                          <td className="px-6 py-3 text-right text-sm text-gray-900">{formatCOP(row.currentCharges)}</td>
                           <td className="px-6 py-3 text-center text-sm text-gray-500">
                             {row.interestRate.toFixed(2)}
                           </td>
@@ -965,20 +921,9 @@ export default function ProcesoFacturacionPage() {
                               className="w-24 text-right text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                             />
                           </td>
-                          <td className="px-6 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(row.netTotal)}</td>
                         </tr>
                       ))}
                     </tbody>
-                    <tfoot>
-                      <tr className="border-t-2 border-gray-200 bg-gray-50">
-                        <td className="px-6 py-3 text-sm font-semibold text-gray-900">Totales:</td>
-                        <td className="px-6 py-3 text-right text-sm font-bold text-gray-900 hidden sm:table-cell">{formatCOP(totalPriorBalance)}</td>
-                        <td className="px-6 py-3 text-right text-sm font-bold text-gray-900">{formatCOP(totalCurrentCharges)}</td>
-                        <td className="px-6 py-3" />
-                        <td className="px-6 py-3 text-right text-sm font-bold text-yellow-600">{formatCOP(totalInterest)}</td>
-                        <td className="px-6 py-3 text-right text-sm font-bold text-blue-700">{formatCOP(totalGeneral)}</td>
-                      </tr>
-                    </tfoot>
                   </table>
                 </div>
               )}
@@ -1003,11 +948,6 @@ export default function ProcesoFacturacionPage() {
                 </div>
               </div>
               <div className="p-5">
-                <div className="mb-4 rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
-                  <p className="text-sm text-blue-800">
-                    Los valores se calculan automáticamente según la parametrización de cada escalón y pueden editarse de manera independiente en cada celda.
-                  </p>
-                </div>
                 {discountRows.length === 0 ? (
                   <div className="text-center py-12">
                     <p className="text-gray-500">No hay propiedades con cargos para aplicar descuentos.</p>
