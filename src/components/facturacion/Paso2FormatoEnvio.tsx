@@ -30,7 +30,7 @@ export interface LiquidationRow {
   currentCharges: number;
   chargeLines: ChargeLine[];
   interestAmount: number;
-  discountAmount: number;
+  discountAmount: number; // Representa el primer escalón o total por defecto
   netTotal: number;
   totalWithInterest: number;
   baseAmount: number;
@@ -84,30 +84,51 @@ function getCleanChargeLinesAmount(row: LiquidationRow): number {
   );
 }
 
-function computeCustomTierDiscounts(row: LiquidationRow, discountTiers: DiscountTier[]): CalculatedDiscount[] {
+// Calcula los descuentos individuales por cada escalón configurado
+function computeAllTierDiscounts(row: LiquidationRow, discountTiers: DiscountTier[]): CalculatedDiscount[] {
   const cleanCharges = getCleanChargeLinesAmount(row);
   const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
-  const customDiscount = row.discountAmount || 0;
 
-  if (discountTiers && discountTiers.length > 0) {
-    const primaryTier = discountTiers[0];
-    const validDay = Number(primaryTier.valid_until_day) || 1;
+  if (!discountTiers || discountTiers.length === 0) {
+    const customVal = row.discountAmount || 0;
     return [{
-      tierId: primaryTier.id,
-      tierName: primaryTier.name || 'Descuento',
-      discountVal: customDiscount,
-      validUntilDay: validDay,
-      payWithDiscount: round2(grossTotal - customDiscount),
+      tierId: 'custom-tier',
+      tierName: 'Escalón 1',
+      discountVal: customVal,
+      validUntilDay: 15,
+      payWithDiscount: round2(grossTotal - customVal),
     }];
   }
 
-  return [{
-    tierId: 'custom-tier',
-    tierName: 'Descuento Aplicado',
-    discountVal: customDiscount,
-    validUntilDay: 15,
-    payWithDiscount: round2(grossTotal - customDiscount),
-  }];
+  // Si hay múltiples escalones definidos en la base de datos
+  return discountTiers.map((tier, idx) => {
+    let val = 0;
+    const discountValueNum = parseFloat(String(tier.discount_value)) || 0;
+    const validDay = Number(tier.valid_until_day) || 1;
+
+    if (tier.discount_type === 'porcentaje') {
+      const baseConceptIds = tier.calculation_base_concept_ids;
+      const base = baseConceptIds && baseConceptIds.length > 0
+        ? round2(row.chargeLines.filter(l => baseConceptIds.includes(l.conceptId)).reduce((s, l) => s + l.amount, 0))
+        : cleanCharges;
+      val = round2(base * discountValueNum / 100);
+    } else {
+      val = Math.min(discountValueNum, cleanCharges);
+    }
+
+    // Si el usuario personalizó el valor en el Paso 2 para el primer escalón, lo respetamos
+    if (idx === 0 && row.discountAmount !== undefined && row.discountAmount > 0 && val !== row.discountAmount) {
+      val = row.discountAmount;
+    }
+
+    return {
+      tierId: tier.id,
+      tierName: tier.name || `Escalón ${idx + 1}`,
+      discountVal: val,
+      validUntilDay: validDay,
+      payWithDiscount: round2(grossTotal - val),
+    };
+  });
 }
 
 function buildPdfHtml(
@@ -137,7 +158,7 @@ function buildPdfHtml(
     ).join('<br/>')
     : '';
 
-  const calculatedDiscounts = computeCustomTierDiscounts(row, discountTiers);
+  const allDiscounts = computeAllTierDiscounts(row, discountTiers);
   const cleanCharges = getCleanChargeLinesAmount(row);
   const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
 
@@ -196,7 +217,8 @@ function buildPdfHtml(
       </tr>`;
   }
 
-  const discountsRowsHtml = calculatedDiscounts.map(disc => `
+  // Renderiza cada escalón de descuento individualmente en el PDF
+  const discountsRowsHtml = allDiscounts.map(disc => `
     <tr style="background:#f0fdf4;border-bottom:1px solid #dcfce7;">
       <td colspan="3" style="padding:8px 10px;color:#166534;font-size:11px;">
         Descuento: <strong>${disc.tierName}</strong> (Válido hasta el día ${disc.validUntilDay} del mes)
@@ -217,7 +239,7 @@ function buildPdfHtml(
 
   const detailSection = `
     <div style="margin-top:16px;">
-      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Estado de Cuenta Comparativo</div>
+      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Estado de Cuenta</div>
       <table style="width:100%;border-collapse:collapse;font-size:12px;">
         <thead>
           <tr style="background:#f8fafc;color:#475569;font-size:11px;text-transform:uppercase;">
@@ -239,7 +261,7 @@ function buildPdfHtml(
         <span style="font-size:18px;font-weight:900;color:#1e40af;">${formatCOP(grossTotal)}</span>
       </div>
 
-      ${calculatedDiscounts.length > 0 && row.discountAmount > 0 ? `
+      ${allDiscounts.length > 0 ? `
         <table style="width:100%;border-collapse:collapse;font-size:12px;">
           <tbody>
             ${discountsRowsHtml}
@@ -779,7 +801,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Consecutivo / Propiedad</th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Desglose de Conceptos</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Valor sin Descuento</th>
-                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Valores con Descuento</th>
+                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Valores con Descuento (Escalón 1)</th>
                   <th className="text-center text-xs font-semibold text-gray-600 uppercase px-4 py-3">Acciones</th>
                 </tr>
               </thead>
@@ -789,7 +811,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
                   const cleanCharges = getCleanChargeLinesAmount(row);
                   const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
-                  const calculatedDiscounts = computeCustomTierDiscounts(row, discountTiers);
+                  const allDiscounts = computeAllTierDiscounts(row, discountTiers);
+                  const firstDiscount = allDiscounts[0]; // Tomamos exclusivamente el primer escalón para la tabla
 
                   return (
                     <tr key={rowId} className="hover:bg-gray-50">
@@ -818,8 +841,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                           {row.interestAmount > 0 && (
                             <li className="text-amber-600">• Int. Mora ({row.interestRate.toFixed(2)}%): {formatCOP(row.interestAmount)}</li>
                           )}
-                          {row.discountAmount > 0 && (
-                            <li className="text-green-600 font-medium">• Descuento Aplicado: -{formatCOP(row.discountAmount)}</li>
+                          {firstDiscount && firstDiscount.discountVal > 0 && (
+                            <li className="text-green-600 font-medium">• Descuento Escalón 1: -{formatCOP(firstDiscount.discountVal)}</li>
                           )}
                         </ul>
                       </td>
@@ -827,14 +850,10 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                         {formatCOP(grossTotal)}
                       </td>
                       <td className="px-4 py-3 text-right text-xs">
-                        {calculatedDiscounts.length > 0 && row.discountAmount > 0 ? (
-                          <div className="space-y-1">
-                            {calculatedDiscounts.map(d => (
-                              <div key={d.tierId} className="bg-green-50 p-1.5 rounded border border-green-200">
-                                <p className="text-[10px] text-green-700 font-medium">Hasta el día {d.validUntilDay}:</p>
-                                <p className="text-sm font-bold text-green-800">{formatCOP(d.payWithDiscount)}</p>
-                              </div>
-                            ))}
+                        {firstDiscount && firstDiscount.discountVal > 0 ? (
+                          <div className="bg-green-50 p-1.5 rounded border border-green-200">
+                            <p className="text-[10px] text-green-700 font-medium">Hasta el día {firstDiscount.validUntilDay}:</p>
+                            <p className="text-sm font-bold text-green-800">{formatCOP(firstDiscount.payWithDiscount)}</p>
                           </div>
                         ) : (
                           <span className="text-gray-400">Sin descuento</span>
@@ -909,7 +928,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         </CardBody>
       </Card>
 
-      {/* Único botón de acción inferior para contabilizar */}
       <div className="flex justify-between items-center bg-gray-50 p-4 rounded-xl border border-gray-200">
         <Button variant="outline" onClick={onBack}>Volver</Button>
         <div className="flex items-center gap-3">
@@ -950,7 +968,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               </div>
 
               <div className="space-y-1">
-                <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta Comparativo (4 Columnas):</p>
+                <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta (4 Columnas):</p>
                 <div className="border rounded overflow-hidden text-xs">
                   <table className="w-full text-left border-collapse">
                     <thead>
@@ -1000,7 +1018,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   <span>{formatCOP(round2(getCleanChargeLinesAmount(previewRow) + previewRow.priorBalance + previewRow.interestAmount))}</span>
                 </div>
 
-                {computeCustomTierDiscounts(previewRow, discountTiers).map(d => (
+                {computeAllTierDiscounts(previewRow, discountTiers).map(d => (
                   <div key={d.tierId} className="flex justify-between items-center bg-green-50 p-2 rounded text-xs border border-green-200">
                     <div>
                       <span className="font-bold text-green-800">VALOR A PAGAR CON DESCUENTO</span>
