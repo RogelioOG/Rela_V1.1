@@ -55,9 +55,9 @@ interface SimResult {
 type TemplateId = 'clasico' | 'moderno' | 'detallado';
 
 const TEMPLATES: { id: TemplateId; name: string; description: string }[] = [
-  { id: 'clasico', name: 'Clásico', description: 'Formato tradicional con encabezado corporativo y tabla comparativa.' },
+  { id: 'clasico', name: 'Clásico', description: 'Formato tradicional con encabezado corporativo y tabla comparativa de 4 columnas.' },
   { id: 'moderno', name: 'Moderno', description: 'Diseño limpio con secciones resaltadas y tipografía actualizada.' },
-  { id: 'detallado', name: 'Detallado', description: 'Incluye desglose completo de conceptos, intereses, descuentos con fecha límite y acuerdo de pago.' },
+  { id: 'detallado', name: 'Detallado', description: 'Incluye desglose completo de conceptos, intereses, descuentos con fecha límite y acuerdo de pago (si aplica).' },
 ];
 
 const templateLabels: Record<TemplateId, string> = {
@@ -126,11 +126,12 @@ function buildPdfHtml(
   const dueDateFormatted = dueDateStr ? formatShortDate(dueDateStr) : (row.due?.due_date ? formatShortDate(row.due.due_date) : 'N/A');
 
   const unitAgreements = agreements.filter(a => a.unit_id === row.unit.id);
-  const agreementNote = unitAgreements.length > 0
+  const hasAgreement = unitAgreements.length > 0;
+  const agreementNote = hasAgreement
     ? unitAgreements.map(a =>
       `Acuerdo activo: ${a.start_period} a ${a.end_period}, cuota ${formatCOP(a.monthly_amount)} — Estado: ${a.status === 'incumplido' ? 'Incumplido' : 'En cumplimiento'}`,
     ).join('<br/>')
-    : 'Sin acuerdo de pago vigente.';
+    : '';
 
   const calculatedDiscounts = computeAllTierDiscounts(row, discountTiers);
   const grossTotal = round2(row.currentCharges + row.priorBalance + row.interestAmount);
@@ -155,26 +156,28 @@ function buildPdfHtml(
         </div>
        </div>`;
 
-  // Construcción de filas de la tabla comparativa (3 columnas: Saldo Anterior, Detalle, Total)
+  // Construcción de filas con 4 columnas exactas: Detalle/Concepto, Saldo Anterior, Cargos Periodo, Valor Total
   let comparativeRowsHtml = '';
 
   if (row.priorBalance > 0) {
     comparativeRowsHtml += `
       <tr>
-        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c;font-weight:600;">${formatCOP(row.priorBalance)}</td>
         <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#334155;">Saldo Anterior (Periodos Vencidos)</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c;font-weight:600;">${formatCOP(row.priorBalance)}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;">$ 0</td>
         <td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;font-weight:700;color:#b91c1c;">${formatCOP(row.priorBalance)}</td>
       </tr>`;
   }
 
   for (const line of row.chargeLines) {
     if (line.conceptCode?.toUpperCase().includes('MORA') || line.conceptName.toLowerCase().includes('interés de mora')) {
-      continue; // Evitar duplicidad con el cálculo dinámico de mora
+      continue;
     }
     comparativeRowsHtml += `
       <tr>
-        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;">$ 0</td>
         <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#334155;">${line.conceptName}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;">$ 0</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#0f172a;">${formatCOP(line.amount)}</td>
         <td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;font-weight:600;color:#0f172a;">${formatCOP(line.amount)}</td>
       </tr>`;
   }
@@ -182,15 +185,16 @@ function buildPdfHtml(
   if (row.interestAmount > 0) {
     comparativeRowsHtml += `
       <tr>
-        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;">$ 0</td>
         <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#d97706;">Interés de Mora (Tasa: ${row.interestRate.toFixed(2)}% mes)</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;">$ 0</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#d97706;">${formatCOP(row.interestAmount)}</td>
         <td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;font-weight:700;color:#d97706;">${formatCOP(row.interestAmount)}</td>
       </tr>`;
   }
 
   const discountsRowsHtml = calculatedDiscounts.map(disc => `
     <tr style="background:#f0fdf4;border-bottom:1px solid #dcfce7;">
-      <td colspan="2" style="padding:8px 10px;color:#166534;font-size:11px;">
+      <td colspan="3" style="padding:8px 10px;color:#166534;font-size:11px;">
         Descuento: <strong>${disc.tierName}</strong> (Válido hasta el día ${disc.validUntilDay} del mes)
       </td>
       <td style="text-align:right;padding:8px 10px;color:#166534;font-weight:700;font-size:12px;">
@@ -198,7 +202,7 @@ function buildPdfHtml(
       </td>
     </tr>
     <tr style="background:#dcfce7;border-bottom:2px solid #bbf7d0;">
-      <td colspan="2" style="padding:8px 10px;color:#14532d;font-weight:700;font-size:13px;">
+      <td colspan="3" style="padding:8px 10px;color:#14532d;font-weight:700;font-size:13px;">
         VALOR A PAGAR CON DESCUENTO (Hasta día ${disc.validUntilDay})
       </td>
       <td style="text-align:right;padding:8px 10px;color:#15803d;font-weight:800;font-size:15px;">
@@ -213,9 +217,10 @@ function buildPdfHtml(
       <table style="width:100%;border-collapse:collapse;font-size:12px;">
         <thead>
           <tr style="background:#f8fafc;color:#475569;font-size:11px;text-transform:uppercase;">
-            <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;width:25%;">Saldo Anterior</th>
-            <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;width:50%;">Detalle / Concepto</th>
-            <th style="text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;width:25%;">Valor Total</th>
+            <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;width:40%;">Detalle / Concepto</th>
+            <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;width:20%;">Saldo Anterior</th>
+            <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;width:20%;">Cargos Periodo</th>
+            <th style="text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;width:20%;">Valor Total</th>
           </tr>
         </thead>
         <tbody>
@@ -239,7 +244,7 @@ function buildPdfHtml(
       ` : ''}
     </div>
 
-    ${template === 'detallado' ? `
+    ${template === 'detallado' && hasAgreement ? `
       <div style="margin-top:14px;padding:10px 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:11px;color:#92400e;">
         <strong>Estado de Acuerdos de Pago:</strong><br/>${agreementNote}
       </div>
@@ -741,7 +746,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
             <FileText className="w-5 h-5 text-blue-600" />
-            {isFinalized ? 'Historial de Cuentas Generadas' : 'Cuentas de Cobro a Generar (Con Desglose y Escalones)'}
+            {isFinalized ? 'Historial de Cuentas Generadas' : 'Cuentas de Cobro a Generar (Tabla de 4 Columnas)'}
           </h2>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={selectAllVisible}>Seleccionar visibles</Button>
@@ -769,7 +774,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                     />
                   </th>
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Consecutivo / Propiedad</th>
-                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Desglose Comparativo (Salarios / Conceptos)</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Desglose de Conceptos</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Valor sin Descuento</th>
                   <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Valores con Descuento</th>
                   <th className="text-center text-xs font-semibold text-gray-600 uppercase px-4 py-3">Acciones</th>
@@ -936,23 +941,25 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                 <p><strong>Propietario:</strong> {previewRow.unit.owner_name}</p>
               </div>
 
-              {/* Vista previa con tabla comparativa de 3 columnas */}
+              {/* Vista previa con tabla de 4 columnas */}
               <div className="space-y-1">
-                <p className="font-bold text-xs text-gray-700 uppercase">Estado Comparativo (Saldo Anterior / Detalle / Total):</p>
+                <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta Comparativo (4 Columnas):</p>
                 <div className="border rounded overflow-hidden text-xs">
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="bg-gray-100 text-gray-700 border-b">
-                        <th className="p-2 w-1/4">Saldo Anterior</th>
-                        <th className="p-2 w-1/2">Detalle / Concepto</th>
-                        <th className="p-2 w-1/4 text-right">Valor Total</th>
+                        <th className="p-2 w-[40%]">Detalle / Concepto</th>
+                        <th className="p-2 w-[20%]">Saldo Anterior</th>
+                        <th className="p-2 w-[20%]">Cargos Periodo</th>
+                        <th className="p-2 w-[20%] text-right">Valor Total</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y">
                       {previewRow.priorBalance > 0 && (
                         <tr className="text-red-600 font-medium">
+                          <td className="p-2">Saldo Anterior (Periodos Vencidos)</td>
                           <td className="p-2">{formatCOP(previewRow.priorBalance)}</td>
-                          <td className="p-2">Saldo Anterior (Vencidos)</td>
+                          <td className="p-2 text-gray-400">$ 0</td>
                           <td className="p-2 text-right">{formatCOP(previewRow.priorBalance)}</td>
                         </tr>
                       )}
@@ -960,16 +967,18 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                         if (line.conceptCode?.toUpperCase().includes('MORA') || line.conceptName.toLowerCase().includes('interés de mora')) return null;
                         return (
                           <tr key={lIdx}>
-                            <td className="p-2 text-gray-400">$ 0</td>
                             <td className="p-2">{line.conceptName}</td>
+                            <td className="p-2 text-gray-400">$ 0</td>
+                            <td className="p-2">{formatCOP(line.amount)}</td>
                             <td className="p-2 text-right font-medium">{formatCOP(line.amount)}</td>
                           </tr>
                         );
                       })}
                       {previewRow.interestAmount > 0 && (
                         <tr className="text-amber-600">
-                          <td className="p-2 text-gray-400">$ 0</td>
                           <td className="p-2">Interés de Mora (Tasa: {previewRow.interestRate.toFixed(2)}% mes)</td>
+                          <td className="p-2 text-gray-400">$ 0</td>
+                          <td className="p-2">{formatCOP(previewRow.interestAmount)}</td>
                           <td className="p-2 text-right font-medium">{formatCOP(previewRow.interestAmount)}</td>
                         </tr>
                       )}
