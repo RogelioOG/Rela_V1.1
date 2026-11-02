@@ -30,7 +30,8 @@ export interface LiquidationRow {
   currentCharges: number;
   chargeLines: ChargeLine[];
   interestAmount: number;
-  discountAmount: number; // Representa el primer escalón o total por defecto
+  discountAmount: number;
+  customTierDiscounts?: Record<string, number>;
   netTotal: number;
   totalWithInterest: number;
   baseAmount: number;
@@ -84,7 +85,7 @@ function getCleanChargeLinesAmount(row: LiquidationRow): number {
   );
 }
 
-// Calcula los descuentos individuales por cada escalón configurado
+// Obtiene de forma independiente cada escalón respetando las ediciones del Paso 2
 function computeAllTierDiscounts(row: LiquidationRow, discountTiers: DiscountTier[]): CalculatedDiscount[] {
   const cleanCharges = getCleanChargeLinesAmount(row);
   const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
@@ -100,25 +101,30 @@ function computeAllTierDiscounts(row: LiquidationRow, discountTiers: DiscountTie
     }];
   }
 
-  // Si hay múltiples escalones definidos en la base de datos
   return discountTiers.map((tier, idx) => {
     let val = 0;
-    const discountValueNum = parseFloat(String(tier.discount_value)) || 0;
     const validDay = Number(tier.valid_until_day) || 1;
 
-    if (tier.discount_type === 'porcentaje') {
-      const baseConceptIds = tier.calculation_base_concept_ids;
-      const base = baseConceptIds && baseConceptIds.length > 0
-        ? round2(row.chargeLines.filter(l => baseConceptIds.includes(l.conceptId)).reduce((s, l) => s + l.amount, 0))
-        : cleanCharges;
-      val = round2(base * discountValueNum / 100);
-    } else {
-      val = Math.min(discountValueNum, cleanCharges);
-    }
-
-    // Si el usuario personalizó el valor en el Paso 2 para el primer escalón, lo respetamos
-    if (idx === 0 && row.discountAmount !== undefined && row.discountAmount > 0 && val !== row.discountAmount) {
+    // 1. Si existe un valor digitado explícitamente en el mapa de customTierDiscounts, se toma prioritariamente
+    if (row.customTierDiscounts && row.customTierDiscounts[tier.id] !== undefined) {
+      val = row.customTierDiscounts[tier.id];
+    } 
+    // 2. Si es el primer escalón y existe discountAmount
+    else if (idx === 0 && row.discountAmount !== undefined && row.discountAmount > 0) {
       val = row.discountAmount;
+    } 
+    // 3. De lo contrario, se liquida automáticamente
+    else {
+      const discountValueNum = parseFloat(String(tier.discount_value)) || 0;
+      if (tier.discount_type === 'porcentaje') {
+        const baseConceptIds = tier.calculation_base_concept_ids;
+        const base = baseConceptIds && baseConceptIds.length > 0
+          ? round2(row.chargeLines.filter(l => baseConceptIds.includes(l.conceptId)).reduce((s, l) => s + l.amount, 0))
+          : cleanCharges;
+        val = round2(base * discountValueNum / 100);
+      } else {
+        val = Math.min(discountValueNum, cleanCharges);
+      }
     }
 
     return {
@@ -217,7 +223,7 @@ function buildPdfHtml(
       </tr>`;
   }
 
-  // Renderiza cada escalón de descuento individualmente en el PDF
+  // Se renderizan todos los escalones de manera independiente en la Cuenta de Cobro
   const discountsRowsHtml = allDiscounts.map(disc => `
     <tr style="background:#f0fdf4;border-bottom:1px solid #dcfce7;">
       <td colspan="3" style="padding:8px 10px;color:#166534;font-size:11px;">
@@ -239,7 +245,7 @@ function buildPdfHtml(
 
   const detailSection = `
     <div style="margin-top:16px;">
-      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Estado de Cuenta</div>
+      <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Estado de Cuenta Comparativo</div>
       <table style="width:100%;border-collapse:collapse;font-size:12px;">
         <thead>
           <tr style="background:#f8fafc;color:#475569;font-size:11px;text-transform:uppercase;">
@@ -812,7 +818,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   const cleanCharges = getCleanChargeLinesAmount(row);
                   const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
                   const allDiscounts = computeAllTierDiscounts(row, discountTiers);
-                  const firstDiscount = allDiscounts[0]; // Tomamos exclusivamente el primer escalón para la tabla
+                  const firstDiscount = allDiscounts[0]; // Se toma únicamente el primer escalón para el resumen de la tabla
 
                   return (
                     <tr key={rowId} className="hover:bg-gray-50">
@@ -968,7 +974,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               </div>
 
               <div className="space-y-1">
-                <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta (4 Columnas):</p>
+                <p className="font-bold text-xs text-gray-700 uppercase">Estado de Cuenta Comparativo (4 Columnas):</p>
                 <div className="border rounded overflow-hidden text-xs">
                   <table className="w-full text-left border-collapse">
                     <thead>
