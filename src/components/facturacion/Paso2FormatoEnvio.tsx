@@ -1,7 +1,7 @@
 import { useMemo, useState, useEffect } from 'react';
 import {
   FileText, Eye, Download, Mail, Send, CheckCircle2, AlertTriangle,
-  Loader2, Layers, FileStack, Trash2, Calendar
+  Loader2, Layers, FileStack, Trash2
 } from 'lucide-react';
 import { Unit, Due, PaymentAgreement, DiscountTier } from '@/lib/supabase';
 import { Organization, supabase } from '@/lib/supabase';
@@ -712,32 +712,34 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         </div>
       )}
 
-      {/* Tarjeta de Parámetros de Fechas */}
-      <Card>
-        <div className="px-6 py-4 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-            <Calendar className="w-5 h-5 text-blue-600" />
-            Fechas del Documento de Facturación
-          </h2>
-          <p className="text-sm text-gray-500 mt-1">Defina la fecha de emisión y vencimiento que aparecerán en todas las Cuentas de Cobro.</p>
-        </div>
-        <CardBody>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Input
-              label="Fecha de Emisión *"
-              type="date"
-              value={issueDate}
-              onChange={(e) => setIssueDate(e.target.value)}
-            />
-            <Input
-              label="Fecha de Vencimiento *"
-              type="date"
-              value={dueDate}
-              onChange={(e) => setDueDate(e.target.value)}
-            />
+      {/* Tarjeta de Parámetros de Fechas (Oculta si ya está finalizado/facturado) */}
+      {!isFinalized && (
+        <Card>
+          <div className="px-6 py-4 border-b border-gray-200">
+            <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+              <Calendar className="w-5 h-5 text-blue-600" />
+              Fechas del Documento de Facturación
+            </h2>
+            <p className="text-sm text-gray-500 mt-1">Defina la fecha de emisión y vencimiento que aparecerán en todas las Cuentas de Cobro.</p>
           </div>
-        </CardBody>
-      </Card>
+          <CardBody>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Input
+                label="Fecha de Emisión *"
+                type="date"
+                value={issueDate}
+                onChange={(e) => setIssueDate(e.target.value)}
+              />
+              <Input
+                label="Fecha de Vencimiento *"
+                type="date"
+                value={dueDate}
+                onChange={(e) => setDueDate(e.target.value)}
+              />
+            </div>
+          </CardBody>
+        </Card>
+      )}
 
       <Card>
         <div className="px-6 py-4 border-b border-gray-200">
@@ -808,7 +810,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {liquidation.map((row, idx) => {
-                  const rowId = row.rowId || row.due.id;
+                  const rowId = row.rowId || row.due?.id || idx;
                   const invNum = isFinalized ? (generatedInvoices[idx]?.invoiceNumber || `CC-${String(currentNextSeq - liquidation.length + idx).padStart(4, '0')}`) : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
                   const cleanCharges = getCleanChargeLinesAmount(row);
                   const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
@@ -820,8 +822,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                       <td className="px-4 py-3">
                         <input
                           type="checkbox"
-                          checked={selected.has(rowId)}
-                          onChange={() => toggleSelected(rowId)}
+                          checked={selected.has(String(rowId))}
+                          onChange={() => toggleSelected(String(rowId))}
                           className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                         />
                       </td>
