@@ -219,8 +219,9 @@ export default function ProcesoFacturacionPage() {
           .maybeSingle()
       ]);
 
-      setDues((duesData || []) as Due[]);
+      const loadedDues = (duesData || []) as Due[];
       const loadedUnits = (unitsData || []) as Unit[];
+      setDues(loadedDues);
       setUnits(loadedUnits);
       setAgreements((agrData || []) as PaymentAgreement[]);
       setAdminQuotas((quotaData || []) as AdminQuota[]);
@@ -229,36 +230,9 @@ export default function ProcesoFacturacionPage() {
       setConcepts((conceptData || []) as BillingConcept[]);
       setCurrentNextSeq(docConfig?.next_consecutive || 1);
 
-      // Verificamos si ya existen dues para este periodo exacto (Facturación ya contabilizada)
-      const periodDues = (duesData || []).filter(d => d.period === targetPeriod);
+      const periodDues = loadedDues.filter(d => d.period === targetPeriod);
       if (periodDues.length > 0 && loadedUnits.length > 0) {
         setIsFinalized(true);
-        // Reconstruimos la liquidación con las cuentas ya existentes para que el paso 3 funcione directo
-        const reconstructedRows: LiquidationRow[] = periodDues.map(d => {
-          const unitMatch = loadedUnits.find(u => u.id === d.unit_id) || loadedUnits[0];
-          return {
-            due: d,
-            unit: unitMatch,
-            daysLate: 0,
-            interestRate: Number(d.interest_rate) || 0.5,
-            priorBalance: 0,
-            currentCharges: d.amount,
-            chargeLines: [{
-              conceptId: 'loaded',
-              conceptName: 'Cuota / Facturación Periodo',
-              conceptCode: 'CC',
-              amount: d.amount,
-              isQuota: true,
-              isNovelty: false
-            }],
-            interestAmount: 0,
-            discountAmount: 0,
-            netTotal: d.amount,
-            rowId: d.id,
-          };
-        });
-        setLiquidation(reconstructedRows);
-        setReviewed(true);
       }
     } catch (err) {
       console.warn('Error cargando datos de facturación:', err);
@@ -360,7 +334,7 @@ export default function ProcesoFacturacionPage() {
   const unitPriorBalanceMap = useMemo(() => {
     const map = new Map<string, number>();
     for (const due of dues) {
-      if (due.period === billingPeriod) continue; // Ignoramos el periodo actual para el saldo vencido anterior
+      if (due.period === billingPeriod) continue; 
       if (!isEligibleDue(due.due_date, effectiveCutoffDate)) continue;
       const existing = map.get(due.unit_id) || 0;
       map.set(due.unit_id, existing + due.balance);
@@ -390,8 +364,10 @@ export default function ProcesoFacturacionPage() {
       const currentCharges = round2(chargeLines.reduce((s, l) => s + l.amount, 0));
       const priorBalance = unitPriorBalanceMap.get(unit.id) || 0;
       const interestAmount = unitInterestMap.get(unit.id) || 0;
+      const periodDue = dues.find(d => d.unit_id === unit.id && d.period === billingPeriod) || null;
+
       return {
-        due: null,
+        due: periodDue,
         unit,
         daysLate: 0,
         interestRate: rate,
@@ -400,13 +376,21 @@ export default function ProcesoFacturacionPage() {
         chargeLines,
         interestAmount,
         discountAmount: 0,
-        netTotal: round2(priorBalance + currentCharges + interestAmount),
+        netTotal: periodDue ? periodDue.amount : round2(priorBalance + currentCharges + interestAmount),
         rowId: unit.id,
       };
-    }).filter(r => r.currentCharges > 0 || r.priorBalance > 0 || r.interestAmount > 0);
+    }).filter(r => r.currentCharges > 0 || r.priorBalance > 0 || r.interestAmount > 0 || (isFinalized && dues.some(d => d.unit_id === r.unit.id && d.period === billingPeriod)));
 
     return sortLiquidationRows(rawRows);
-  }, [units, unitChargeLinesMap, unitPriorBalanceMap, unitInterestMap, interestRate]);
+  }, [units, unitChargeLinesMap, unitPriorBalanceMap, unitInterestMap, interestRate, dues, billingPeriod, isFinalized]);
+
+  // Si ya está finalizado, aseguramos que la liquidación se cargue automáticamente con los datos correctos
+  useEffect(() => {
+    if (isFinalized && computedLiquidation.length > 0 && liquidation.length === 0) {
+      setLiquidation(computedLiquidation);
+      setReviewed(true);
+    }
+  }, [isFinalized, computedLiquidation, liquidation.length]);
 
   const totalPriorBalance = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.priorBalance, 0), [reviewed, liquidation, computedLiquidation]);
   const totalInterest = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.interestAmount, 0), [reviewed, liquidation, computedLiquidation]);
