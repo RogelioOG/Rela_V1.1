@@ -1,321 +1,1022 @@
-import { useState, useEffect, useMemo } from 'react';
-import { 
-  Building2, Percent, Tag, FileText, CheckCircle2, ChevronRight, 
-  Loader2, AlertCircle, RefreshCw 
-} from 'lucide-react';
-import { useOrganization } from '@/contexts/OrganizationContext';
-import { 
-  supabase, Unit, Due, PaymentAgreement, DiscountTier, BillingConcept 
-} from '@/lib/supabase';
+import { useEffect, useState, useMemo, useCallback } from 'react';
+import { Calculator, Loader2, AlertTriangle, CheckCircle2, Percent, RefreshCw, ChevronRight, Calendar, Layers, FileText } from 'lucide-react';
+import { supabase, Unit, Due, PaymentAgreement, AdminQuota, PeriodNovelty, DiscountTier, BillingConcept } from '@/lib/supabase';
+import { useOrg } from '@/contexts/OrganizationContext';
 import { Card, CardBody } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { Input, Select } from '@/components/ui/Input';
+import { Badge } from '@/components/ui/Badge';
+import { Modal } from '@/components/ui/Modal';
+import { NoOrgSelected } from '@/components/shared';
+import { formatCOP } from '@/lib/format';
+import Paso2FormatoEnvio from '@/components/facturacion/Paso2FormatoEnvio';
 
-import Paso2FormatoEnvio, { LiquidationRow, ChargeLine } from './Paso2FormatoEnvio';
-
-function round2(v: number): number {
-  return Math.round(v * 100) / 100;
+export interface ChargeLine {
+  conceptId: string;
+  conceptName: string;
+  conceptCode: string;
+  amount: number;
+  isQuota: boolean;
+  isNovelty: boolean;
 }
 
-export default function ProcesoFacturacion() {
-  const { currentOrg } = useOrganization();
-  const [currentStep, setCurrentStep] = useState<1 | 2>(1);
+export interface LiquidationRow {
+  due: Due | null;
+  unit: Unit;
+  daysLate: number;
+  interestRate: number;
+  priorBalance: number;
+  currentCharges: number;
+  chargeLines: ChargeLine[];
+  interestAmount: number;
+  discountAmount: number;
+  customTierDiscounts?: Record<string, number>;
+  netTotal: number;
+  rowId: string;
+}
 
-  // Estados de carga y datos principales
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+type CutoffRule = 'inicio_mes_facturar' | 'cierre_mes_anterior';
+
+const cutoffRuleLabels: Record<CutoffRule, string> = {
+  inicio_mes_facturar: 'Día 1 del mes a facturar',
+  cierre_mes_anterior: 'Día de cierre del mes anterior',
+};
+
+function getDaysLate(dueDate: string, graceDays: number, cutoffDate: Date): number {
+  const due = new Date(dueDate + 'T00:00:00');
+  const ms = cutoffDate.getTime() - due.getTime();
+  if (ms <= 0) return 0;
+  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
+  return Math.max(0, days - graceDays);
+}
+
+function getCutoffDate(periodStr: string, rule: CutoffRule): Date {
+  const [yStr, mStr] = periodStr.split('-');
+  const y = parseInt(yStr, 10);
+  const m = parseInt(mStr, 10);
+  if (isNaN(y) || isNaN(m)) return new Date();
+
+  if (rule === 'inicio_mes_facturar') {
+    return new Date(y, m - 1, 1);
+  }
+  return new Date(y, m - 1, 0);
+}
+
+function isEligibleDue(dueDate: string, cutoffDate: Date): boolean {
+  const due = new Date(dueDate + 'T00:00:00');
+  return due.getTime() < cutoffDate.getTime();
+}
+
+function sortLiquidationRows(rows: LiquidationRow[]): LiquidationRow[] {
+  return [...rows].sort((a, b) => {
+    const tA = (a.unit.tower || '').trim();
+    const tB = (b.unit.tower || '').trim();
+    if (tA !== tB) {
+      return tA.localeCompare(tB, undefined, { numeric: true, sensitivity: 'base' });
+    }
+    const uA = (a.unit.unit_label || '').trim();
+    const uB = (b.unit.unit_label || '').trim();
+    return uA.localeCompare(uB, undefined, { numeric: true, sensitivity: 'base' });
+  });
+}
+
+const STEPS = [
+  { num: 1, label: 'Configuración de Intereses' },
+  { num: 2, label: 'Descuentos por Propiedad' },
+  { num: 3, label: 'Formatos y Envío' },
+];
+
+interface TierDiscountDetail {
+  tierId: string;
+  tierName: string;
+  tierOrder: number;
+  validUntilDay: number;
+  baseAmount: number;
+  discountAmount: number;
+  overrideString?: string;
+}
+
+interface DiscountRow {
+  unitId: string;
+  unitLabel: string;
+  tower: string;
+  baseAmount: number;
+  tierDiscounts: TierDiscountDetail[];
+  totalDiscountAmount: number;
+  netAmount: number;
+  chargeLines: ChargeLine[];
+}
+
+export default function ProcesoFacturacionPage() {
+  const { activeOrg } = useOrg();
   const [loading, setLoading] = useState(true);
+  const [currentStep, setCurrentStep] = useState(1);
+
+  const [interestRate, setInterestRate] = useState('0.50');
+  const [graceDays, setGraceDays] = useState('5');
+  
+  const [billingPeriod, setBillingPeriod] = useState('2026-09'); 
+  const [cutoffRule, setCutoffRule] = useState<CutoffRule>('cierre_mes_anterior');
+  const [customStartDate, setCustomStartDate] = useState('');
+
+  const [dues, setDues] = useState<Due[]>([]);
+  const [units, setUnits] = useState<Unit[]>([]);
+  const [agreements, setAgreements] = useState<PaymentAgreement[]>([]);
+  const [defaultedAgreements, setDefaultedAgreements] = useState<PaymentAgreement[]>([]);
+  const [adminQuotas, setAdminQuotas] = useState<AdminQuota[]>([]);
+  const [novelties, setNovelties] = useState<PeriodNovelty[]>([]);
+  const [discountTiers, setDiscountTiers] = useState<DiscountTier[]>([]);
+  const [concepts, setConcepts] = useState<BillingConcept[]>([]);
+
+  const [reviewing, setReviewing] = useState(false);
+  const [warningOpen, setWarningOpen] = useState(false);
+  const [liquidation, setLiquidation] = useState<LiquidationRow[]>([]);
+  const [reviewed, setReviewed] = useState(false);
   const [error, setError] = useState('');
 
-  // Parámetros de facturación
-  const [billingPeriod, setBillingPeriod] = useState<string>(() => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-  });
+  const [isFinalized, setIsFinalized] = useState(false);
+  const [currentNextSeq, setCurrentNextSeq] = useState<number>(1);
 
-  const [interestRate, setInterestRate] = useState<number>(1.5); // Tasa mensual por defecto %
-  const [applyInterests, setApplyInterests] = useState<boolean>(true);
+  const [discountRows, setDiscountRows] = useState<DiscountRow[]>([]);
 
-  // Tablas base de Supabase
-  const [units, setUnits] = useState<Unit[]>([]);
-  const [concepts, setConcepts] = useState<BillingConcept[]>([]);
-  const [previousDues, setPreviousDues] = useState<Due[]>([]);
-  const [agreements, setAgreements] = useState<PaymentAgreement[]>([]);
-  const [discountTiers, setDiscountTiers] = useState<DiscountTier[]>([]);
+  const loadData = useCallback(async () => {
+    if (!activeOrg) return;
+    setLoading(true);
 
-  // Cargar todos los datos iniciales necesarios
-  useEffect(() => {
-    async function loadBillingData() {
-      if (!currentOrg) return;
-      setLoading(true);
-      setError('');
+    try {
+      const { data: activePeriodData } = await supabase
+        .from('revenue_periods')
+        .select('work_month, work_year')
+        .eq('organization_id', activeOrg.id)
+        .eq('is_work_period_active', true)
+        .maybeSingle();
 
-      try {
-        const [
-          { data: unitsData, error: unitsErr },
-          { data: conceptsData, error: conceptsErr },
-          { data: duesData, error: duesErr },
-          { data: agreementsData, error: agreementsErr },
-          { data: tiersData, error: tiersErr }
-        ] = await Promise.all([
-          supabase.from('units').select('*').eq('organization_id', currentOrg.id).order('tower').order('unit_number'),
-          supabase.from('billing_concepts').select('*').eq('organization_id', currentOrg.id).eq('is_active', true),
-          supabase.from('dues').select('*').eq('organization_id', currentOrg.id).neq('status', 'pagado'),
-          supabase.from('payment_agreements').select('*').eq('organization_id', currentOrg.id).eq('status', 'activo'),
-          supabase.from('discount_tiers').select('*').eq('organization_id', currentOrg.id).eq('is_active', true).order('valid_until_day')
-        ]);
+      let targetPeriod = billingPeriod;
+      if (activePeriodData && activePeriodData.work_month != null && activePeriodData.work_year != null) {
+        const formattedMonth = String(activePeriodData.work_month).padStart(2, '0');
+        targetPeriod = `${activePeriodData.work_year}-${formattedMonth}`;
+        setBillingPeriod(targetPeriod);
+      }
 
-        if (unitsErr) throw unitsErr;
-        if (conceptsErr) throw conceptsErr;
-        if (duesErr) throw duesErr;
-        if (agreementsErr) throw agreementsErr;
-        if (tiersErr) throw tiersErr;
+      const [
+        { data: duesData },
+        { data: unitsData },
+        { data: agrData },
+        { data: quotaData },
+        { data: noveltyData },
+        { data: tierData },
+        { data: conceptData },
+        { data: docConfig }
+      ] = await Promise.all([
+        supabase
+          .from('dues')
+          .select('*, units(*)')
+          .eq('organization_id', activeOrg.id)
+          .order('due_date', { ascending: false }),
+        supabase
+          .from('units')
+          .select('*')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_active', true)
+          .order('unit_label'),
+        supabase
+          .from('payment_agreements')
+          .select('*, units(*)')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_active', true)
+          .eq('status', 'incumplido'),
+        supabase
+          .from('admin_quotas')
+          .select('*, admin_quota_lines(*), billing_concept:billing_concepts(*)')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_active', true),
+        supabase
+          .from('period_novelties')
+          .select('*, billing_concept:billing_concepts(*), units:units(*)')
+          .eq('organization_id', activeOrg.id),
+        supabase
+          .from('discount_tiers')
+          .select('*')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_active', true)
+          .order('tier_order', { ascending: true }),
+        supabase
+          .from('billing_concepts')
+          .select('*')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_active', true)
+          .order('is_default', { ascending: false })
+          .order('name'),
+        supabase
+          .from('accounting_documents')
+          .select('next_consecutive')
+          .eq('organization_id', activeOrg.id)
+          .eq('prefix', 'CC')
+          .maybeSingle()
+      ]);
 
-        setUnits(unitsData || []);
-        setConcepts(conceptsData || []);
-        setPreviousDues(duesData || []);
-        setAgreements(agreementsData || []);
-        setDiscountTiers(tiersData || []);
-      } catch (err: any) {
-        console.error('Error al cargar datos de facturación:', err);
-        setError('No se pudieron cargar los datos para la facturación. Por favor reintente.');
-      } finally {
-        setLoading(false);
+      const loadedDues = (duesData || []) as Due[];
+      const loadedUnits = (unitsData || []) as Unit[];
+      setDues(loadedDues);
+      setUnits(loadedUnits);
+      setAgreements((agrData || []) as PaymentAgreement[]);
+      setAdminQuotas((quotaData || []) as AdminQuota[]);
+      setNovelties((noveltyData || []) as PeriodNovelty[]);
+      setDiscountTiers((tierData || []) as DiscountTier[]);
+      setConcepts((conceptData || []) as BillingConcept[]);
+      setCurrentNextSeq(docConfig?.next_consecutive || 1);
+
+      const periodDues = loadedDues.filter(d => d.period === targetPeriod);
+      if (periodDues.length > 0 && loadedUnits.length > 0) {
+        setIsFinalized(true);
+      }
+    } catch (err) {
+      console.warn('Error cargando datos de facturación:', err);
+    }
+
+    setLoading(false);
+  }, [activeOrg, billingPeriod]);
+
+  useEffect(() => { if (activeOrg) loadData(); }, [activeOrg, loadData]);
+
+  const effectiveCutoffDate = useMemo(() => {
+    if (customStartDate) return new Date(customStartDate + 'T00:00:00');
+    return getCutoffDate(billingPeriod, cutoffRule);
+  }, [customStartDate, billingPeriod, cutoffRule]);
+
+  const activeTiers = useMemo(() => [...discountTiers].sort((a, b) => a.tier_order - b.tier_order), [discountTiers]);
+  const hasDiscounts = activeTiers.length > 0;
+
+  const conceptMap = useMemo(() => {
+    const m = new Map<string, any>();
+    for (const c of concepts) {
+      m.set(c.id, c);
+      if (c.code) m.set(c.code.trim().toUpperCase(), c);
+      if (c.name) m.set(c.name.trim().toLowerCase(), c);
+    }
+    return m;
+  }, [concepts]);
+
+  const unitChargeLinesMap = useMemo(() => {
+    const map = new Map<string, ChargeLine[]>();
+    const conceptById = (id: string) => conceptMap.get(id);
+
+    for (const quota of adminQuotas) {
+      const lines = quota.admin_quota_lines || [];
+      const concept = quota.billing_concept_id ? conceptById(quota.billing_concept_id) : null;
+      if (lines.length > 0) {
+        for (const line of lines) {
+          const existing = map.get(line.unit_id) || [];
+          existing.push({
+            conceptId: quota.billing_concept_id,
+            conceptName: concept?.name || 'Cuota de Administración',
+            conceptCode: concept?.code || 'ADM',
+            amount: line.amount,
+            isQuota: true,
+            isNovelty: false,
+          });
+          map.set(line.unit_id, existing);
+        }
+      } else if (quota.calculation_method === 'fijo') {
+        for (const u of units) {
+          const existing = map.get(u.id) || [];
+          existing.push({
+            conceptId: quota.billing_concept_id,
+            conceptName: concept?.name || 'Cuota de Administración',
+            conceptCode: concept?.code || 'ADM',
+            amount: quota.fixed_amount,
+            isQuota: true,
+            isNovelty: false,
+          });
+          map.set(u.id, existing);
+        }
+      } else if (quota.calculation_method === 'presupuesto') {
+        const totalCoeff = units.reduce((s, u) => s + u.coefficient, 0) || 1;
+        for (const u of units) {
+          const amt = round2(quota.budget_amount * u.coefficient / totalCoeff);
+          const existing = map.get(u.id) || [];
+          existing.push({
+            conceptId: quota.billing_concept_id,
+            conceptName: concept?.name || 'Cuota de Administración',
+            conceptCode: concept?.code || 'ADM',
+            amount: amt,
+            isQuota: true,
+            isNovelty: false,
+          });
+          map.set(u.id, existing);
+        }
       }
     }
 
-    loadBillingData();
-  }, [currentOrg]);
-
-  // CALCULO COMPLETO Y DEPURADO DE LA LIQUIDACIÓN POR CADA INMUEBLE
-  const liquidation: LiquidationRow[] = useMemo(() => {
-    if (!units.length) return [];
-
-    // Concepto base de administración
-    const adminConcept = concepts.find(c => c.is_quota || c.code === 'ADM' || c.name.toLowerCase().includes('administración'));
-
-    return units.map(unit => {
-      // 1. Saldo Anterior (deudas en el módulo dues anteriores al periodo actual)
-      const unitDues = previousDues.filter(d => d.unit_id === unit.id && d.period !== billingPeriod);
-      const priorBalance = round2(unitDues.reduce((sum, d) => sum + (Number(d.balance) || Number(d.amount) || 0), 0));
-
-      // 2. Cargos del Periodo Actual (Cuota fija del inmueble o valor del concepto)
-      const baseQuota = Number(unit.custom_quota) || Number(adminConcept?.default_amount) || 250000;
-      
-      const chargeLines: ChargeLine[] = [
-        {
-          conceptId: adminConcept?.id || 'admin-base',
-          conceptName: adminConcept?.name || 'Cuota de Administración',
-          conceptCode: adminConcept?.code || 'ADM',
-          amount: baseQuota,
-          isQuota: true,
-          isNovelty: false,
-        }
-      ];
-
-      const currentCharges = round2(chargeLines.reduce((s, l) => s + l.amount, 0));
-
-      // 3. Interés de Mora (Calculado sobre el Saldo Anterior si aplica)
-      let interestAmount = 0;
-      let daysLate = 0;
-
-      if (applyInterests && priorBalance > 0 && interestRate > 0) {
-        interestAmount = round2(priorBalance * (interestRate / 100));
-        daysLate = 30; // Indicador predeterminado de mora de mes vencido
+    for (const n of novelties) {
+      if (n.unit_id) {
+        const concept = n.billing_concept_id ? conceptById(n.billing_concept_id) : null;
+        const existing = map.get(n.unit_id) || [];
+        existing.push({
+          conceptId: n.billing_concept_id,
+          conceptName: concept?.name || n.description || 'Novedad',
+          conceptCode: concept?.code || 'NOV',
+          amount: n.value,
+          isQuota: false,
+          isNovelty: true,
+        });
+        map.set(n.unit_id, existing);
       }
+    }
 
-      // 4. Totales Consolidados
-      const netTotal = round2(priorBalance + currentCharges + interestAmount);
+    return map;
+  }, [adminQuotas, novelties, units, conceptMap]);
+
+  const unitPriorBalanceMap = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const due of dues) {
+      if (due.period === billingPeriod) continue; 
+      if (!isEligibleDue(due.due_date, effectiveCutoffDate)) continue;
+      const existing = map.get(due.unit_id) || 0;
+      map.set(due.unit_id, existing + due.balance);
+    }
+    return map;
+  }, [dues, effectiveCutoffDate, billingPeriod]);
+
+  const unitInterestMap = useMemo(() => {
+    const rate = parseFloat(interestRate) || 0;
+    const grace = parseInt(graceDays) || 0;
+    const map = new Map<string, number>();
+    for (const due of dues) {
+      if (due.period === billingPeriod) continue;
+      if (!isEligibleDue(due.due_date, effectiveCutoffDate)) continue;
+      const days = getDaysLate(due.due_date, grace, effectiveCutoffDate);
+      const interest = round2(due.balance * (rate / 100) * days);
+      const existing = map.get(due.unit_id) || 0;
+      map.set(due.unit_id, existing + interest);
+    }
+    return map;
+  }, [dues, interestRate, graceDays, effectiveCutoffDate, billingPeriod]);
+
+  const computedLiquidation: LiquidationRow[] = useMemo(() => {
+    const rate = parseFloat(interestRate) || 0;
+    const rawRows = units.map(unit => {
+      const chargeLines = unitChargeLinesMap.get(unit.id) || [];
+      const currentCharges = round2(chargeLines.reduce((s, l) => s + l.amount, 0));
+      const priorBalance = unitPriorBalanceMap.get(unit.id) || 0;
+      const interestAmount = unitInterestMap.get(unit.id) || 0;
+      const periodDue = dues.find(d => d.unit_id === unit.id && d.period === billingPeriod) || null;
 
       return {
-        rowId: unit.id,
+        due: periodDue,
         unit,
-        daysLate,
-        interestRate: applyInterests ? interestRate : 0,
+        daysLate: 0,
+        interestRate: rate,
         priorBalance,
         currentCharges,
         chargeLines,
         interestAmount,
         discountAmount: 0,
-        netTotal,
-        totalWithInterest: netTotal,
-        baseAmount: currentCharges,
+        netTotal: periodDue ? periodDue.amount : round2(priorBalance + currentCharges + interestAmount),
+        rowId: unit.id,
       };
-    });
-  }, [units, concepts, previousDues, billingPeriod, applyInterests, interestRate]);
+    }).filter(r => r.currentCharges > 0 || r.priorBalance > 0 || r.interestAmount > 0 || (isFinalized && dues.some(d => d.unit_id === r.unit.id && d.period === billingPeriod)));
 
-  if (loading) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[400px] space-y-4">
-        <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
-        <p className="text-sm text-gray-600">Cargando información y saldos de la copropiedad...</p>
-      </div>
+    return sortLiquidationRows(rawRows);
+  }, [units, unitChargeLinesMap, unitPriorBalanceMap, unitInterestMap, interestRate, dues, billingPeriod, isFinalized]);
+
+  // Si ya está finalizado, aseguramos que la liquidación se cargue automáticamente con los datos correctos
+  useEffect(() => {
+    if (isFinalized && computedLiquidation.length > 0 && liquidation.length === 0) {
+      setLiquidation(computedLiquidation);
+      setReviewed(true);
+    }
+  }, [isFinalized, computedLiquidation, liquidation.length]);
+
+  const totalPriorBalance = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.priorBalance, 0), [reviewed, liquidation, computedLiquidation]);
+  const totalInterest = useMemo(() => (reviewed ? liquidation : computedLiquidation).reduce((s, r) => s + r.interestAmount, 0), [reviewed, liquidation, computedLiquidation]);
+
+  function handleInterestRateChange(value: string) {
+    const parsed = parseFloat(value);
+    if (isNaN(parsed)) { setInterestRate(''); return; }
+    const rounded = Math.round(parsed * 100) / 100;
+    setInterestRate(String(rounded));
+  }
+
+  function computeTierDiscount(currentCharges: number, chargeLines: ChargeLine[], tier: DiscountTier): number {
+    const val = parseFloat(String(tier.discount_value)) || 0;
+    if (tier.discount_type === 'porcentaje') {
+      const baseConceptIds = tier.calculation_base_concept_ids;
+      const base = baseConceptIds && baseConceptIds.length > 0
+        ? round2(chargeLines
+            .filter(l => baseConceptIds.includes(l.conceptId))
+            .reduce((s, l) => s + l.amount, 0))
+        : currentCharges;
+      return round2(base * val / 100);
+    } else {
+      return Math.min(val, currentCharges);
+    }
+  }
+
+  async function handleReviewLiquidation() {
+    if (!activeOrg) return;
+    setReviewing(true);
+    setError('');
+    try {
+      const { data: defaulted, error: agrErr } = await supabase
+        .from('payment_agreements')
+        .select('*, units(*)')
+        .eq('organization_id', activeOrg.id)
+        .eq('is_active', true)
+        .eq('status', 'incumplido');
+      if (agrErr) throw new Error(agrErr.message);
+      const defaultedAgrs = (defaulted || []) as PaymentAgreement[];
+      setDefaultedAgreements(defaultedAgrs);
+
+      const rows = computedLiquidation;
+      setLiquidation(rows);
+
+      if (hasDiscounts) {
+        const firstTierWithBase = activeTiers.find(t => t.calculation_base_concept_ids && t.calculation_base_concept_ids.length > 0);
+        const baseConceptIds = firstTierWithBase?.calculation_base_concept_ids;
+
+        const dRows: DiscountRow[] = rows.map(r => {
+          const rowBaseAmount = baseConceptIds && baseConceptIds.length > 0
+            ? round2(r.chargeLines
+                .filter(l => baseConceptIds.includes(l.conceptId))
+                .reduce((s, l) => s + l.amount, 0))
+            : r.currentCharges;
+
+          const tierDiscounts: TierDiscountDetail[] = activeTiers.map(tier => {
+            const discVal = computeTierDiscount(r.currentCharges, r.chargeLines, tier);
+            return {
+              tierId: tier.id,
+              tierName: tier.name,
+              tierOrder: tier.tier_order,
+              validUntilDay: tier.valid_until_day,
+              baseAmount: rowBaseAmount,
+              discountAmount: discVal,
+              overrideString: String(discVal),
+            };
+          });
+          const totalDisc = round2(tierDiscounts.reduce((sum, td) => sum + td.discountAmount, 0));
+          return {
+            unitId: r.unit.id,
+            unitLabel: r.unit.unit_label,
+            tower: r.unit.tower,
+            baseAmount: rowBaseAmount,
+            tierDiscounts,
+            totalDiscountAmount: totalDisc,
+            netAmount: round2(r.currentCharges - totalDisc),
+            chargeLines: r.chargeLines,
+          };
+        });
+        setDiscountRows(dRows);
+      }
+
+      setReviewed(true);
+      if (defaultedAgrs.length > 0) setWarningOpen(true);
+      setReviewing(false);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Error al revisar la liquidación';
+      setError(msg);
+      setReviewing(false);
+    }
+  }
+
+  function handleRowInterestAmountChange(unitId: string, newInterest: number) {
+    setLiquidation(prev =>
+      prev.map(row => {
+        if (row.unit.id !== unitId) return row;
+        return {
+          ...row,
+          interestAmount: round2(newInterest),
+          netTotal: round2(row.priorBalance + row.currentCharges + newInterest - row.discountAmount),
+        };
+      })
     );
   }
 
+  function handleTierDiscountChange(rowIdx: number, tierId: string, valueStr: string) {
+    setDiscountRows(prev => {
+      const updated = [...prev];
+      const row = { ...updated[rowIdx] };
+      const newTiers = row.tierDiscounts.map(td => {
+        if (td.tierId === tierId) {
+          const val = valueStr === '' ? computeTierDiscount(row.baseAmount, row.chargeLines, discountTiers.find(t => t.id === tierId)!) : (parseFloat(valueStr) || 0);
+          return { ...td, discountAmount: val, overrideString: valueStr };
+        }
+        return td;
+      });
+      const newTotal = round2(newTiers.reduce((s, t) => s + t.discountAmount, 0));
+      row.tierDiscounts = newTiers;
+      row.totalDiscountAmount = newTotal;
+      row.netAmount = round2(row.baseAmount - newTotal);
+      updated[rowIdx] = row;
+      return updated;
+    });
+  }
+
+  function applyDiscountsAndAdvance() {
+    setLiquidation(prev => prev.map(row => {
+      const dRow = discountRows.find(d => d.unitId === row.unit.id);
+      if (!dRow) return row;
+
+      const customTierDiscountsMap: Record<string, number> = {};
+      dRow.tierDiscounts.forEach(td => {
+        customTierDiscountsMap[td.tierId] = td.discountAmount;
+      });
+
+      const firstTierDisc = dRow.tierDiscounts.length > 0 ? dRow.tierDiscounts[0].discountAmount : 0;
+
+      return {
+        ...row,
+        discountAmount: firstTierDisc,
+        customTierDiscounts: customTierDiscountsMap,
+        netTotal: round2(row.priorBalance + row.currentCharges + row.interestAmount - firstTierDisc),
+      };
+    }));
+    setCurrentStep(3);
+  }
+
+  const totalDiscountBase = useMemo(() => discountRows.reduce((s, r) => s + r.baseAmount, 0), [discountRows]);
+  const totalDiscountAmountsByTier = useMemo(() => {
+    const totals: Record<string, number> = {};
+    activeTiers.forEach(tier => {
+      totals[tier.id] = discountRows.reduce((sum, row) => {
+        const td = row.tierDiscounts.find(d => d.tierId === tier.id);
+        return sum + (td ? td.discountAmount : 0);
+      }, 0);
+    });
+    return totals;
+  }, [discountRows, activeTiers]);
+
+  if (!activeOrg) return <NoOrgSelected />;
+
   return (
-    <div className="space-y-6">
-      {/* Encabezado del Proceso */}
-      <div>
+    <div className="max-w-7xl mx-auto">
+      <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Proceso de Facturación</h1>
-        <p className="text-sm text-gray-500 mt-1">Generación de facturación con cuotas, novedades, intereses de mora y descuentos.</p>
+        <p className="text-gray-500 mt-1">Generación de facturación con cuotas, novedades, intereses de mora y descuentos</p>
       </div>
 
-      {/* Stepper / Indicador de Pasos */}
-      <div className="flex items-center gap-3 bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
-        <button
-          onClick={() => setCurrentStep(1)}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
-            currentStep === 1 
-              ? 'bg-blue-50 text-blue-700 border border-blue-200' 
-              : 'text-gray-600 hover:bg-gray-50'
-          }`}
-        >
-          <span className={`w-6 h-6 rounded-full text-xs flex items-center justify-center font-bold ${
-            currentStep === 1 ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600'
-          }`}>1</span>
-          Parámetros de Liquidación
-        </button>
-
-        <ChevronRight className="w-4 h-4 text-gray-400" />
-
-        <button
-          onClick={() => setCurrentStep(2)}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
-            currentStep === 2 
-              ? 'bg-blue-50 text-blue-700 border border-blue-200' 
-              : 'text-gray-600 hover:bg-gray-50'
-          }`}
-        >
-          <span className={`w-6 h-6 rounded-full text-xs flex items-center justify-center font-bold ${
-            currentStep === 2 ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600'
-          }`}>2</span>
-          Formatos y Envío
-        </button>
+      <div className="mb-6">
+        <div className="flex items-center gap-2 overflow-x-auto pb-2">
+          {STEPS.map((step, idx) => (
+            <div key={step.num} className="flex items-center gap-2 flex-shrink-0">
+              <div
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  currentStep === step.num
+                    ? 'bg-blue-600 text-white'
+                    : currentStep > step.num
+                    ? 'bg-green-100 text-green-700'
+                    : 'bg-gray-100 text-gray-500'
+                }`}
+              >
+                <div
+                  className={`flex items-center justify-center w-6 h-6 rounded-full text-xs ${
+                    currentStep === step.num
+                      ? 'bg-white text-blue-600'
+                      : currentStep > step.num
+                      ? 'bg-green-600 text-white'
+                      : 'bg-gray-300 text-gray-600'
+                  }`}
+                >
+                  {currentStep > step.num ? <CheckCircle2 className="w-4 h-4" /> : step.num}
+                </div>
+                {step.label}
+              </div>
+              {idx < STEPS.length - 1 && <ChevronRight className="w-4 h-4 text-gray-400 flex-shrink-0" />}
+            </div>
+          ))}
+        </div>
       </div>
 
       {error && (
-        <div className="rounded-xl bg-red-50 border border-red-200 p-4 flex items-center gap-3 text-red-700">
-          <AlertCircle className="w-5 h-5 flex-shrink-0" />
-          <p className="text-sm">{error}</p>
+        <div className="mb-4 rounded-lg bg-red-50 border border-red-200 p-3 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+          <p className="text-sm text-red-700">{error}</p>
         </div>
       )}
 
-      {/* PASO 1: PARÁMETROS GENERALES DE LA FACTURACIÓN */}
-      {currentStep === 1 && (
-        <div className="space-y-6">
-          <Card>
-            <div className="px-6 py-4 border-b border-gray-200">
-              <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                <Building2 className="w-5 h-5 text-blue-600" />
-                Configuración del Periodo a Facturar
-              </h2>
-            </div>
-            <CardBody className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Periodo a Liquidar *</label>
-                  <input
-                    type="month"
-                    value={billingPeriod}
-                    onChange={(e) => setBillingPeriod(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Tasa Interés Mora Mensual (%)</label>
-                  <div className="relative">
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      max="10"
-                      value={interestRate}
-                      onChange={(e) => setInterestRate(parseFloat(e.target.value) || 0)}
-                      disabled={!applyInterests}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 pr-8 disabled:bg-gray-100"
-                    />
-                    <Percent className="w-4 h-4 text-gray-400 absolute right-3 top-2.5" />
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <Loader2 className="w-6 h-6 text-blue-600 animate-spin" />
+        </div>
+      ) : (
+        <>
+          {currentStep === 1 && (
+            <>
+            {isFinalized ? (
+              <Card className="mb-6">
+                <CardBody>
+                  <div className="text-center py-10 space-y-4">
+                    <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-green-100 text-green-700">
+                      <CheckCircle2 className="w-8 h-8" />
+                    </div>
+                    <h3 className="text-lg font-bold text-gray-900">Ya existe una facturación contabilizada para el periodo {billingPeriod}</h3>
+                    <p className="text-sm text-gray-500 max-w-md mx-auto">
+                      El proceso de este periodo ya fue finalizado. Puede avanzar al Paso 3 para consultar, descargar o enviar las cuentas de cobro emitidas.
+                    </p>
+                    <div className="pt-2">
+                      <Button onClick={() => setCurrentStep(3)}>
+                        Ir al Paso 3: Formatos y Envío <ChevronRight className="w-4 h-4" />
+                      </Button>
+                    </div>
                   </div>
+                </CardBody>
+              </Card>
+            ) : (
+              <Card className="mb-6">
+                <div className="px-6 py-4 border-b border-gray-200">
+                  <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    <Percent className="w-5 h-5 text-blue-600" />
+                    Paso 1: Configuración de Intereses
+                  </h2>
+                  <p className="text-sm text-gray-500 mt-1">
+                    Defina los parámetros para el cálculo de intereses de mora. El sistema carga automáticamente las cuotas de administración, novedades del periodo y saldos vencidos.
+                  </p>
                 </div>
+                <CardBody>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div>
+                      <Input
+                        label="Tasa de Interés de Mora (%)"
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max="99.99"
+                        value={interestRate}
+                        onChange={(e) => handleInterestRateChange(e.target.value)}
+                        placeholder="Ej: 0.50"
+                      />
+                      <p className="text-xs text-gray-400 mt-1">Parámetro de cálculo. No editable por propiedad.</p>
+                    </div>
+                    <div>
+                      <Input
+                        label="Días de Gracia"
+                        type="number"
+                        min="0"
+                        value={graceDays}
+                        onChange={(e) => setGraceDays(e.target.value)}
+                        placeholder="Ej: 5"
+                      />
+                      <p className="text-xs text-gray-400 mt-1">Días posteriores al vencimiento sin interés.</p>
+                    </div>
+                    <div>
+                      <Select
+                        label="Fecha de Corte / Inicio de Cobro"
+                        value={cutoffRule}
+                        onChange={(e) => { setCutoffRule(e.target.value as CutoffRule); setCustomStartDate(''); }}
+                      >
+                        <option value="cierre_mes_anterior">Día de cierre del mes anterior</option>
+                        <option value="inicio_mes_facturar">Día 1 del mes a facturar</option>
+                      </Select>
+                      <p className="text-xs text-gray-400 mt-1">Define el corte de saldos elegibles según el periodo activo ({billingPeriod}).</p>
+                    </div>
+                  </div>
 
-                <div className="flex items-end pb-2">
-                  <label className="flex items-center gap-2 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={applyInterests}
-                      onChange={(e) => setApplyInterests(e.target.checked)}
-                      className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span className="text-sm font-medium text-gray-700">Calcular Intereses sobre Saldo Anterior</span>
-                  </label>
+                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <Input
+                        label="Fecha de Inicio de Cobro Personalizada (opcional)"
+                        type="date"
+                        value={customStartDate}
+                        onChange={(e) => setCustomStartDate(e.target.value)}
+                        placeholder="DD/MM/AAAA"
+                      />
+                      <p className="text-xs text-gray-400 mt-1">
+                        Si se especifica, anula la regla de corte anterior. Solo se liquidan saldos a esta fecha.
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3 flex items-center gap-3">
+                      <Calendar className="w-5 h-5 text-blue-600 flex-shrink-0" />
+                      <div>
+                        <p className="text-xs text-gray-500">Fecha de corte efectiva</p>
+                        <p className="text-sm font-semibold text-gray-900">
+                          {effectiveCutoffDate.toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' })}
+                        </p>
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          {customStartDate ? 'Fecha personalizada (activa)' : cutoffRuleLabels[cutoffRule]}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex items-center gap-3">
+                    <Button onClick={handleReviewLiquidation} disabled={reviewing}>
+                      {reviewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Calculator className="w-4 h-4" />}
+                      Revisar Liquidación
+                    </Button>
+                    {reviewed && defaultedAgreements.length === 0 && (
+                      <span className="text-sm text-green-600 flex items-center gap-1">
+                        <CheckCircle2 className="w-4 h-4" /> Revisión completada sin incumplimientos
+                      </span>
+                    )}
+                    {reviewed && defaultedAgreements.length > 0 && (
+                      <span className="text-sm text-red-600 flex items-center gap-1">
+                        <AlertTriangle className="w-4 h-4" /> {defaultedAgreements.length} acuerdo(s) incumplido(s) detectado(s)
+                      </span>
+                    )}
+                  </div>
+
+                  {reviewed && (
+                    <div className="mt-4 flex justify-end">
+                      <Button onClick={() => setCurrentStep(hasDiscounts ? 2 : 3)}>
+                        {hasDiscounts ? 'Continuar a Descuentos' : 'Continuar a Formatos'} <ChevronRight className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  )}
+                </CardBody>
+              </Card>
+            )}
+
+            {reviewed && !isFinalized && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+                <Card><CardBody>
+                  <p className="text-sm text-gray-500">Total Base de Cálculo</p>
+                  <p className="text-xl font-bold text-gray-900">{formatCOP(totalPriorBalance)}</p>
+                </CardBody></Card>
+                <Card><CardBody>
+                  <p className="text-sm text-gray-500">Total Intereses Calculados</p>
+                  <p className="text-xl font-bold text-yellow-600">{formatCOP(totalInterest)}</p>
+                </CardBody></Card>
+              </div>
+            )}
+
+            {reviewed && !isFinalized && (
+              <Card>
+                <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+                  <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    <Calculator className="w-5 h-5 text-blue-600" />
+                    Tabla de Liquidación
+                  </h2>
+                  <Button variant="outline" size="sm" onClick={handleReviewLiquidation}>
+                    <RefreshCw className="w-4 h-4" /> Recalcular
+                  </Button>
+                </div>
+                {(reviewed ? liquidation : computedLiquidation).length === 0 ? (
+                  <div className="text-center py-12">
+                    <p className="text-gray-500">No hay cuotas, novedades ni saldos pendientes para facturar en este periodo</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b border-gray-200 bg-gray-50">
+                          <th className="text-left text-xs font-semibold text-gray-600 uppercase px-6 py-3">Propiedad</th>
+                          <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Base de Cálculo (Saldo)</th>
+                          <th className="text-center text-xs font-semibold text-gray-600 uppercase px-6 py-3">Tasa (%)</th>
+                          <th className="text-right text-xs font-semibold text-gray-600 uppercase px-6 py-3">Interés Mora</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {liquidation.map((row) => (
+                          <tr key={row.rowId} className="hover:bg-gray-50">
+                            <td className="px-6 py-3">
+                              <p className="text-sm font-medium text-gray-900">{row.unit.tower} {row.unit.unit_label}</p>
+                              <p className="text-xs text-gray-500">{row.unit.owner_name || ''}</p>
+                            </td>
+                            <td className="px-6 py-3 text-right text-sm text-gray-900">
+                              {formatCOP(row.priorBalance)}
+                            </td>
+                            <td className="px-6 py-3 text-center text-sm text-gray-500">
+                              {row.interestRate.toFixed(2)}
+                            </td>
+                            <td className="px-6 py-3 text-right">
+                              <input
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                value={row.interestAmount}
+                                onChange={(e) => {
+                                  const val = Math.round((parseFloat(e.target.value) || 0) * 100) / 100;
+                                  handleRowInterestAmountChange(row.unit.id, val);
+                                }}
+                                className="w-24 text-right text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                              />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
+            )}
+            </>
+          )}
+
+          {currentStep === 2 && hasDiscounts && (
+            <Card>
+              <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                  <Layers className="w-5 h-5 text-blue-600" />
+                  Paso 2: Descuentos por Propiedad
+                </h2>
+                <div className="flex items-center gap-2">
+                  {activeTiers.map((t, index) => (
+                    <Badge key={t.id} variant="blue">
+                      Descuento {index + 1}: {t.discount_type === 'porcentaje' ? `${t.discount_value}%` : formatCOP(t.discount_value)} ({t.name} — día {t.valid_until_day})
+                    </Badge>
+                  ))}
                 </div>
               </div>
-            </CardBody>
-          </Card>
+              <div className="p-5">
+                {isFinalized ? (
+                  <div className="text-center py-10 space-y-4">
+                    <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-green-100 text-green-700">
+                      <CheckCircle2 className="w-8 h-8" />
+                    </div>
+                    <h3 className="text-lg font-bold text-gray-900">El periodo ya fue contabilizado</h3>
+                    <p className="text-sm text-gray-500 max-w-md mx-auto">
+                      Los descuentos ya fueron aplicados y facturados. Puede avanzar directamente al Paso 3.
+                    </p>
+                    <div className="pt-2">
+                      <Button onClick={() => setCurrentStep(3)}>
+                        Ir al Paso 3: Formatos y Envío <ChevronRight className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                ) : discountRows.length === 0 ? (
+                  <div className="text-center py-12">
+                    <p className="text-gray-500">No hay propiedades con cargos para aplicar descuentos. Vuelva al Paso 1 y asegúrese de liquidar.</p>
+                  </div>
+                ) : (
+                  <>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-gray-200 bg-gray-50">
+                          <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Propiedad</th>
+                          <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Base Aplicada</th>
+                          {activeTiers.map((t, index) => (
+                            <th key={t.id} className="text-right text-xs font-semibold text-blue-700 uppercase px-4 py-3">
+                              Descuento {index + 1}<br/>
+                              <span className="text-[10px] text-gray-500 normal-case">({t.name} - {t.discount_type === 'porcentaje' ? `${t.discount_value}%` : formatCOP(t.discount_value)})</span>
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {discountRows.map((row, rowIdx) => (
+                          <tr key={row.unitId} className="hover:bg-gray-50">
+                            <td className="px-4 py-3">
+                              <p className="font-medium text-gray-900">{row.tower} {row.unitLabel}</p>
+                            </td>
+                            <td className="px-4 py-3 text-right text-gray-700">
+                              {formatCOP(row.baseAmount)}
+                            </td>
+                            {activeTiers.map(tier => {
+                              const tierDetail = row.tierDiscounts.find(d => d.tierId === tier.id);
+                              const inputVal = tierDetail?.overrideString !== undefined ? tierDetail.overrideString : String(tierDetail?.discountAmount || 0);
+                              return (
+                                <td key={tier.id} className="px-4 py-3 text-right">
+                                  <div className="flex items-center justify-end gap-1">
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      value={inputVal}
+                                      onChange={(e) => handleTierDiscountChange(rowIdx, tier.id, e.target.value)}
+                                      placeholder="0"
+                                      className="w-28 rounded border border-gray-300 px-2 py-1 text-xs text-right focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                    />
+                                    <span className="text-xs text-gray-400">COP</span>
+                                  </div>
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr className="border-t-2 border-gray-300 bg-gray-50 font-bold">
+                          <td className="px-4 py-3 text-gray-700">Totales ({discountRows.length})</td>
+                          <td className="px-4 py-3 text-right text-gray-900">{formatCOP(totalDiscountBase)}</td>
+                          {activeTiers.map(tier => (
+                            <td key={tier.id} className="px-4 py-3 text-right text-red-600">
+                              -{formatCOP(totalDiscountAmountsByTier[tier.id] || 0)}
+                            </td>
+                          ))}
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                  <div className="mt-4 flex justify-between">
+                    <Button variant="outline" onClick={() => setCurrentStep(1)}>Volver al Paso 1</Button>
+                    <Button onClick={applyDiscountsAndAdvance}>
+                      Aplicar Descuentos y Continuar <ChevronRight className="w-4 h-4" />
+                    </Button>
+                  </div>
+                  </>
+                )}
+              </div>
+            </Card>
+          )}
 
-          {/* Resumen de Pre-liquidación */}
-          <Card>
-            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                <FileText className="w-5 h-5 text-blue-600" />
-                Resumen de Pre-liquidación ({liquidation.length} Inmuebles)
-              </h2>
+          {currentStep === 3 && (
+            <div className="space-y-6">
+              <Paso2FormatoEnvio
+                liquidation={liquidation.map(r => {
+                  const linesWithInterest = [...r.chargeLines];
+                  if (r.interestAmount > 0) {
+                    const moraConcept = concepts.find(c => c.code === 'MORA_ADM' || c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés'));
+                    linesWithInterest.push({
+                      conceptId: moraConcept ? moraConcept.id : 'interest-mora-id',
+                      conceptName: moraConcept ? moraConcept.name : `Interés de Mora (${r.interestRate.toFixed(2)}%)`,
+                      conceptCode: moraConcept ? moraConcept.code : 'IM',
+                      amount: r.interestAmount,
+                      isQuota: false,
+                      isNovelty: false,
+                    });
+                  }
+                  const totalChargesWithInterest = round2(r.currentCharges + r.interestAmount);
+
+                  return {
+                    due: r.due || ({ id: r.rowId, organization_id: activeOrg.id, unit_id: r.unit.id, type: 'ordinaria' as const, period: billingPeriod, due_date: new Date().toISOString().slice(0, 10), amount: totalChargesWithInterest, interest_rate: r.interestRate, balance: r.priorBalance, status: 'pendiente' as const, created_at: '' }) as Due,
+                    unit: r.unit,
+                    daysLate: r.daysLate,
+                    interestRate: r.interestRate,
+                    priorBalance: r.priorBalance,
+                    currentCharges: totalChargesWithInterest,
+                    chargeLines: linesWithInterest,
+                    interestAmount: r.interestAmount,
+                    discountAmount: r.discountAmount,
+                    customTierDiscounts: r.customTierDiscounts,
+                    netTotal: r.netTotal,
+                    totalWithInterest: r.netTotal,
+                    baseAmount: totalChargesWithInterest,
+                    rowId: r.rowId,
+                  };
+                })}
+                agreements={[...agreements, ...defaultedAgreements]}
+                org={activeOrg}
+                billingPeriod={billingPeriod}
+                onBack={() => setCurrentStep(hasDiscounts ? 2 : 1)}
+                discountTiers={activeTiers}
+              />
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-gray-200 bg-gray-50 text-xs font-semibold text-gray-600 uppercase">
-                    <th className="text-left px-4 py-3">Inmueble</th>
-                    <th className="text-right px-4 py-3">Saldo Anterior</th>
-                    <th className="text-right px-4 py-3">Cargos Mes</th>
-                    <th className="text-right px-4 py-3">Int. Mora</th>
-                    <th className="text-right px-4 py-3">Total Bruto</th>
+          )}
+        </>
+      )}
+
+      <Modal
+        open={warningOpen}
+        onClose={() => setWarningOpen(false)}
+        title="Advertencia: Acuerdos de Pago Incumplidos"
+        size="lg"
+      >
+        <div className="space-y-4">
+          <div className="flex items-start gap-3 rounded-lg bg-red-50 border border-red-200 p-4">
+            <AlertTriangle className="w-6 h-6 text-red-600 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-semibold text-red-800">
+                Se detectaron {defaultedAgreements.length} acuerdo(s) de pago incumplido(s)
+              </p>
+              <p className="text-sm text-red-700 mt-1">
+                Las siguientes propiedades tienen acuerdos de pago en estado de incumplimiento.
+                Revise la situación antes de proceder con la facturación.
+              </p>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto rounded-lg border border-gray-200">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-gray-200 bg-gray-50">
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-2">Propiedad</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-2 hidden sm:table-cell">Periodo Inicial</th>
+                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-2 hidden sm:table-cell">Periodo Final</th>
+                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-2">Cuota Mensual</th>
+                  <th className="text-center text-xs font-semibold text-gray-600 uppercase px-4 py-2">Estado</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {defaultedAgreements.map((a) => (
+                  <tr key={a.id} className="hover:bg-gray-50">
+                    <td className="px-4 py-3">
+                      <p className="text-sm font-medium text-gray-900">{a.units?.tower} {a.units?.unit_label}</p>
+                      <p className="text-xs text-gray-500">{a.units?.owner_name || ''}</p>
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-700 hidden sm:table-cell">{a.start_period}</td>
+                    <td className="px-4 py-3 text-sm text-gray-700 hidden sm:table-cell">{a.end_period}</td>
+                    <td className="px-4 py-3 text-right text-sm text-gray-900">{formatCOP(a.monthly_amount)}</td>
+                    <td className="px-4 py-3 text-center">
+                      <Badge variant="red">Incumplido</Badge>
+                    </td>
                   </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100 text-sm">
-                  {liquidation.map(row => (
-                    <tr key={row.rowId} className="hover:bg-gray-50">
-                      <td className="px-4 py-3 font-medium text-gray-900">
-                        {row.unit.tower} {row.unit.unit_label}
-                        <span className="block text-xs text-gray-500">{row.unit.owner_name}</span>
-                      </td>
-                      <td className="px-4 py-3 text-right text-red-600 font-medium">
-                        ${row.priorBalance.toLocaleString('es-CO')}
-                      </td>
-                      <td className="px-4 py-3 text-right text-gray-900">
-                        ${row.currentCharges.toLocaleString('es-CO')}
-                      </td>
-                      <td className="px-4 py-3 text-right text-amber-600 font-medium">
-                        ${row.interestAmount.toLocaleString('es-CO')}
-                      </td>
-                      <td className="px-4 py-3 text-right font-bold text-blue-900">
-                        ${row.netTotal.toLocaleString('es-CO')}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Card>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
-          <div className="flex justify-end">
-            <Button onClick={() => setCurrentStep(2)}>
-              Siguiente: Formatos y Envío <ChevronRight className="w-4 h-4 ml-1" />
+          <div className="flex justify-end gap-3 pt-2">
+            <Button variant="outline" onClick={() => setWarningOpen(false)}>Cerrar y Revisar</Button>
+            <Button onClick={() => setWarningOpen(false)}>
+              <CheckCircle2 className="w-4 h-4" /> Continuar con Facturación
             </Button>
           </div>
         </div>
-      )}
-
-      {/* PASO 2: VISTA Y GENERACIÓN DE FORMATOS */}
-      {currentStep === 2 && (
-        <Paso2FormatoEnvio
-          liquidation={liquidation}
-          agreements={agreements}
-          org={currentOrg}
-          billingPeriod={billingPeriod}
-          discountTiers={discountTiers}
-          onBack={() => setCurrentStep(1)}
-        />
-      )}
+      </Modal>
     </div>
   );
 }
