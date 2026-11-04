@@ -78,16 +78,13 @@ export interface CalculatedDiscount {
 }
 
 function getCleanChargeLinesAmount(row: LiquidationRow): number {
-  return round2(
-    row.chargeLines
-      .filter(l => !l.conceptCode?.toUpperCase().includes('MORA') && !l.conceptName.toLowerCase().includes('interés de mora'))
-      .reduce((s, l) => s + l.amount, 0)
-  );
+  const linesTotal = (row.chargeLines || []).reduce((s, l) => s + (Number(l.amount) || 0), 0);
+  return round2(linesTotal > 0 ? linesTotal : (row.currentCharges || 0));
 }
 
 function computeAllTierDiscounts(row: LiquidationRow, discountTiers: DiscountTier[]): CalculatedDiscount[] {
   const cleanCharges = getCleanChargeLinesAmount(row);
-  const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
+  const grossTotal = round2(cleanCharges + (row.priorBalance || 0) + (row.interestAmount || 0));
 
   if (!discountTiers || discountTiers.length === 0) {
     const customVal = row.discountAmount || 0;
@@ -115,7 +112,7 @@ function computeAllTierDiscounts(row: LiquidationRow, discountTiers: DiscountTie
       if (tier.discount_type === 'porcentaje') {
         const baseConceptIds = tier.calculation_base_concept_ids;
         const base = baseConceptIds && baseConceptIds.length > 0
-          ? round2(row.chargeLines.filter(l => baseConceptIds.includes(l.conceptId)).reduce((s, l) => s + l.amount, 0))
+          ? round2((row.chargeLines || []).filter(l => baseConceptIds.includes(l.conceptId)).reduce((s, l) => s + l.amount, 0))
           : cleanCharges;
         val = round2(base * discountValueNum / 100);
       } else {
@@ -165,7 +162,7 @@ function buildPdfHtml(
 
   const allDiscounts = computeAllTierDiscounts(row, discountTiers);
   const cleanCharges = getCleanChargeLinesAmount(row);
-  const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
+  const grossTotal = round2(cleanCharges + (row.priorBalance || 0) + (row.interestAmount || 0));
 
   const header = template === 'moderno'
     ? `<div style="background:#1e40af;color:#fff;padding:20px 28px;border-radius:8px 8px 0 0;display:flex;justify-content:space-between;align-items:center;">
@@ -199,23 +196,30 @@ function buildPdfHtml(
       </tr>`;
   }
 
-  for (const line of row.chargeLines) {
-    if (line.conceptCode?.toUpperCase().includes('MORA') || line.conceptName.toLowerCase().includes('interés de mora')) {
-      continue;
+  if (row.chargeLines && row.chargeLines.length > 0) {
+    for (const line of row.chargeLines) {
+      comparativeRowsHtml += `
+        <tr>
+          <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#334155;">${line.conceptName || 'Concepto'}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;">$ 0</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#0f172a;">${formatCOP(line.amount)}</td>
+          <td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;font-weight:600;color:#0f172a;">${formatCOP(line.amount)}</td>
+        </tr>`;
     }
+  } else if (row.currentCharges > 0) {
     comparativeRowsHtml += `
       <tr>
-        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#334155;">${line.conceptName}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#334155;">Cuota de Administración / Cargos</td>
         <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;">$ 0</td>
-        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#0f172a;">${formatCOP(line.amount)}</td>
-        <td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;font-weight:600;color:#0f172a;">${formatCOP(line.amount)}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#0f172a;">${formatCOP(row.currentCharges)}</td>
+        <td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;font-weight:600;color:#0f172a;">${formatCOP(row.currentCharges)}</td>
       </tr>`;
   }
 
   if (row.interestAmount > 0) {
     comparativeRowsHtml += `
       <tr>
-        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#d97706;">Interés de Mora (Tasa: ${row.interestRate.toFixed(2)}% mes)</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#d97706;">Interés de Mora (Tasa: ${(row.interestRate || 0).toFixed(2)}% mes)</td>
         <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;">$ 0</td>
         <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#d97706;">${formatCOP(row.interestAmount)}</td>
         <td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;font-weight:700;color:#d97706;">${formatCOP(row.interestAmount)}</td>
@@ -585,9 +589,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // Incluir también el interés de mora en las líneas contables si existe
           if (row.interestAmount > 0) {
-            const interestAccId = defaultIncomeAcc?.id; // O cuenta de ingresos por intereses
+            const interestAccId = defaultIncomeAcc?.id;
             if (defaultReceivableAcc?.id && interestAccId) {
               linesToInsert.push({
                 journal_entry_id: je.id,
@@ -852,10 +855,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   const rowId = row.rowId || row.due?.id || idx;
                   const invNum = isFinalized ? (generatedInvoices[idx]?.invoiceNumber || `CC-${String(currentNextSeq - liquidation.length + idx).padStart(4, '0')}`) : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
                   
-                  // Incluimos explícitamente los intereses de mora calculados en el grossTotal y desglose
                   const cleanCharges = getCleanChargeLinesAmount(row);
-                  const grossTotal = round2(cleanCharges + row.priorBalance + (row.interestAmount || 0));
-                  
+                  const grossTotal = round2(cleanCharges + (row.priorBalance || 0) + (row.interestAmount || 0));
                   const allDiscounts = computeAllTierDiscounts(row, discountTiers);
                   const firstDiscount = allDiscounts[0];
 
@@ -879,13 +880,15 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                           {row.priorBalance > 0 && (
                             <li className="text-red-600 font-medium">• Saldo Anterior: {formatCOP(row.priorBalance)}</li>
                           )}
-                          {row.chargeLines.map((line, lIdx) => {
-                            if (line.conceptCode?.toUpperCase().includes('MORA') || line.conceptName.toLowerCase().includes('interés de mora')) return null;
-                            return <li key={lIdx}>• {line.conceptName}: {formatCOP(line.amount)}</li>;
-                          })}
-                          {/* CORRECCIÓN: Mostrar explícitamente el interés de mora calculado en la tabla */}
+                          {row.chargeLines && row.chargeLines.length > 0 ? (
+                            row.chargeLines.map((line, lIdx) => (
+                              <li key={lIdx}>• {line.conceptName || 'Concepto'}: {formatCOP(line.amount)}</li>
+                            ))
+                          ) : (
+                            row.currentCharges > 0 && <li>• Cuota de Administración: {formatCOP(row.currentCharges)}</li>
+                          )}
                           {row.interestAmount > 0 && (
-                            <li className="text-amber-600 font-medium">• Interés de Mora ({row.interestRate.toFixed(2)}%): {formatCOP(row.interestAmount)}</li>
+                            <li className="text-amber-600 font-medium">• Interés de Mora ({(row.interestRate || 0).toFixed(2)}%): {formatCOP(row.interestAmount)}</li>
                           )}
                           {firstDiscount && firstDiscount.discountVal > 0 && (
                             <li className="text-green-600 font-medium">• Descuento Escalón 1: -{formatCOP(firstDiscount.discountVal)}</li>
@@ -1034,20 +1037,28 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                           <td className="p-2 text-right">{formatCOP(previewRow.priorBalance)}</td>
                         </tr>
                       )}
-                      {previewRow.chargeLines.map((line, lIdx) => {
-                        if (line.conceptCode?.toUpperCase().includes('MORA') || line.conceptName.toLowerCase().includes('interés de mora')) return null;
-                        return (
+                      {previewRow.chargeLines && previewRow.chargeLines.length > 0 ? (
+                        previewRow.chargeLines.map((line, lIdx) => (
                           <tr key={lIdx}>
-                            <td className="p-2">{line.conceptName}</td>
+                            <td className="p-2">{line.conceptName || 'Concepto'}</td>
                             <td className="p-2 text-gray-400">$ 0</td>
                             <td className="p-2">{formatCOP(line.amount)}</td>
                             <td className="p-2 text-right font-medium">{formatCOP(line.amount)}</td>
                           </tr>
-                        );
-                      })}
+                        ))
+                      ) : (
+                        previewRow.currentCharges > 0 && (
+                          <tr>
+                            <td className="p-2">Cuota de Administración</td>
+                            <td className="p-2 text-gray-400">$ 0</td>
+                            <td className="p-2">{formatCOP(previewRow.currentCharges)}</td>
+                            <td className="p-2 text-right font-medium">{formatCOP(previewRow.currentCharges)}</td>
+                          </tr>
+                        )
+                      )}
                       {previewRow.interestAmount > 0 && (
                         <tr className="text-amber-600">
-                          <td className="p-2">Interés de Mora (Tasa: {previewRow.interestRate.toFixed(2)}% mes)</td>
+                          <td className="p-2">Interés de Mora (Tasa: {(previewRow.interestRate || 0).toFixed(2)}% mes)</td>
                           <td className="p-2 text-gray-400">$ 0</td>
                           <td className="p-2">{formatCOP(previewRow.interestAmount)}</td>
                           <td className="p-2 text-right font-medium">{formatCOP(previewRow.interestAmount)}</td>
@@ -1061,7 +1072,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               <div className="border-t pt-2 space-y-2">
                 <div className="flex justify-between font-extrabold text-base text-blue-900 bg-blue-50 p-2 rounded">
                   <span>VALOR A PAGAR (SIN DESCUENTO):</span>
-                  <span>{formatCOP(round2(getCleanChargeLinesAmount(previewRow) + previewRow.priorBalance + (previewRow.interestAmount || 0)))}</span>
+                  <span>{formatCOP(round2(getCleanChargeLinesAmount(previewRow) + (previewRow.priorBalance || 0) + (previewRow.interestAmount || 0)))}</span>
                 </div>
 
                 {computeAllTierDiscounts(previewRow, discountTiers).map(d => (
