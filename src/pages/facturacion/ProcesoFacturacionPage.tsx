@@ -917,10 +917,10 @@ export default function ProcesoFacturacionPage() {
             <div className="space-y-6">
               <Paso2FormatoEnvio
                 liquidation={liquidation.map(r => {
-                  const linesWithInterest = [...r.chargeLines];
+                  const lines = [...r.chargeLines];
                   if (r.interestAmount > 0) {
                     const moraConcept = concepts.find(c => c.code === 'MORA_ADM' || c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés'));
-                    linesWithInterest.push({
+                    lines.push({
                       conceptId: moraConcept ? moraConcept.id : 'interest-mora-id',
                       conceptName: moraConcept ? moraConcept.name : `Interés de Mora (${r.interestRate.toFixed(2)}%)`,
                       conceptCode: moraConcept ? moraConcept.code : 'IM',
@@ -929,22 +929,35 @@ export default function ProcesoFacturacionPage() {
                       isNovelty: false,
                     });
                   }
-                  const totalChargesWithInterest = round2(r.currentCharges + r.interestAmount);
+
+                  const grossTotal = round2(r.currentCharges + r.priorBalance + r.interestAmount);
 
                   return {
-                    due: r.due || ({ id: r.rowId, organization_id: activeOrg.id, unit_id: r.unit.id, type: 'ordinaria' as const, period: billingPeriod, due_date: new Date().toISOString().slice(0, 10), amount: totalChargesWithInterest, interest_rate: r.interestRate, balance: r.priorBalance, status: 'pendiente' as const, created_at: '' }) as Due,
+                    due: r.due || ({ 
+                      id: r.rowId, 
+                      organization_id: activeOrg.id, 
+                      unit_id: r.unit.id, 
+                      type: 'ordinaria' as const, 
+                      period: billingPeriod, 
+                      due_date: new Date().toISOString().slice(0, 10), 
+                      amount: grossTotal, 
+                      interest_rate: r.interestRate, 
+                      balance: r.priorBalance, 
+                      status: 'pendiente' as const, 
+                      created_at: '' 
+                    }) as Due,
                     unit: r.unit,
                     daysLate: r.daysLate,
                     interestRate: r.interestRate,
                     priorBalance: r.priorBalance,
-                    currentCharges: totalChargesWithInterest,
-                    chargeLines: linesWithInterest,
+                    currentCharges: r.currentCharges,
+                    chargeLines: lines,
                     interestAmount: r.interestAmount,
                     discountAmount: r.discountAmount,
                     customTierDiscounts: r.customTierDiscounts,
                     netTotal: r.netTotal,
-                    totalWithInterest: r.netTotal,
-                    baseAmount: totalChargesWithInterest,
+                    totalWithInterest: grossTotal,
+                    baseAmount: r.currentCharges,
                     rowId: r.rowId,
                   };
                 })}
