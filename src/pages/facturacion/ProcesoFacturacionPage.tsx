@@ -363,8 +363,16 @@ export default function ProcesoFacturacionPage() {
       const chargeLines = unitChargeLinesMap.get(unit.id) || [];
       const currentCharges = round2(chargeLines.reduce((s, l) => s + l.amount, 0));
       const priorBalance = unitPriorBalanceMap.get(unit.id) || 0;
-      const interestAmount = unitInterestMap.get(unit.id) || 0;
+      let interestAmount = unitInterestMap.get(unit.id) || 0;
       const periodDue = dues.find(d => d.unit_id === unit.id && d.period === billingPeriod) || null;
+
+      // Si el periodo ya está finalizado (o tiene un due registrado), recuperamos intereses si el monto guardado es mayor
+      if (periodDue) {
+        const expectedBase = priorBalance + currentCharges;
+        if (periodDue.amount > expectedBase && interestAmount === 0) {
+          interestAmount = round2(periodDue.amount - expectedBase);
+        }
+      }
 
       return {
         due: periodDue,
@@ -384,7 +392,6 @@ export default function ProcesoFacturacionPage() {
     return sortLiquidationRows(rawRows);
   }, [units, unitChargeLinesMap, unitPriorBalanceMap, unitInterestMap, interestRate, dues, billingPeriod, isFinalized]);
 
-  // Si ya está finalizado, aseguramos que la liquidación se cargue automáticamente con los datos correctos
   useEffect(() => {
     if (isFinalized && computedLiquidation.length > 0 && liquidation.length === 0) {
       setLiquidation(computedLiquidation);
