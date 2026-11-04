@@ -367,8 +367,9 @@ export default function ProcesoFacturacionPage() {
       const periodDue = dues.find(d => d.unit_id === unit.id && d.period === billingPeriod) || null;
 
       if (periodDue) {
+        // Recuperamos con precisión el interés si el periodo ya está finalizado y guardado en dues
         const expectedBase = priorBalance + currentCharges;
-        if (periodDue.amount > expectedBase && interestAmount === 0) {
+        if (periodDue.amount > expectedBase) {
           interestAmount = round2(periodDue.amount - expectedBase);
         }
       }
