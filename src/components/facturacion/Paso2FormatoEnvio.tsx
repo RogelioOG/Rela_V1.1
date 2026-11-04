@@ -7,6 +7,7 @@ import { Unit, Due, PaymentAgreement, DiscountTier } from '@/lib/supabase';
 import { Organization, supabase } from '@/lib/supabase';
 import { Card, CardBody } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { formatCOP, formatShortDate } from '@/lib/format';
@@ -148,7 +149,6 @@ function buildPdfHtml(
   const orgPhone = org?.phone || '';
   const orgEmail = org?.email || '';
 
-  // Usamos estrictamente la fecha parametrizada en el registro de la cuenta (due) o los respaldos recibidos
   const resolvedIssueDate = row.due?.created_at ? row.due.created_at.slice(0, 10) : issueDateStr;
   const resolvedDueDate = row.due?.due_date ? row.due.due_date : dueDateStr;
 
@@ -385,7 +385,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
           .eq('period', billingPeriod);
 
         if (existingDues && existingDues.length > 0) {
-          // Tomamos la fecha real de vencimiento guardada en el primer due existente para mantenerla sincronizada
           if (existingDues[0]?.due_date) {
             setDueDate(existingDues[0].due_date);
           }
@@ -731,7 +730,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         </div>
       )}
 
-      {/* Tarjeta de Parámetros de Fechas (Eliminada por completo si ya está facturado/finalizado) */}
+      {/* Tarjeta de Parámetros de Fechas (Oculta si ya está facturado) */}
       {!isFinalized && (
         <Card>
           <div className="px-6 py-4 border-b border-gray-200">
