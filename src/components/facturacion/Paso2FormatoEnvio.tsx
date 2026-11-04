@@ -385,7 +385,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         const baseSeq = docConfig?.next_consecutive || 1;
         setCurrentNextSeq(baseSeq);
 
-        // Consultamos directamente de la nueva tabla inmutable invoices
         const { data: existingInvoices } = await supabase
           .from('invoices')
           .select('*')
@@ -404,15 +403,17 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             const matchingRow = liquidation.find(r => r.unit.id === inv.unit_id);
             const fallbackUnit = matchingRow ? matchingRow.unit : { id: inv.unit_id, unit_label: 'S/N', tower: '', organization_id: org.id, coefficient: 0, is_active: true };
 
-            const reconstructedRow: LiquidationRow = matchingRow ? { ...matchingRow } : {
-              unit: fallbackUnit,
+            const reconstructedRow: LiquidationRow = {
+              unit: matchingRow ? matchingRow.unit : fallbackUnit,
               priorBalance: 0,
               currentCharges: Number(inv.subtotal) || 0,
-              chargeLines: Array.isArray(inv.items_snapshot) ? inv.items_snapshot : [],
+              chargeLines: Array.isArray(inv.items_snapshot) && inv.items_snapshot.length > 0 ? inv.items_snapshot : (matchingRow?.chargeLines || []),
               interestAmount: Number(inv.interest_amount) || 0,
               discountAmount: Number(inv.discount_amount) || 0,
               netTotal: Number(inv.total_amount) || 0,
               rowId: inv.id,
+              due: matchingRow?.due,
+              interestRate: matchingRow?.interestRate || 0,
             };
 
             return {
@@ -432,8 +433,12 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     checkExistingPeriodState();
   }, [org, billingPeriod, liquidation]);
 
+  const activeRows = useMemo(() => {
+    return isFinalized ? generatedInvoices.map(i => i.row) : liquidation;
+  }, [isFinalized, generatedInvoices, liquidation]);
+
   const recipients: Recipient[] = useMemo(() => {
-    return liquidation.map(row => {
+    return activeRows.map(row => {
       const email = (row.unit.owner_name || '').toLowerCase().replace(/[^a-z0-9]/g, '.');
       const safeEmail = email ? `${email}@email.com` : '';
       return {
@@ -445,7 +450,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         total: row.netTotal,
       };
     });
-  }, [liquidation]);
+  }, [activeRows]);
 
   function toggleSelected(rowId: string) {
     setSelected(prev => {
@@ -476,12 +481,10 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
   }
 
   function downloadSelectedConsolidated() {
-    const rows = isFinalized 
-      ? generatedInvoices.filter(i => selected.has(i.id)).map(i => i.row)
-      : liquidation.filter(r => selected.has(r.rowId || r.due?.id));
+    const rows = activeRows.filter(r => selected.has(r.rowId || r.due?.id));
     if (rows.length === 0) { setError('Seleccione al menos una cuenta para descargar el PDF consolidado.'); return; }
     const pages = rows.map((r, idx) => {
-      const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
+      const invNum = isFinalized ? (generatedInvoices.find(i => i.row.rowId === r.rowId)?.invoiceNumber || `CC-${String(currentNextSeq + idx).padStart(4, '0')}`) : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
       const resolvedIssue = r.due?.created_at ? r.due.created_at.slice(0, 10) : issueDate;
       const resolvedDue = r.due?.due_date ? r.due.due_date : dueDate;
       return buildPdfHtml(r, template, org, billingPeriod, agreements, invNum, discountTiers, resolvedIssue, resolvedDue);
@@ -492,7 +495,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
   function downloadSelectedIndividual() {
     const targets = isFinalized
-      ? generatedInvoices.filter(i => selected.has(i.id))
+      ? generatedInvoices.filter(i => selected.has(i.row.rowId))
       : liquidation.filter(r => selected.has(r.rowId || r.due?.id)).map((r, idx) => ({ id: r.rowId, invoiceNumber: `CC-${String(currentNextSeq + idx).padStart(4, '0')}`, row: r }));
     if (targets.length === 0) { setError('Seleccione al menos una cuenta para descargar.'); return; }
     targets.forEach((t, idx) => {
@@ -556,7 +559,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
           if (tpMatch) assignedThirdPartyId = tpMatch.id;
         }
 
-        // 1. Insertar en la tabla dues
         await supabase.from('dues').insert({
           organization_id: org.id,
           unit_id: row.unit.id,
@@ -567,7 +569,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
           due_date: periodEndDate,
         });
 
-        // 2. Preparar el snapshot de los ítems exactos de esta cuenta de cobro
         const snapshotItems = row.chargeLines && row.chargeLines.length > 0 ? row.chargeLines : [
           { conceptName: 'Cuota de Administración / Cargos', amount: row.currentCharges }
         ];
@@ -575,8 +576,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         const cleanCharges = getCleanChargeLinesAmount(row);
         const grossTotal = round2(cleanCharges + (row.priorBalance || 0) + (row.interestAmount || 0));
 
-        // 3. Insertar la "fotografía" inmutable en la nueva tabla invoices
-        const { data: invRecord, error: invErr } = await supabase.from('invoices').insert({
+        const { data: invRecord } = await supabase.from('invoices').insert({
           organization_id: org.id,
           unit_id: row.unit.id,
           period: billingPeriod,
@@ -592,9 +592,14 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         }).select().single();
 
         const assignedInvoiceId = invRecord?.id || rowId;
-        batchInvoices.push({ id: assignedInvoiceId, invoiceNumber, row });
 
-        // 4. Asientos contables automáticos
+        const reconstructedRow: LiquidationRow = {
+          ...row,
+          rowId: assignedInvoiceId,
+        };
+
+        batchInvoices.push({ id: assignedInvoiceId, invoiceNumber, row: reconstructedRow });
+
         const { data: je, error: jeErr } = await supabase.from('journal_entries').insert({
           organization_id: org.id,
           date: periodStartDate,
@@ -715,7 +720,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
         const countToDelete = duesToDelete?.length || 0;
 
-        // Borramos de dues e invoices simultáneamente
         await supabase.from('dues').delete().eq('organization_id', org.id).eq('period', billingPeriod);
         await supabase.from('invoices').delete().eq('organization_id', org.id).eq('period', billingPeriod);
         
@@ -872,7 +876,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             <Button variant="ghost" size="sm" onClick={clearSelection} disabled={selectedCount === 0}>Limpiar</Button>
           </div>
         </div>
-        {liquidation.length === 0 ? (
+        {activeRows.length === 0 ? (
           <div className="text-center py-12">
             <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gray-100 mb-3">
               <FileText className="w-7 h-7 text-gray-400" />
@@ -887,8 +891,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3 w-10">
                     <input
                       type="checkbox"
-                      checked={selectedCount === liquidation.length && liquidation.length > 0}
-                      onChange={() => selectedCount === liquidation.length ? clearSelection() : selectAllVisible()}
+                      checked={selectedCount === activeRows.length && activeRows.length > 0}
+                      onChange={() => selectedCount === activeRows.length ? clearSelection() : selectAllVisible()}
                       className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                     />
                   </th>
@@ -900,9 +904,9 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {liquidation.map((row, idx) => {
+                {activeRows.map((row, idx) => {
                   const rowId = row.rowId || row.due?.id || idx;
-                  const invNum = isFinalized ? (generatedInvoices[idx]?.invoiceNumber || `CC-${String(currentNextSeq - liquidation.length + idx).padStart(4, '0')}`) : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
+                  const invNum = isFinalized ? (generatedInvoices[idx]?.invoiceNumber || `CC-${String(idx + 1).padStart(4, '0')}`) : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
                   
                   const cleanCharges = getCleanChargeLinesAmount(row);
                   const grossTotal = round2(cleanCharges + (row.priorBalance || 0) + (row.interestAmount || 0));
@@ -974,7 +978,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             </table>
           </div>
         )}
-        {liquidation.length > 0 && (
+        {activeRows.length > 0 && (
           <div className="px-6 py-4 border-t border-gray-200 flex flex-wrap items-center gap-3 bg-gray-50">
             <span className="text-sm text-gray-600">{selectedCount} seleccionada(s)</span>
             <div className="flex-1" />
