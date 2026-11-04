@@ -366,7 +366,6 @@ export default function ProcesoFacturacionPage() {
       let interestAmount = unitInterestMap.get(unit.id) || 0;
       const periodDue = dues.find(d => d.unit_id === unit.id && d.period === billingPeriod) || null;
 
-      // Si el periodo ya está finalizado (o tiene un due registrado), recuperamos intereses si el monto guardado es mayor
       if (periodDue) {
         const expectedBase = priorBalance + currentCharges;
         if (periodDue.amount > expectedBase && interestAmount === 0) {
@@ -923,51 +922,7 @@ export default function ProcesoFacturacionPage() {
           {currentStep === 3 && (
             <div className="space-y-6">
               <Paso2FormatoEnvio
-                liquidation={liquidation.map(r => {
-                  const lines = [...r.chargeLines];
-                  if (r.interestAmount > 0) {
-                    const moraConcept = concepts.find(c => c.code === 'MORA_ADM' || c.code?.includes('MORA') || c.name?.toLowerCase().includes('interés'));
-                    lines.push({
-                      conceptId: moraConcept ? moraConcept.id : 'interest-mora-id',
-                      conceptName: moraConcept ? moraConcept.name : `Interés de Mora (${r.interestRate.toFixed(2)}%)`,
-                      conceptCode: moraConcept ? moraConcept.code : 'IM',
-                      amount: r.interestAmount,
-                      isQuota: false,
-                      isNovelty: false,
-                    });
-                  }
-
-                  const grossTotal = round2(r.currentCharges + r.priorBalance + r.interestAmount);
-
-                  return {
-                    due: r.due || ({ 
-                      id: r.rowId, 
-                      organization_id: activeOrg.id, 
-                      unit_id: r.unit.id, 
-                      type: 'ordinaria' as const, 
-                      period: billingPeriod, 
-                      due_date: new Date().toISOString().slice(0, 10), 
-                      amount: grossTotal, 
-                      interest_rate: r.interestRate, 
-                      balance: r.priorBalance, 
-                      status: 'pendiente' as const, 
-                      created_at: '' 
-                    }) as Due,
-                    unit: r.unit,
-                    daysLate: r.daysLate,
-                    interestRate: r.interestRate,
-                    priorBalance: r.priorBalance,
-                    currentCharges: r.currentCharges,
-                    chargeLines: lines,
-                    interestAmount: r.interestAmount,
-                    discountAmount: r.discountAmount,
-                    customTierDiscounts: r.customTierDiscounts,
-                    netTotal: r.netTotal,
-                    totalWithInterest: grossTotal,
-                    baseAmount: r.currentCharges,
-                    rowId: r.rowId,
-                  };
-                })}
+                liquidation={liquidation}
                 agreements={[...agreements, ...defaultedAgreements]}
                 org={activeOrg}
                 billingPeriod={billingPeriod}
