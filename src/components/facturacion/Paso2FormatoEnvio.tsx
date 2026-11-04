@@ -585,6 +585,27 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
+          // Incluir también el interés de mora en las líneas contables si existe
+          if (row.interestAmount > 0) {
+            const interestAccId = defaultIncomeAcc?.id; // O cuenta de ingresos por intereses
+            if (defaultReceivableAcc?.id && interestAccId) {
+              linesToInsert.push({
+                journal_entry_id: je.id,
+                account_id: defaultReceivableAcc.id,
+                debit: row.interestAmount,
+                credit: 0,
+                third_party_id: assignedThirdPartyId,
+              });
+              linesToInsert.push({
+                journal_entry_id: je.id,
+                account_id: interestAccId,
+                debit: 0,
+                credit: row.interestAmount,
+                third_party_id: assignedThirdPartyId,
+              });
+            }
+          }
+
           if (linesToInsert.length === 0 && row.currentCharges > 0) {
             const debitAccId = defaultReceivableAcc?.id;
             const creditAccId = defaultIncomeAcc?.id;
@@ -830,8 +851,11 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                 {liquidation.map((row, idx) => {
                   const rowId = row.rowId || row.due?.id || idx;
                   const invNum = isFinalized ? (generatedInvoices[idx]?.invoiceNumber || `CC-${String(currentNextSeq - liquidation.length + idx).padStart(4, '0')}`) : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
+                  
+                  // Incluimos explícitamente los intereses de mora calculados en el grossTotal y desglose
                   const cleanCharges = getCleanChargeLinesAmount(row);
-                  const grossTotal = round2(cleanCharges + row.priorBalance + row.interestAmount);
+                  const grossTotal = round2(cleanCharges + row.priorBalance + (row.interestAmount || 0));
+                  
                   const allDiscounts = computeAllTierDiscounts(row, discountTiers);
                   const firstDiscount = allDiscounts[0];
 
@@ -859,8 +883,9 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                             if (line.conceptCode?.toUpperCase().includes('MORA') || line.conceptName.toLowerCase().includes('interés de mora')) return null;
                             return <li key={lIdx}>• {line.conceptName}: {formatCOP(line.amount)}</li>;
                           })}
+                          {/* CORRECCIÓN: Mostrar explícitamente el interés de mora calculado en la tabla */}
                           {row.interestAmount > 0 && (
-                            <li className="text-amber-600">• Int. Mora ({row.interestRate.toFixed(2)}%): {formatCOP(row.interestAmount)}</li>
+                            <li className="text-amber-600 font-medium">• Interés de Mora ({row.interestRate.toFixed(2)}%): {formatCOP(row.interestAmount)}</li>
                           )}
                           {firstDiscount && firstDiscount.discountVal > 0 && (
                             <li className="text-green-600 font-medium">• Descuento Escalón 1: -{formatCOP(firstDiscount.discountVal)}</li>
@@ -1036,7 +1061,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               <div className="border-t pt-2 space-y-2">
                 <div className="flex justify-between font-extrabold text-base text-blue-900 bg-blue-50 p-2 rounded">
                   <span>VALOR A PAGAR (SIN DESCUENTO):</span>
-                  <span>{formatCOP(round2(getCleanChargeLinesAmount(previewRow) + previewRow.priorBalance + previewRow.interestAmount))}</span>
+                  <span>{formatCOP(round2(getCleanChargeLinesAmount(previewRow) + previewRow.priorBalance + (previewRow.interestAmount || 0)))}</span>
                 </div>
 
                 {computeAllTierDiscounts(previewRow, discountTiers).map(d => (
