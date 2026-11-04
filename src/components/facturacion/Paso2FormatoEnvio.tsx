@@ -13,19 +13,20 @@ import { Modal } from '@/components/ui/Modal';
 import { formatCOP, formatShortDate } from '@/lib/format';
 
 export interface ChargeLine {
-  conceptId: string;
-  conceptName: string;
-  conceptCode: string;
+  conceptId?: string;
+  conceptName?: string;
+  conceptCode?: string;
+  name?: string;
   amount: number;
-  isQuota: boolean;
-  isNovelty: boolean;
+  isQuota?: boolean;
+  isNovelty?: boolean;
 }
 
 export interface LiquidationRow {
-  due: Due;
+  due?: Due;
   unit: Unit;
-  daysLate: number;
-  interestRate: number;
+  daysLate?: number;
+  interestRate?: number;
   priorBalance: number;
   currentCharges: number;
   chargeLines: ChargeLine[];
@@ -33,8 +34,8 @@ export interface LiquidationRow {
   discountAmount: number;
   customTierDiscounts?: Record<string, number>;
   netTotal: number;
-  totalWithInterest: number;
-  baseAmount: number;
+  totalWithInterest?: number;
+  baseAmount?: number;
   rowId: string;
 }
 
@@ -79,7 +80,8 @@ export interface CalculatedDiscount {
 
 function getCleanChargeLinesAmount(row: LiquidationRow): number {
   const linesTotal = (row.chargeLines || []).reduce((s, l) => s + (Number(l.amount) || 0), 0);
-  return round2(linesTotal > 0 ? linesTotal : (row.currentCharges || 0));
+  if (linesTotal > 0) return round2(linesTotal);
+  return round2(row.currentCharges || 0);
 }
 
 function computeAllTierDiscounts(row: LiquidationRow, discountTiers: DiscountTier[]): CalculatedDiscount[] {
@@ -112,7 +114,7 @@ function computeAllTierDiscounts(row: LiquidationRow, discountTiers: DiscountTie
       if (tier.discount_type === 'porcentaje') {
         const baseConceptIds = tier.calculation_base_concept_ids;
         const base = baseConceptIds && baseConceptIds.length > 0
-          ? round2((row.chargeLines || []).filter(l => baseConceptIds.includes(l.conceptId)).reduce((s, l) => s + l.amount, 0))
+          ? round2((row.chargeLines || []).filter(l => l.conceptId && baseConceptIds.includes(l.conceptId)).reduce((s, l) => s + l.amount, 0))
           : cleanCharges;
         val = round2(base * discountValueNum / 100);
       } else {
@@ -198,9 +200,10 @@ function buildPdfHtml(
 
   if (row.chargeLines && row.chargeLines.length > 0) {
     for (const line of row.chargeLines) {
+      const name = line.conceptName || line.name || 'Concepto';
       comparativeRowsHtml += `
         <tr>
-          <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#334155;">${line.conceptName || 'Concepto'}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#334155;">${name}</td>
           <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#64748b;">$ 0</td>
           <td style="padding:6px 10px;border-bottom:1px solid #f1f5f9;color:#0f172a;">${formatCOP(line.amount)}</td>
           <td style="text-align:right;padding:6px 10px;border-bottom:1px solid #f1f5f9;font-weight:600;color:#0f172a;">${formatCOP(line.amount)}</td>
@@ -882,10 +885,10 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                           )}
                           {row.chargeLines && row.chargeLines.length > 0 ? (
                             row.chargeLines.map((line, lIdx) => (
-                              <li key={lIdx}>• {line.conceptName || 'Concepto'}: {formatCOP(line.amount)}</li>
+                              <li key={lIdx}>• {line.conceptName || line.name || 'Concepto'}: {formatCOP(line.amount)}</li>
                             ))
                           ) : (
-                            row.currentCharges > 0 && <li>• Cuota de Administración: {formatCOP(row.currentCharges)}</li>
+                            row.currentCharges > 0 && <li>• Cuota de Administración / Cargos: {formatCOP(row.currentCharges)}</li>
                           )}
                           {row.interestAmount > 0 && (
                             <li className="text-amber-600 font-medium">• Interés de Mora ({(row.interestRate || 0).toFixed(2)}%): {formatCOP(row.interestAmount)}</li>
@@ -1040,7 +1043,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                       {previewRow.chargeLines && previewRow.chargeLines.length > 0 ? (
                         previewRow.chargeLines.map((line, lIdx) => (
                           <tr key={lIdx}>
-                            <td className="p-2">{line.conceptName || 'Concepto'}</td>
+                            <td className="p-2">{line.conceptName || line.name || 'Concepto'}</td>
                             <td className="p-2 text-gray-400">$ 0</td>
                             <td className="p-2">{formatCOP(line.amount)}</td>
                             <td className="p-2 text-right font-medium">{formatCOP(line.amount)}</td>
@@ -1049,7 +1052,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                       ) : (
                         previewRow.currentCharges > 0 && (
                           <tr>
-                            <td className="p-2">Cuota de Administración</td>
+                            <td className="p-2">Cuota de Administración / Cargos</td>
                             <td className="p-2 text-gray-400">$ 0</td>
                             <td className="p-2">{formatCOP(previewRow.currentCharges)}</td>
                             <td className="p-2 text-right font-medium">{formatCOP(previewRow.currentCharges)}</td>
