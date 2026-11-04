@@ -37,6 +37,7 @@ export interface LiquidationRow {
   totalWithInterest?: number;
   baseAmount?: number;
   rowId: string;
+  invoiceNumber?: string; // <-- Guardamos el consecutivo real aquí
   issueDate?: string;
   dueDate?: string;
 }
@@ -150,7 +151,6 @@ function buildPdfHtml(
   const orgPhone = org?.phone || '';
   const orgEmail = org?.email || '';
 
-  // Usamos prioritariamente la fecha guardada en la fila (row.issueDate / row.dueDate)
   const resolvedIssueDate = row.issueDate || issueDateStr;
   const resolvedDueDate = row.dueDate || dueDateStr;
 
@@ -392,7 +392,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
           .from('invoices')
           .select('*')
           .eq('organization_id', org.id)
-          .eq('period', billingPeriod);
+          .eq('period', billingPeriod)
+          .order('invoice_number', { ascending: true });
 
         if (existingInvoices && existingInvoices.length > 0) {
           if (existingInvoices[0]?.due_date) {
@@ -415,10 +416,11 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               discountAmount: Number(inv.discount_amount) || 0,
               netTotal: Number(inv.total_amount) || 0,
               rowId: inv.id,
+              invoiceNumber: inv.invoice_number, // Consecutivo real guardado
+              issueDate: inv.issue_date,
+              dueDate: inv.due_date,
               due: matchingRow?.due,
               interestRate: matchingRow?.interestRate || 0,
-              issueDate: inv.issue_date, // Cargamos la fecha de emisión guardada
-              dueDate: inv.due_date,         // Cargamos la fecha de vencimiento guardada
             };
 
             return {
@@ -468,17 +470,21 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
   function selectAllVisible() { setSelected(new Set(recipients.map(r => r.rowId))); }
   function clearSelection() { setSelected(new Set()); }
 
-  function handlePreview(row: LiquidationRow) { setPreviewRow(row); }
+  function handlePreview(row: LiquidationRow, idx: number) {
+    setPreviewRow(row);
+  }
 
   function openPreviewPdf() {
     if (!previewRow) return;
+    const invNum = previewRow.invoiceNumber || (isFinalized ? generatedInvoices.find(i => i.row.rowId === previewRow.rowId)?.invoiceNumber : `CC-${String(currentNextSeq).padStart(4, '0')}`) || 'CC-0061';
     const resolvedIssue = previewRow.issueDate || issueDate;
     const resolvedDue = previewRow.dueDate || dueDate;
-    const html = buildPdfHtml(previewRow, template, org, billingPeriod, agreements, `CC-${String(currentNextSeq).padStart(4, '0')}`, discountTiers, resolvedIssue, resolvedDue);
+    const html = buildPdfHtml(previewRow, template, org, billingPeriod, agreements, invNum, discountTiers, resolvedIssue, resolvedDue);
     openPrintWindow(html);
   }
 
-  function downloadSingle(row: LiquidationRow, invNum = `CC-${String(currentNextSeq).padStart(4, '0')}`) {
+  function downloadSingle(row: LiquidationRow, idx: number) {
+    const invNum = row.invoiceNumber || (isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`) || `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
     const resolvedIssue = row.issueDate || issueDate;
     const resolvedDue = row.dueDate || dueDate;
     const html = buildPdfHtml(row, template, org, billingPeriod, agreements, invNum, discountTiers, resolvedIssue, resolvedDue);
@@ -488,8 +494,9 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
   function downloadSelectedConsolidated() {
     const rows = activeRows.filter(r => selected.has(r.rowId || r.due?.id));
     if (rows.length === 0) { setError('Seleccione al menos una cuenta para descargar el PDF consolidado.'); return; }
-    const pages = rows.map((r, idx) => {
-      const invNum = isFinalized ? (generatedInvoices.find(i => i.row.rowId === r.rowId)?.invoiceNumber || `CC-${String(currentNextSeq + idx).padStart(4, '0')}`) : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
+    const pages = rows.map((r) => {
+      const foundInv = generatedInvoices.find(i => i.row.rowId === r.rowId);
+      const invNum = r.invoiceNumber || foundInv?.invoiceNumber || 'CC-0061';
       const resolvedIssue = r.issueDate || issueDate;
       const resolvedDue = r.dueDate || dueDate;
       return buildPdfHtml(r, template, org, billingPeriod, agreements, invNum, discountTiers, resolvedIssue, resolvedDue);
@@ -501,13 +508,15 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
   function downloadSelectedIndividual() {
     const targets = isFinalized
       ? generatedInvoices.filter(i => selected.has(i.row.rowId))
-      : liquidation.filter(r => selected.has(r.rowId || r.due?.id)).map((r, idx) => ({ id: r.rowId, invoiceNumber: `CC-${String(currentNextSeq + idx).padStart(4, '0')}`, row: r }));
+      : liquidation.map((r, idx) => ({ id: r.rowId, invoiceNumber: `CC-${String(currentNextSeq + idx).padStart(4, '0')}`, row: r })).filter(t => selected.has(t.row.rowId));
+    
     if (targets.length === 0) { setError('Seleccione al menos una cuenta para descargar.'); return; }
     targets.forEach((t, idx) => {
       setTimeout(() => {
+        const invNum = t.row.invoiceNumber || t.invoiceNumber;
         const resolvedIssue = t.row.issueDate || issueDate;
         const resolvedDue = t.row.dueDate || dueDate;
-        const html = buildPdfHtml(t.row, template, org, billingPeriod, agreements, t.invoiceNumber, discountTiers, resolvedIssue, resolvedDue);
+        const html = buildPdfHtml(t.row, template, org, billingPeriod, agreements, invNum, discountTiers, resolvedIssue, resolvedDue);
         openPrintWindow(html);
       }, idx * 600);
     });
@@ -601,6 +610,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         const reconstructedRow: LiquidationRow = {
           ...row,
           rowId: assignedInvoiceId,
+          invoiceNumber: invoiceNumber, // Asignamos el consecutivo real
           issueDate: periodStartDate,
           dueDate: periodEndDate,
         };
@@ -913,7 +923,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               <tbody className="divide-y divide-gray-100">
                 {activeRows.map((row, idx) => {
                   const rowId = row.rowId || row.due?.id || idx;
-                  const invNum = isFinalized ? (generatedInvoices[idx]?.invoiceNumber || `CC-${String(idx + 1).padStart(4, '0')}`) : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
+                  const invNum = row.invoiceNumber || (isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`) || `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
                   
                   const cleanCharges = getCleanChargeLinesAmount(row);
                   const grossTotal = round2(cleanCharges + (row.priorBalance || 0) + (row.interestAmount || 0));
@@ -970,10 +980,10 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                       </td>
                       <td className="px-4 py-3 text-center">
                         <div className="flex items-center justify-center gap-1">
-                          <button onClick={() => handlePreview(row)} className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50" title="Ver PDF">
+                          <button onClick={() => handlePreview(row, idx)} className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50" title="Ver PDF">
                             <Eye className="w-4 h-4" />
                           </button>
-                          <button onClick={() => downloadSingle(row, invNum)} className="p-1.5 rounded-lg text-gray-400 hover:text-green-600 hover:bg-green-50" title="Descargar PDF">
+                          <button onClick={() => downloadSingle(row, idx)} className="p-1.5 rounded-lg text-gray-400 hover:text-green-600 hover:bg-green-50" title="Descargar PDF">
                             <Download className="w-4 h-4" />
                           </button>
                         </div>
