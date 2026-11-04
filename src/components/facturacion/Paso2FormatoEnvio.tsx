@@ -37,6 +37,8 @@ export interface LiquidationRow {
   totalWithInterest?: number;
   baseAmount?: number;
   rowId: string;
+  issueDate?: string;
+  dueDate?: string;
 }
 
 interface Recipient {
@@ -148,8 +150,9 @@ function buildPdfHtml(
   const orgPhone = org?.phone || '';
   const orgEmail = org?.email || '';
 
-  const resolvedIssueDate = row.due?.created_at ? row.due.created_at.slice(0, 10) : issueDateStr;
-  const resolvedDueDate = row.due?.due_date ? row.due.due_date : dueDateStr;
+  // Usamos prioritariamente la fecha guardada en la fila (row.issueDate / row.dueDate)
+  const resolvedIssueDate = row.issueDate || issueDateStr;
+  const resolvedDueDate = row.dueDate || dueDateStr;
 
   const issueDateFormatted = resolvedIssueDate ? formatShortDate(resolvedIssueDate) : formatShortDate(new Date().toISOString());
   const dueDateFormatted = resolvedDueDate ? formatShortDate(resolvedDueDate) : 'N/A';
@@ -414,6 +417,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               rowId: inv.id,
               due: matchingRow?.due,
               interestRate: matchingRow?.interestRate || 0,
+              issueDate: inv.issue_date, // Cargamos la fecha de emisión guardada
+              dueDate: inv.due_date,         // Cargamos la fecha de vencimiento guardada
             };
 
             return {
@@ -467,15 +472,15 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
   function openPreviewPdf() {
     if (!previewRow) return;
-    const resolvedIssue = previewRow.due?.created_at ? previewRow.due.created_at.slice(0, 10) : issueDate;
-    const resolvedDue = previewRow.due?.due_date ? previewRow.due.due_date : dueDate;
+    const resolvedIssue = previewRow.issueDate || issueDate;
+    const resolvedDue = previewRow.dueDate || dueDate;
     const html = buildPdfHtml(previewRow, template, org, billingPeriod, agreements, `CC-${String(currentNextSeq).padStart(4, '0')}`, discountTiers, resolvedIssue, resolvedDue);
     openPrintWindow(html);
   }
 
   function downloadSingle(row: LiquidationRow, invNum = `CC-${String(currentNextSeq).padStart(4, '0')}`) {
-    const resolvedIssue = row.due?.created_at ? row.due.created_at.slice(0, 10) : issueDate;
-    const resolvedDue = row.due?.due_date ? row.due.due_date : dueDate;
+    const resolvedIssue = row.issueDate || issueDate;
+    const resolvedDue = row.dueDate || dueDate;
     const html = buildPdfHtml(row, template, org, billingPeriod, agreements, invNum, discountTiers, resolvedIssue, resolvedDue);
     openPrintWindow(html);
   }
@@ -485,8 +490,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     if (rows.length === 0) { setError('Seleccione al menos una cuenta para descargar el PDF consolidado.'); return; }
     const pages = rows.map((r, idx) => {
       const invNum = isFinalized ? (generatedInvoices.find(i => i.row.rowId === r.rowId)?.invoiceNumber || `CC-${String(currentNextSeq + idx).padStart(4, '0')}`) : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
-      const resolvedIssue = r.due?.created_at ? r.due.created_at.slice(0, 10) : issueDate;
-      const resolvedDue = r.due?.due_date ? r.due.due_date : dueDate;
+      const resolvedIssue = r.issueDate || issueDate;
+      const resolvedDue = r.dueDate || dueDate;
       return buildPdfHtml(r, template, org, billingPeriod, agreements, invNum, discountTiers, resolvedIssue, resolvedDue);
     }).join('<div style="page-break-after:always;"></div>');
     const html = `<html><head><meta charset="utf-8"><title>Cuentas de Cobro Consolidadas - ${billingPeriod}</title></head><body>${pages}</body></html>`;
@@ -500,8 +505,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
     if (targets.length === 0) { setError('Seleccione al menos una cuenta para descargar.'); return; }
     targets.forEach((t, idx) => {
       setTimeout(() => {
-        const resolvedIssue = t.row.due?.created_at ? t.row.due.created_at.slice(0, 10) : issueDate;
-        const resolvedDue = t.row.due?.due_date ? t.row.due.due_date : dueDate;
+        const resolvedIssue = t.row.issueDate || issueDate;
+        const resolvedDue = t.row.dueDate || dueDate;
         const html = buildPdfHtml(t.row, template, org, billingPeriod, agreements, t.invoiceNumber, discountTiers, resolvedIssue, resolvedDue);
         openPrintWindow(html);
       }, idx * 600);
@@ -596,6 +601,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         const reconstructedRow: LiquidationRow = {
           ...row,
           rowId: assignedInvoiceId,
+          issueDate: periodStartDate,
+          dueDate: periodEndDate,
         };
 
         batchInvoices.push({ id: assignedInvoiceId, invoiceNumber, row: reconstructedRow });
@@ -1060,8 +1067,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   <p className="text-xs text-gray-500">Periodo: {billingPeriod}</p>
                 </div>
                 <div className="text-right text-xs">
-                  <p><strong>Fecha Emisión:</strong> {previewRow.due?.created_at ? previewRow.due.created_at.slice(0, 10) : issueDate}</p>
-                  <p className="text-red-600"><strong>Fecha Vencimiento:</strong> {previewRow.due?.due_date ? previewRow.due.due_date : dueDate}</p>
+                  <p><strong>Fecha Emisión:</strong> {previewRow.issueDate ? formatShortDate(previewRow.issueDate) : formatShortDate(issueDate)}</p>
+                  <p className="text-red-600"><strong>Fecha Vencimiento:</strong> {previewRow.dueDate ? formatShortDate(previewRow.dueDate) : formatShortDate(dueDate)}</p>
                 </div>
               </div>
               <div className="bg-gray-50 p-3 rounded">
