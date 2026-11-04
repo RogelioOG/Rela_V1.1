@@ -757,7 +757,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         </div>
       )}
 
-      {/* Tarjeta de Parámetros de Fechas (Oculta si ya está facturado) */}
       {!isFinalized && (
         <Card>
           <div className="px-6 py-4 border-b border-gray-200">
