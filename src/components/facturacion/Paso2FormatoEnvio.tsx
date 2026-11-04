@@ -7,7 +7,6 @@ import { Unit, Due, PaymentAgreement, DiscountTier } from '@/lib/supabase';
 import { Organization, supabase } from '@/lib/supabase';
 import { Card, CardBody } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
-import { Input } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { formatCOP, formatShortDate } from '@/lib/format';
@@ -149,8 +148,12 @@ function buildPdfHtml(
   const orgPhone = org?.phone || '';
   const orgEmail = org?.email || '';
 
-  const issueDateFormatted = issueDateStr ? formatShortDate(issueDateStr) : formatShortDate(new Date().toISOString());
-  const dueDateFormatted = dueDateStr ? formatShortDate(dueDateStr) : (row.due?.due_date ? formatShortDate(row.due.due_date) : 'N/A');
+  // Usamos estrictamente la fecha parametrizada en el registro de la cuenta (due) o los respaldos recibidos
+  const resolvedIssueDate = row.due?.created_at ? row.due.created_at.slice(0, 10) : issueDateStr;
+  const resolvedDueDate = row.due?.due_date ? row.due.due_date : dueDateStr;
+
+  const issueDateFormatted = resolvedIssueDate ? formatShortDate(resolvedIssueDate) : formatShortDate(new Date().toISOString());
+  const dueDateFormatted = resolvedDueDate ? formatShortDate(resolvedDueDate) : 'N/A';
 
   const unitAgreements = agreements.filter(a => a.unit_id === row.unit.id);
   const hasAgreement = unitAgreements.length > 0;
@@ -382,8 +385,16 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
           .eq('period', billingPeriod);
 
         if (existingDues && existingDues.length > 0) {
+          // Tomamos la fecha real de vencimiento guardada en el primer due existente para mantenerla sincronizada
+          if (existingDues[0]?.due_date) {
+            setDueDate(existingDues[0].due_date);
+          }
+          if (existingDues[0]?.created_at) {
+            setIssueDate(existingDues[0].created_at.slice(0, 10));
+          }
+
           const restoredInvoices = liquidation.map((row, idx) => ({
-            id: row.rowId || row.due.id,
+            id: row.rowId || row.due?.id,
             invoiceNumber: `CC-${String(baseSeq - existingDues.length + idx).padStart(4, '0')}`,
             row,
           }));
@@ -402,7 +413,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
       const email = (row.unit.owner_name || '').toLowerCase().replace(/[^a-z0-9]/g, '.');
       const safeEmail = email ? `${email}@email.com` : '';
       return {
-        rowId: row.rowId || row.due.id,
+        rowId: row.rowId || row.due?.id,
         unitId: row.unit.id,
         propertyName: `${row.unit.tower} ${row.unit.unit_label}`,
         ownerName: row.unit.owner_name || 'N/A',
@@ -427,23 +438,29 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
   function openPreviewPdf() {
     if (!previewRow) return;
-    const html = buildPdfHtml(previewRow, template, org, billingPeriod, agreements, `CC-${String(currentNextSeq).padStart(4, '0')}`, discountTiers, issueDate, dueDate);
+    const resolvedIssue = previewRow.due?.created_at ? previewRow.due.created_at.slice(0, 10) : issueDate;
+    const resolvedDue = previewRow.due?.due_date ? previewRow.due.due_date : dueDate;
+    const html = buildPdfHtml(previewRow, template, org, billingPeriod, agreements, `CC-${String(currentNextSeq).padStart(4, '0')}`, discountTiers, resolvedIssue, resolvedDue);
     openPrintWindow(html);
   }
 
   function downloadSingle(row: LiquidationRow, invNum = `CC-${String(currentNextSeq).padStart(4, '0')}`) {
-    const html = buildPdfHtml(row, template, org, billingPeriod, agreements, invNum, discountTiers, issueDate, dueDate);
+    const resolvedIssue = row.due?.created_at ? row.due.created_at.slice(0, 10) : issueDate;
+    const resolvedDue = row.due?.due_date ? row.due.due_date : dueDate;
+    const html = buildPdfHtml(row, template, org, billingPeriod, agreements, invNum, discountTiers, resolvedIssue, resolvedDue);
     openPrintWindow(html);
   }
 
   function downloadSelectedConsolidated() {
     const rows = isFinalized 
       ? generatedInvoices.filter(i => selected.has(i.id)).map(i => i.row)
-      : liquidation.filter(r => selected.has(r.rowId || r.due.id));
+      : liquidation.filter(r => selected.has(r.rowId || r.due?.id));
     if (rows.length === 0) { setError('Seleccione al menos una cuenta para descargar el PDF consolidado.'); return; }
     const pages = rows.map((r, idx) => {
       const invNum = isFinalized ? generatedInvoices[idx]?.invoiceNumber : `CC-${String(currentNextSeq + idx).padStart(4, '0')}`;
-      return buildPdfHtml(r, template, org, billingPeriod, agreements, invNum, discountTiers, issueDate, dueDate);
+      const resolvedIssue = r.due?.created_at ? r.due.created_at.slice(0, 10) : issueDate;
+      const resolvedDue = r.due?.due_date ? r.due.due_date : dueDate;
+      return buildPdfHtml(r, template, org, billingPeriod, agreements, invNum, discountTiers, resolvedIssue, resolvedDue);
     }).join('<div style="page-break-after:always;"></div>');
     const html = `<html><head><meta charset="utf-8"><title>Cuentas de Cobro Consolidadas - ${billingPeriod}</title></head><body>${pages}</body></html>`;
     if (!openPrintWindow(html)) setError('No se pudo abrir la ventana de impresión.');
@@ -452,11 +469,13 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
   function downloadSelectedIndividual() {
     const targets = isFinalized
       ? generatedInvoices.filter(i => selected.has(i.id))
-      : liquidation.filter(r => selected.has(r.rowId || r.due.id)).map((r, idx) => ({ id: r.rowId, invoiceNumber: `CC-${String(currentNextSeq + idx).padStart(4, '0')}`, row: r }));
+      : liquidation.filter(r => selected.has(r.rowId || r.due?.id)).map((r, idx) => ({ id: r.rowId, invoiceNumber: `CC-${String(currentNextSeq + idx).padStart(4, '0')}`, row: r }));
     if (targets.length === 0) { setError('Seleccione al menos una cuenta para descargar.'); return; }
     targets.forEach((t, idx) => {
       setTimeout(() => {
-        const html = buildPdfHtml(t.row, template, org, billingPeriod, agreements, t.invoiceNumber, discountTiers, issueDate, dueDate);
+        const resolvedIssue = t.row.due?.created_at ? t.row.due.created_at.slice(0, 10) : issueDate;
+        const resolvedDue = t.row.due?.due_date ? t.row.due.due_date : dueDate;
+        const html = buildPdfHtml(t.row, template, org, billingPeriod, agreements, t.invoiceNumber, discountTiers, resolvedIssue, resolvedDue);
         openPrintWindow(html);
       }, idx * 600);
     });
@@ -712,12 +731,12 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         </div>
       )}
 
-      {/* Tarjeta de Parámetros de Fechas (Oculta si ya está finalizado/facturado) */}
+      {/* Tarjeta de Parámetros de Fechas (Eliminada por completo si ya está facturado/finalizado) */}
       {!isFinalized && (
         <Card>
           <div className="px-6 py-4 border-b border-gray-200">
             <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-              <Calendar className="w-5 h-5 text-blue-600" />
+              <span className="w-2 h-2 rounded-full bg-blue-600"></span>
               Fechas del Documento de Facturación
             </h2>
             <p className="text-sm text-gray-500 mt-1">Defina la fecha de emisión y vencimiento que aparecerán en todas las Cuentas de Cobro.</p>
@@ -961,8 +980,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
                   <p className="text-xs text-gray-500">Periodo: {billingPeriod}</p>
                 </div>
                 <div className="text-right text-xs">
-                  <p><strong>Fecha Emisión:</strong> {issueDate}</p>
-                  <p className="text-red-600"><strong>Fecha Vencimiento:</strong> {dueDate}</p>
+                  <p><strong>Fecha Emisión:</strong> {previewRow.due?.created_at ? previewRow.due.created_at.slice(0, 10) : issueDate}</p>
+                  <p className="text-red-600"><strong>Fecha Vencimiento:</strong> {previewRow.due?.due_date ? previewRow.due.due_date : dueDate}</p>
                 </div>
               </div>
               <div className="bg-gray-50 p-3 rounded">
