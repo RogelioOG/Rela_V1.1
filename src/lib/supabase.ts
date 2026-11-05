@@ -229,6 +229,7 @@ export interface BillingConcept {
   maneja_descuento: boolean;
   discount_income_account_id: string | null;
   discount_counterpart_account_id: string | null;
+  advance_account_id: string | null;
   created_at: string;
   updated_at: string;
   income_account?: Account;
@@ -236,6 +237,7 @@ export interface BillingConcept {
   parent_concept?: BillingConcept;
   discount_income_account?: Account;
   discount_counterpart_account?: Account;
+  advance_account?: Account;
 }
 
 export interface Due {
@@ -397,4 +399,55 @@ export interface PeriodNovelty {
   billing_concept?: BillingConcept;
   units?: Unit;
   revenue_period?: RevenuePeriod;
+}
+
+export interface PaymentMethod {
+  id: string;
+  organization_id: string;
+  name: string;
+  account_id: string | null;
+  is_active: boolean;
+  created_at: string;
+  account?: Account;
+}
+
+export interface PaymentHierarchyConfig {
+  id: string;
+  organization_id: string;
+  concept_id: string;
+  priority_order: number | null;
+  created_at: string;
+  billing_concept?: BillingConcept;
+}
+
+export interface Receipt {
+  id: string;
+  organization_id: string;
+  unit_id: string;
+  receipt_number: string | null;
+  payment_date: string | null;
+  accounting_date: string | null;
+  payment_method_id: string | null;
+  total_amount: number | null;
+  applied_amount: number | null;
+  advance_amount: number;
+  notes: string | null;
+  status: string;
+  created_at: string;
+  units?: Unit;
+  payment_method?: PaymentMethod;
+  receipt_allocations?: ReceiptAllocation[];
+}
+
+export interface ReceiptAllocation {
+  id: string;
+  receipt_id: string;
+  due_id: string;
+  concept_id: string | null;
+  capital_applied: number;
+  interest_applied: number;
+  discount_applied: number;
+  created_at: string;
+  due?: Due;
+  billing_concept?: BillingConcept;
 }
