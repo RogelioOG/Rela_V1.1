@@ -112,6 +112,7 @@ export default function Layout({ children }: { children: ReactNode }) {
         items: [
           { to: '/cuentas', label: 'Plan de Cuentas', icon: BookOpen },
           { to: '/asientos', label: 'Asientos Contables', icon: FileText },
+          { to: '/tesoreria', label: 'Tesorería', icon: Wallet },
           { to: '/reportes', label: 'Reportes', icon: BarChart3 },
         ],
       });

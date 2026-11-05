@@ -24,6 +24,7 @@ import ProcesoFacturacionPage from '@/pages/facturacion/ProcesoFacturacionPage';
 import CuentasPage from '@/pages/CuentasPage';
 import AsientosPage from '@/pages/AsientosPage';
 import ReportesPage from '@/pages/ReportesPage';
+import TesoreriaPage from '@/pages/TesoreriaPage';
 import { Loader2 } from 'lucide-react';
 import { NoOrgSelected } from '@/components/shared';
 
@@ -128,6 +129,7 @@ function App() {
           <Route path="/cuentas" element={<ProtectedRoute><OrgAdminRoute><CuentasPage /></OrgAdminRoute></ProtectedRoute>} />
           <Route path="/asientos" element={<ProtectedRoute><OrgAdminRoute><AsientosPage /></OrgAdminRoute></ProtectedRoute>} />
           <Route path="/reportes" element={<ProtectedRoute><OrgAdminRoute><ReportesPage /></OrgAdminRoute></ProtectedRoute>} />
+          <Route path="/tesoreria" element={<ProtectedRoute><OrgAdminRoute><TesoreriaPage /></OrgAdminRoute></ProtectedRoute>} />
 
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
