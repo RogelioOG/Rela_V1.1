@@ -48,6 +48,8 @@ export function ReceiptForm() {
   const [hierarchy, setHierarchy] = useState<PaymentHierarchyConfig[]>([]);
   const [concepts, setConcepts] = useState<BillingConcept[]>([]);
   const [dues, setDues] = useState<Due[]>([]);
+  const [invoicesMap, setInvoicesMap] = useState<Record<string, any>>({});
+  
   const [header, setHeader] = useState<HeaderState>({
     unitId: '',
     paymentDate: today,
@@ -113,7 +115,6 @@ export function ReceiptForm() {
     const allConcepts = (conceptsRes.data || []) as BillingConcept[];
     setConcepts(allConcepts);
 
-    // Concepto predeterminado de anticipos
     const firstAdvanceConcept = allConcepts.find(c => (c as any).advance_account_id);
     if (firstAdvanceConcept) {
       setSelectedAdvanceConceptId(firstAdvanceConcept.id);
@@ -126,42 +127,55 @@ export function ReceiptForm() {
 
   const loadPendingDues = useCallback(async (unitId: string) => {
     if (!activeOrg) return;
-    const { data, error } = await supabase
-      .from('dues')
-      .select('*')
-      .eq('organization_id', activeOrg.id)
-      .eq('unit_id', unitId)
-      .in('status', ['pendiente', 'parcial'])
-      .order('due_date', { ascending: true });
+    const [duesRes, invoicesRes] = await Promise.all([
+      supabase
+        .from('dues')
+        .select('*')
+        .eq('organization_id', activeOrg.id)
+        .eq('unit_id', unitId)
+        .in('status', ['pendiente', 'parcial'])
+        .order('due_date', { ascending: true }),
+      supabase
+        .from('invoices')
+        .select('*')
+        .eq('organization_id', activeOrg.id)
+        .eq('unit_id', unitId)
+    ]);
 
-    if (error) {
+    if (duesRes.error) {
       setDuesError('No se pudieron cargar las obligaciones pendientes de la unidad.');
-      setDues([]);
+      setDues();
       return;
     }
+
+    const invMap: Record<string, any> = {};
+    (invoicesRes.data || []).forEach((inv: any) => {
+      invMap[inv.unit_id + '_' + inv.period] = inv;
+    });
+
+    setInvoicesMap(invMap);
     setDuesError('');
-    setDues((data || []) as Due[]);
+    setDues((duesRes.data || []) as Due[]);
   }, [activeOrg]);
 
   useEffect(() => {
     setDues([]);
+    setInvoicesMap({});
     setOverrides(null);
     if (!header.unitId) return;
     setLoadingDues(true);
     loadPendingDues(header.unitId).finally(() => setLoadingDues(false));
   }, [header.unitId, loadPendingDues]);
 
-  // Genera el desglose ordenado por Prioridad de Concepto y Antigüedad de Período
   const detailedItems = useMemo(() => {
-    return buildDetailedDueItems(dues, hierarchy, concepts);
-  }, [dues, hierarchy, concepts]);
+    return buildDetailedDueItems(dues, hierarchy, concepts, invoicesMap);
+  }, [dues, hierarchy, concepts, invoicesMap]);
 
   const totalNumber = parseAmount(header.total);
   const autoAllocation = useMemo(() => {
     return allocateReceipt(detailedItems, totalNumber);
   }, [detailedItems, totalNumber]);
 
-  // Si no hay edicion manual, usamos la sugerencia automatica
   const currentInputs = useMemo(() => {
     if (overrides) return overrides;
     const initial: DetailedAllocationInputs = {};
