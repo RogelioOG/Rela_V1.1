@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { FileText, Plus, Pencil, Trash2, Loader2, Layers, BookOpen, AlertTriangle, Sparkles, Percent } from 'lucide-react';
+import { FileText, Plus, Pencil, Trash2, Loader2, Layers, BookOpen, AlertTriangle, Sparkles, Percent, ArrowDownCircle } from 'lucide-react';
 import { supabase, BillingConcept, Account } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card } from '@/components/ui/Card';
@@ -24,6 +24,8 @@ interface FormState {
   maneja_descuento: boolean;
   discount_income_account_id: string;
   discount_counterpart_account_id: string;
+  maneja_anticipo: boolean;
+  advance_account_id: string;
 }
 
 const emptyForm: FormState = {
@@ -31,6 +33,7 @@ const emptyForm: FormState = {
   account_class: 'real', income_account_id: '', counterpart_account_id: '', third_account_id: '', is_active: true,
   causa_intereses: true, maneja_descuento: false,
   discount_income_account_id: '', discount_counterpart_account_id: '',
+  maneja_anticipo: false, advance_account_id: '',
 };
 
 export default function ConceptosPage() {
@@ -52,7 +55,7 @@ export default function ConceptosPage() {
     setLoading(true);
     const { data } = await supabase
       .from('billing_concepts')
-      .select('*, income_account:accounts!income_account_id(*), counterpart_account:accounts!counterpart_account_id(*), third_account:accounts!third_account_id(*), parent_concept:billing_concepts!parent_concept_id(*), discount_income_account:accounts!discount_income_account_id(*), discount_counterpart_account:accounts!discount_counterpart_account_id(*)')
+      .select('*, income_account:accounts!income_account_id(*), counterpart_account:accounts!counterpart_account_id(*), third_account:accounts!third_account_id(*), parent_concept:billing_concepts!parent_concept_id(*), discount_income_account:accounts!discount_income_account_id(*), discount_counterpart_account:accounts!discount_counterpart_account_id(*), advance_account:accounts!advance_account_id(*)')
       .eq('organization_id', activeOrg.id)
       .order('is_late_interest', { ascending: true })
       .order('name', { ascending: true });
@@ -73,6 +76,11 @@ export default function ConceptosPage() {
       return accounts.filter(a => ['activo', 'pasivo', 'patrimonio', 'ingreso', 'gasto', 'costo', 'costo_ventas'].includes(a.type));
     }
     return accounts.filter(a => ['orden_deudora', 'orden_acreedora'].includes(a.type));
+  }
+
+  // Filtrado específico para cuentas de pasivo (Clase 2 o tipo pasivo) destinadas a anticipos
+  function liabilityAccounts(): Account[] {
+    return accounts.filter(a => a.type === 'pasivo' || a.code.startsWith('2'));
   }
 
   function openCreate() {
@@ -98,6 +106,8 @@ export default function ConceptosPage() {
       maneja_descuento: c.maneja_descuento ?? false,
       discount_income_account_id: c.discount_income_account_id || '',
       discount_counterpart_account_id: c.discount_counterpart_account_id || '',
+      maneja_anticipo: !!(c as any).advance_account_id,
+      advance_account_id: (c as any).advance_account_id || '',
     });
     setError('');
     setModalOpen(true);
@@ -130,6 +140,7 @@ export default function ConceptosPage() {
       maneja_descuento: editing?.is_late_interest ? false : form.maneja_descuento,
       discount_income_account_id: form.discount_income_account_id || null,
       discount_counterpart_account_id: form.discount_counterpart_account_id || null,
+      advance_account_id: (!editing?.is_late_interest && form.maneja_anticipo) ? (form.advance_account_id || null) : null,
     };
 
     try {
@@ -281,7 +292,8 @@ export default function ConceptosPage() {
                         <div className="flex flex-wrap gap-1">
                           {c.causa_intereses && <Badge variant="yellow">Causa intereses</Badge>}
                           {c.maneja_descuento && <Badge variant="green">Con descuento</Badge>}
-                          {!c.causa_intereses && !c.maneja_descuento && <span className="text-xs text-gray-400">—</span>}
+                          {(c as any).advance_account_id && <Badge variant="blue">Maneja anticipo</Badge>}
+                          {!c.causa_intereses && !c.maneja_descuento && !(c as any).advance_account_id && <span className="text-xs text-gray-400">—</span>}
                         </div>
                       </td>
                       <td className="px-6 py-4"><Badge variant={c.is_active ? 'green' : 'gray'}>{c.is_active ? 'Activo' : 'Inactivo'}</Badge></td>
@@ -446,22 +458,48 @@ export default function ConceptosPage() {
             </div>
           )}
 
+          {/* Opciones adicionales (Solo para conceptos padre) */}
           {!editing?.is_late_interest && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-3 pt-2 border-t border-gray-200">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
+                  <input type="checkbox" checked={form.causa_intereses} onChange={(e) => setForm({ ...form, causa_intereses: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                  <div>
+                    <span className="text-sm font-medium text-gray-900">Causa Intereses de Mora</span>
+                    <p className="text-xs text-gray-500">Genera interés sobre saldos vencidos de este concepto.</p>
+                  </div>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
+                  <input type="checkbox" checked={form.maneja_descuento} onChange={(e) => setForm({ ...form, maneja_descuento: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                  <div>
+                    <span className="text-sm font-medium text-gray-900">Maneja Descuento</span>
+                    <p className="text-xs text-gray-500">Aplica descuento por pronto pago en este concepto.</p>
+                  </div>
+                </label>
+              </div>
+
+              {/* Opción de Anticipos / Saldos a favor */}
               <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
-                <input type="checkbox" checked={form.causa_intereses} onChange={(e) => setForm({ ...form, causa_intereses: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <input type="checkbox" checked={form.maneja_anticipo} onChange={(e) => setForm({ ...form, maneja_anticipo: e.target.checked, advance_account_id: e.target.checked ? form.advance_account_id : '' })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
                 <div>
-                  <span className="text-sm font-medium text-gray-900">Causa Intereses de Mora</span>
-                  <p className="text-xs text-gray-500">Genera interés sobre saldos vencidos de este concepto.</p>
+                  <span className="text-sm font-medium text-gray-900">Maneja Cuenta de Anticipos / Saldos a Favor</span>
+                  <p className="text-xs text-gray-500">Permite asociar la cuenta de pasivo donde se acreditarán los excedentes de pago de este concepto.</p>
                 </div>
               </label>
-              <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50">
-                <input type="checkbox" checked={form.maneja_descuento} onChange={(e) => setForm({ ...form, maneja_descuento: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
-                <div>
-                  <span className="text-sm font-medium text-gray-900">Maneja Descuento</span>
-                  <p className="text-xs text-gray-500">Aplica descuento por pronto pago en este concepto.</p>
-                </div>
-              </label>
+            </div>
+          )}
+
+          {/* Selector condicional para la cuenta de anticipos */}
+          {!editing?.is_late_interest && form.maneja_anticipo && (
+            <div className="rounded-lg bg-blue-50 border border-blue-200 px-4 py-4 space-y-3">
+              <p className="text-sm font-semibold text-blue-900 flex items-center gap-2"><ArrowDownCircle className="w-4 h-4" /> Parametrización de Cuenta para Anticipos</p>
+              <p className="text-xs text-blue-700">Seleccione la cuenta contable de pasivo (Clase 2) donde se registrarán los saldos a favor o anticipos generados por este concepto.</p>
+              <Select label="Cuenta Contable de Anticipos *" value={form.advance_account_id} onChange={(e) => setForm({ ...form, advance_account_id: e.target.value })}>
+                <option value="">— Seleccionar Cuenta de Pasivo —</option>
+                {liabilityAccounts().map(a => (
+                  <option key={a.id} value={a.id}>{a.code} — {a.name} ({accountTypeLabels[a.type]})</option>
+                ))}
+              </Select>
             </div>
           )}
 
@@ -478,7 +516,7 @@ export default function ConceptosPage() {
             </div>
           )}
 
-          <label className="flex items-center gap-2 cursor-pointer">
+          <label className="flex items-center gap-2 cursor-pointer pt-2">
             <input type="checkbox" checked={form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
             <span className="text-sm text-gray-700">Concepto activo</span>
           </label>
