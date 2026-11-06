@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Loader2, Printer, RotateCcw } from 'lucide-react';
-import { supabase, Due, PaymentHierarchyConfig, PaymentMethod, Unit } from '@/lib/supabase';
+import { supabase, Due, PaymentHierarchyConfig, PaymentMethod, Unit, BillingConcept } from '@/lib/supabase';
 import { formatCOP } from '@/lib/format';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card } from '@/components/ui/Card';
@@ -45,6 +45,7 @@ export function ReceiptForm() {
   const [units, setUnits] = useState<Unit[]>([]);
   const [methods, setMethods] = useState<PaymentMethod[]>([]);
   const [hierarchy, setHierarchy] = useState<PaymentHierarchyConfig[]>([]);
+  const [concepts, setConcepts] = useState<BillingConcept[]>([]);
   const [dues, setDues] = useState<Due[]>([]);
   const [header, setHeader] = useState<HeaderState>({
     unitId: '',
@@ -55,6 +56,7 @@ export function ReceiptForm() {
     notes: '',
   });
   const [overrides, setOverrides] = useState<AllocationInputs | null>(null);
+  const [selectedAdvanceConceptId, setSelectedAdvanceConceptId] = useState<string>('');
   const [loadingReference, setLoadingReference] = useState(true);
   const [loadingDues, setLoadingDues] = useState(false);
   const [referenceError, setReferenceError] = useState('');
@@ -70,7 +72,7 @@ export function ReceiptForm() {
     setLoadingReference(true);
     setReferenceError('');
 
-    const [unitsRes, methodsRes, hierarchyRes] = await Promise.all([
+    const [unitsRes, methodsRes, hierarchyRes, conceptsRes] = await Promise.all([
       supabase
         .from('units')
         .select('*')
@@ -89,10 +91,16 @@ export function ReceiptForm() {
         .select('*, billing_concept:billing_concepts!concept_id(*)')
         .eq('organization_id', activeOrg.id)
         .order('priority_order', { ascending: true }),
+      supabase
+        .from('billing_concepts')
+        .select('*')
+        .eq('organization_id', activeOrg.id)
+        .eq('is_active', true)
+        .order('name', { ascending: true }),
     ]);
 
-    if (unitsRes.error || methodsRes.error || hierarchyRes.error) {
-      setReferenceError('No se pudieron cargar las unidades, métodos de pago o prelación. Intente nuevamente.');
+    if (unitsRes.error || methodsRes.error || hierarchyRes.error || conceptsRes.error) {
+      setReferenceError('No se pudieron cargar las unidades, métodos de pago, prelación o conceptos. Intente nuevamente.');
       setLoadingReference(false);
       return;
     }
@@ -100,6 +108,15 @@ export function ReceiptForm() {
     setUnits((unitsRes.data || []) as Unit[]);
     setMethods((methodsRes.data || []) as PaymentMethod[]);
     setHierarchy((hierarchyRes.data || []) as PaymentHierarchyConfig[]);
+    const allConcepts = (conceptsRes.data || []) as BillingConcept[];
+    setConcepts(allConcepts);
+
+    // Seleccionar por defecto el primer concepto que maneje anticipo si existe
+    const firstAdvanceConcept = allConcepts.find(c => (c as any).advance_account_id);
+    if (firstAdvanceConcept) {
+      setSelectedAdvanceConceptId(firstAdvanceConcept.id);
+    }
+
     setLoadingReference(false);
   }, [activeOrg]);
 
@@ -146,6 +163,11 @@ export function ReceiptForm() {
   const advance = roundMoney(totalNumber - appliedTotal);
   const hasCapitalOverflow = dues.some(d => parseAmount(inputs[d.id]?.capital ?? '0') > d.balance);
 
+  // Conceptos que manejan anticipo (tienen cuenta de anticipos parametrizada)
+  const advanceEligibleConcepts = useMemo(() => {
+    return concepts.filter(c => !c.is_late_interest && (c as any).advance_account_id);
+  }, [concepts]);
+
   function updateHeader<K extends keyof HeaderState>(key: K, value: HeaderState[K]) {
     setHeader(prev => ({ ...prev, [key]: value }));
     setSuccessMessage('');
@@ -188,7 +210,10 @@ export function ReceiptForm() {
     if (totalNumber <= 0) return setFormError('El valor recibido debe ser mayor a cero.');
     if (advance < 0) return setFormError(`Lo aplicado supera el valor recibido en ${formatCOP(Math.abs(advance))}.`);
     if (hasCapitalOverflow) return setFormError('Hay un valor a capital que supera el saldo pendiente de su obligación.');
-    if (appliedTotal <= 0) return setFormError('Asigne un valor a al menos una obligación pendiente.');
+    if (appliedTotal + (advance > 0 ? advance : 0) !== totalNumber) {
+      setFormError('El valor recibido debe cuadrar exactamente con la suma del total aplicado y el anticipo.');
+      return;
+    }
 
     const allocations = dues
       .map(d => ({
@@ -223,6 +248,8 @@ export function ReceiptForm() {
       p_total_amount: totalNumber,
       p_notes: header.notes,
       p_allocations: allocations,
+      p_advance_concept_id: advance > 0 ? (selectedAdvanceConceptId || null) : null,
+      p_advance_amount: advance > 0 ? advance : 0,
     });
     setSaving(false);
 
@@ -290,8 +317,8 @@ export function ReceiptForm() {
       <Card>
         <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4 border-b border-gray-200">
           <div>
-            <h2 className="text-base font-semibold text-gray-900">Obligaciones pendientes</h2>
-            <p className="text-sm text-gray-500">Ordenadas de la más antigua a la más reciente. Puede ajustar cada valor.</p>
+            <h2 className="text-base font-semibold text-gray-900">Gestión de Cobro y Aplicación</h2>
+            <p className="text-sm text-gray-500">Revise las obligaciones pendientes y desglose la aplicación del pago.</p>
           </div>
           {header.unitId && dues.length > 0 && overrides && (
             <Button type="button" variant="outline" size="sm" onClick={resetAllocation}>
@@ -309,9 +336,36 @@ export function ReceiptForm() {
         ) : dues.length === 0 ? (
           <p className="text-center text-gray-500 py-12">Esta unidad no tiene obligaciones pendientes</p>
         ) : (
-          <ReceiptAllocationTable dues={dues} inputs={inputs} onChange={handleAllocationChange} />
+          <div className="p-6">
+            <ReceiptAllocationTable dues={dues} inputs={inputs} onChange={handleAllocationChange} />
+          </div>
         )}
       </Card>
+
+      {/* Sección de Anticipos / Excedentes si aplica */}
+      {advance > 0 && (
+        <Card>
+          <div className="p-6 space-y-4 bg-blue-50/50 rounded-lg border border-blue-100">
+            <div>
+              <h3 className="text-sm font-semibold text-blue-900">Asignación de Saldo a Favor / Anticipo Detectado</h3>
+              <p className="text-xs text-blue-700">El valor recibido excede las obligaciones seleccionadas en {formatCOP(advance)}. Seleccione a qué concepto con cuenta de anticipos desea acreditar este excedente:</p>
+            </div>
+            <div className="max-w-md">
+              <Select
+                label="Concepto Destino del Anticipo *"
+                value={selectedAdvanceConceptId}
+                onChange={e => setSelectedAdvanceConceptId(e.target.value)}
+                required
+              >
+                <option value="">— Seleccionar concepto con anticipo —</option>
+                {advanceEligibleConcepts.map(c => (
+                  <option key={c.id} value={c.id}>{c.code} — {c.name}</option>
+                ))}
+              </Select>
+            </div>
+          </div>
+        </Card>
+      )}
 
       <Card>
         <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -357,11 +411,12 @@ export function ReceiptForm() {
         )}
 
         <div className="flex justify-end px-6 pb-6">
-          <Button type="submit" disabled={saving || !header.unitId || dues.length === 0 || advance < 0}>
+          <Button type="submit" disabled={saving || !header.unitId || dues.length === 0 || advance < 0 || (advance > 0 && !selectedAdvanceConceptId)}>
             {saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Registrando...</> : 'Registrar recibo de caja'}
           </Button>
         </div>
       </Card>
+
       <Modal open={printOpen} onClose={() => setPrintOpen(false)} title="Recibo de caja" size="lg">
         {printable && <ReceiptPrintView receipt={printable} />}
         <div className="flex justify-end gap-3 pt-4">
