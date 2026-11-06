@@ -8,8 +8,17 @@ import { Button } from '@/components/ui/Button';
 import { Input, Select, TextArea } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
-import { allocateReceipt, parseAmount, roundMoney } from '@/components/treasury/receiptAllocation';
-import { AllocationInput, AllocationInputs, ReceiptAllocationTable } from '@/components/treasury/ReceiptAllocationTable';
+import {
+  buildDetailedDueItems,
+  allocateReceipt,
+  parseAmount,
+  roundMoney,
+  DetailedDueItem
+} from '@/components/treasury/receiptAllocation';
+import {
+  DetailedAllocationInputs,
+  ReceiptAllocationTable
+} from '@/components/treasury/ReceiptAllocationTable';
 import { PrintableReceipt, ReceiptPrintView } from '@/components/treasury/ReceiptPrintView';
 
 interface HeaderState {
@@ -31,14 +40,6 @@ function unitLabel(unit: Unit): string {
   return unit.tower ? `Torre ${unit.tower} · ${unit.unit_label}` : unit.unit_label;
 }
 
-function toInputs(amounts: Record<string, { capital: number; interest: number }>): AllocationInputs {
-  const result: AllocationInputs = {};
-  for (const [dueId, amount] of Object.entries(amounts)) {
-    result[dueId] = { capital: String(amount.capital), interest: String(amount.interest) };
-  }
-  return result;
-}
-
 export function ReceiptForm() {
   const { activeOrg } = useOrg();
   const today = todayISO();
@@ -55,7 +56,8 @@ export function ReceiptForm() {
     total: '',
     notes: '',
   });
-  const [overrides, setOverrides] = useState<AllocationInputs | null>(null);
+
+  const [overrides, setOverrides] = useState<DetailedAllocationInputs | null>(null);
   const [selectedAdvanceConceptId, setSelectedAdvanceConceptId] = useState<string>('');
   const [loadingReference, setLoadingReference] = useState(true);
   const [loadingDues, setLoadingDues] = useState(false);
@@ -100,7 +102,7 @@ export function ReceiptForm() {
     ]);
 
     if (unitsRes.error || methodsRes.error || hierarchyRes.error || conceptsRes.error) {
-      setReferenceError('No se pudieron cargar las unidades, métodos de pago, prelación o conceptos. Intente nuevamente.');
+      setReferenceError('No se pudieron cargar los datos de referencia para tesorería. Intente nuevamente.');
       setLoadingReference(false);
       return;
     }
@@ -111,7 +113,7 @@ export function ReceiptForm() {
     const allConcepts = (conceptsRes.data || []) as BillingConcept[];
     setConcepts(allConcepts);
 
-    // Seleccionar por defecto el primer concepto que maneje anticipo si existe
+    // Concepto predeterminado de anticipos
     const firstAdvanceConcept = allConcepts.find(c => (c as any).advance_account_id);
     if (firstAdvanceConcept) {
       setSelectedAdvanceConceptId(firstAdvanceConcept.id);
@@ -149,21 +151,32 @@ export function ReceiptForm() {
     loadPendingDues(header.unitId).finally(() => setLoadingDues(false));
   }, [header.unitId, loadPendingDues]);
 
+  // Genera el desglose ordenado por Prioridad de Concepto y Antigüedad de Período
+  const detailedItems = useMemo(() => {
+    return buildDetailedDueItems(dues, hierarchy, concepts);
+  }, [dues, hierarchy, concepts]);
+
   const totalNumber = parseAmount(header.total);
-  const autoAllocation = useMemo(
-    () => allocateReceipt(dues, hierarchy, totalNumber),
-    [dues, hierarchy, totalNumber],
+  const autoAllocation = useMemo(() => {
+    return allocateReceipt(detailedItems, totalNumber);
+  }, [detailedItems, totalNumber]);
+
+  // Si no hay edicion manual, usamos la sugerencia automatica
+  const currentInputs = useMemo(() => {
+    if (overrides) return overrides;
+    const initial: DetailedAllocationInputs = {};
+    detailedItems.forEach(item => {
+      initial[item.id] = String(autoAllocation.amounts[item.id]?.applied ?? 0);
+    });
+    return initial;
+  }, [overrides, detailedItems, autoAllocation]);
+
+  const appliedTotal = roundMoney(
+    detailedItems.reduce((sum, item) => sum + parseAmount(currentInputs[item.id] ?? '0'), 0)
   );
-  const inputs = overrides ?? toInputs(autoAllocation.amounts);
-
-  const appliedTotal = roundMoney(dues.reduce(
-    (sum, d) => sum + parseAmount(inputs[d.id]?.capital ?? '0') + parseAmount(inputs[d.id]?.interest ?? '0'),
-    0,
-  ));
   const advance = roundMoney(totalNumber - appliedTotal);
-  const hasCapitalOverflow = dues.some(d => parseAmount(inputs[d.id]?.capital ?? '0') > d.balance);
+  const hasOverflow = detailedItems.some(item => parseAmount(currentInputs[item.id] ?? '0') > item.balance);
 
-  // Conceptos que manejan anticipo (tienen cuenta de anticipos parametrizada)
   const advanceEligibleConcepts = useMemo(() => {
     return concepts.filter(c => !c.is_late_interest && (c as any).advance_account_id);
   }, [concepts]);
@@ -187,11 +200,11 @@ export function ReceiptForm() {
     setOverrides(null);
   }
 
-  function handleAllocationChange(dueId: string, field: keyof AllocationInput, value: string) {
-    setOverrides(prev => {
-      const base = prev ?? toInputs(autoAllocation.amounts);
-      return { ...base, [dueId]: { ...(base[dueId] ?? { capital: '0', interest: '0' }), [field]: value } };
-    });
+  function handleAllocationChange(itemId: string, value: string) {
+    setOverrides(prev => ({
+      ...(prev ?? currentInputs),
+      [itemId]: value,
+    }));
     setSuccessMessage('');
     setFormError('');
   }
@@ -206,39 +219,30 @@ export function ReceiptForm() {
 
     if (!header.unitId) return setFormError('Seleccione la unidad que realiza el pago.');
     if (!header.paymentMethodId) return setFormError('Seleccione el método de pago.');
-    if (!header.paymentDate || !header.accountingDate) return setFormError('Las fechas de pago y contable son obligatorias.');
+    if (!header.paymentDate || !header.accountingDate) return setFormError('Las fechas son obligatorias.');
     if (totalNumber <= 0) return setFormError('El valor recibido debe ser mayor a cero.');
     if (advance < 0) return setFormError(`Lo aplicado supera el valor recibido en ${formatCOP(Math.abs(advance))}.`);
-    if (hasCapitalOverflow) return setFormError('Hay un valor a capital que supera el saldo pendiente de su obligación.');
+    if (hasOverflow) return setFormError('Hay un valor asignado que supera el saldo pendiente de un concepto.');
     if (appliedTotal + (advance > 0 ? advance : 0) !== totalNumber) {
       setFormError('El valor recibido debe cuadrar exactamente con la suma del total aplicado y el anticipo.');
       return;
     }
 
-    const allocations = dues
-      .map(d => ({
-        due_id: d.id,
-        concept_id: autoAllocation.conceptId,
-        capital_applied: parseAmount(inputs[d.id]?.capital ?? '0'),
-        interest_applied: parseAmount(inputs[d.id]?.interest ?? '0'),
+    const allocations = detailedItems
+      .map(item => ({
+        due_id: item.dueId,
+        concept_id: item.conceptId,
+        capital_applied: item.isInterest ? 0 : parseAmount(currentInputs[item.id] ?? '0'),
+        interest_applied: item.isInterest ? parseAmount(currentInputs[item.id] ?? '0') : 0,
       }))
       .filter(a => a.capital_applied + a.interest_applied > 0);
 
     const unit = units.find(u => u.id === header.unitId);
     const method = methods.find(m => m.id === header.paymentMethodId);
-    const printLines = dues
-      .map(d => ({ due: d, capital: parseAmount(inputs[d.id]?.capital ?? '0'), interest: parseAmount(inputs[d.id]?.interest ?? '0') }))
-      .filter(l => l.capital + l.interest > 0)
-      .map(l => ({
-        period: l.due.period,
-        dueDate: l.due.due_date,
-        capital: l.capital,
-        interest: l.interest,
-        balanceAfter: roundMoney(Math.max(l.due.balance - l.capital, 0)),
-      }));
 
     setSaving(true);
     setFormError('');
+
     const { data, error } = await supabase.rpc('save_receipt', {
       p_organization_id: activeOrg.id,
       p_unit_id: header.unitId,
@@ -273,8 +277,15 @@ export function ReceiptForm() {
       applied: appliedTotal,
       advance: Math.max(advance, 0),
       notes: header.notes,
-      lines: printLines,
+      lines: detailedItems.map(item => ({
+        period: item.period,
+        dueDate: item.dueDate,
+        capital: item.isInterest ? 0 : parseAmount(currentInputs[item.id] ?? '0'),
+        interest: item.isInterest ? parseAmount(currentInputs[item.id] ?? '0') : 0,
+        balanceAfter: Math.max(item.balance - parseAmount(currentInputs[item.id] ?? '0'), 0),
+      })).filter(l => l.capital + l.interest > 0),
     });
+
     setHeader(prev => ({ ...prev, total: '', notes: '' }));
     setOverrides(null);
     await loadPendingDues(header.unitId);
@@ -318,9 +329,9 @@ export function ReceiptForm() {
         <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4 border-b border-gray-200">
           <div>
             <h2 className="text-base font-semibold text-gray-900">Gestión de Cobro y Aplicación</h2>
-            <p className="text-sm text-gray-500">Revise las obligaciones pendientes y desglose la aplicación del pago.</p>
+            <p className="text-sm text-gray-500">Obligaciones ordenadas por jerarquía de concepto y antigüedad de período.</p>
           </div>
-          {header.unitId && dues.length > 0 && overrides && (
+          {header.unitId && detailedItems.length > 0 && overrides && (
             <Button type="button" variant="outline" size="sm" onClick={resetAllocation}>
               <RotateCcw className="w-4 h-4" /> Recalcular automáticamente
             </Button>
@@ -333,22 +344,21 @@ export function ReceiptForm() {
           <div className="flex items-center justify-center py-12"><Loader2 className="w-6 h-6 text-blue-600 animate-spin" /></div>
         ) : duesError ? (
           <p className="text-center text-red-600 py-12">{duesError}</p>
-        ) : dues.length === 0 ? (
+        ) : detailedItems.length === 0 ? (
           <p className="text-center text-gray-500 py-12">Esta unidad no tiene obligaciones pendientes</p>
         ) : (
           <div className="p-6">
-            <ReceiptAllocationTable dues={dues} inputs={inputs} onChange={handleAllocationChange} />
+            <ReceiptAllocationTable items={detailedItems} inputs={currentInputs} onChange={handleAllocationChange} />
           </div>
         )}
       </Card>
 
-      {/* Sección de Anticipos / Excedentes si aplica */}
       {advance > 0 && (
         <Card>
           <div className="p-6 space-y-4 bg-blue-50/50 rounded-lg border border-blue-100">
             <div>
               <h3 className="text-sm font-semibold text-blue-900">Asignación de Saldo a Favor / Anticipo Detectado</h3>
-              <p className="text-xs text-blue-700">El valor recibido excede las obligaciones seleccionadas en {formatCOP(advance)}. Seleccione a qué concepto con cuenta de anticipos desea acreditar este excedente:</p>
+              <p className="text-xs text-blue-700">El valor recibido excede las obligaciones en {formatCOP(advance)}. Seleccione el concepto donde se acreditará el excedente:</p>
             </div>
             <div className="max-w-md">
               <Select
@@ -411,7 +421,7 @@ export function ReceiptForm() {
         )}
 
         <div className="flex justify-end px-6 pb-6">
-          <Button type="submit" disabled={saving || !header.unitId || dues.length === 0 || advance < 0 || (advance > 0 && !selectedAdvanceConceptId)}>
+          <Button type="submit" disabled={saving || !header.unitId || detailedItems.length === 0 || advance < 0 || (advance > 0 && !selectedAdvanceConceptId)}>
             {saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Registrando...</> : 'Registrar recibo de caja'}
           </Button>
         </div>
