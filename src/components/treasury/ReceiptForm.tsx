@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Loader2, RotateCcw } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Loader2, Printer, RotateCcw } from 'lucide-react';
 import { supabase, Due, PaymentHierarchyConfig, PaymentMethod, Unit } from '@/lib/supabase';
 import { formatCOP } from '@/lib/format';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input, Select, TextArea } from '@/components/ui/Input';
+import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
 import { allocateReceipt, parseAmount, roundMoney } from '@/components/treasury/receiptAllocation';
 import { AllocationInput, AllocationInputs, ReceiptAllocationTable } from '@/components/treasury/ReceiptAllocationTable';
+import { PrintableReceipt, ReceiptPrintView } from '@/components/treasury/ReceiptPrintView';
 
 interface HeaderState {
   unitId: string;
@@ -60,6 +62,8 @@ export function ReceiptForm() {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
+  const [printable, setPrintable] = useState<PrintableReceipt | null>(null);
+  const [printOpen, setPrintOpen] = useState(false);
 
   const loadReferenceData = useCallback(async () => {
     if (!activeOrg) return;
@@ -195,6 +199,19 @@ export function ReceiptForm() {
       }))
       .filter(a => a.capital_applied + a.interest_applied > 0);
 
+    const unit = units.find(u => u.id === header.unitId);
+    const method = methods.find(m => m.id === header.paymentMethodId);
+    const printLines = dues
+      .map(d => ({ due: d, capital: parseAmount(inputs[d.id]?.capital ?? '0'), interest: parseAmount(inputs[d.id]?.interest ?? '0') }))
+      .filter(l => l.capital + l.interest > 0)
+      .map(l => ({
+        period: l.due.period,
+        dueDate: l.due.due_date,
+        capital: l.capital,
+        interest: l.interest,
+        balanceAfter: roundMoney(Math.max(l.due.balance - l.capital, 0)),
+      }));
+
     setSaving(true);
     setFormError('');
     const { data, error } = await supabase.rpc('save_receipt', {
@@ -216,6 +233,21 @@ export function ReceiptForm() {
     }
 
     setSuccessMessage(`Recibo ${receiptNumber} registrado correctamente.`);
+    setPrintable({
+      receiptNumber,
+      organizationName: activeOrg.name,
+      organizationNit: activeOrg.nit,
+      unitLabel: unit ? unitLabel(unit) : '',
+      ownerName: unit?.owner_name ?? '',
+      paymentDate: header.paymentDate,
+      accountingDate: header.accountingDate,
+      methodName: method?.name ?? '',
+      total: totalNumber,
+      applied: appliedTotal,
+      advance: Math.max(advance, 0),
+      notes: header.notes,
+      lines: printLines,
+    });
     setHeader(prev => ({ ...prev, total: '', notes: '' }));
     setOverrides(null);
     await loadPendingDues(header.unitId);
@@ -309,9 +341,16 @@ export function ReceiptForm() {
               </div>
             )}
             {successMessage && (
-              <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-3 flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-green-600" />
-                <p className="text-sm text-green-700">{successMessage}</p>
+              <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-green-600" />
+                  <p className="text-sm text-green-700">{successMessage}</p>
+                </div>
+                {printable && (
+                  <Button type="button" variant="outline" size="sm" onClick={() => setPrintOpen(true)}>
+                    <Printer className="w-4 h-4" /> Ver e imprimir recibo
+                  </Button>
+                )}
               </div>
             )}
           </div>
@@ -323,6 +362,13 @@ export function ReceiptForm() {
           </Button>
         </div>
       </Card>
+      <Modal open={printOpen} onClose={() => setPrintOpen(false)} title="Recibo de caja" size="lg">
+        {printable && <ReceiptPrintView receipt={printable} />}
+        <div className="flex justify-end gap-3 pt-4">
+          <Button type="button" variant="outline" onClick={() => setPrintOpen(false)}>Cerrar</Button>
+          <Button type="button" onClick={() => window.print()}><Printer className="w-4 h-4" /> Imprimir o guardar PDF</Button>
+        </div>
+      </Modal>
     </form>
   );
 }
