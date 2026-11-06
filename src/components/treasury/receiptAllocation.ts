@@ -1,15 +1,29 @@
-import type { Due, PaymentHierarchyConfig } from '@/lib/supabase';
+import type { Due, PaymentHierarchyConfig, BillingConcept } from '@/lib/supabase';
+
+export interface DetailedDueItem {
+  id: string; // Identificador único de la línea (dueId + conceptId)
+  dueId: string;
+  period: string;
+  dueDate: string;
+  conceptId: string;
+  conceptCode: string;
+  conceptName: string;
+  balance: number;
+  priorityOrder: number;
+  isInterest: boolean;
+  eligibleForDiscount: boolean;
+  discountAmount: number;
+}
 
 export interface AllocationAmounts {
-  capital: number;
-  interest: number;
+  applied: number;
 }
 
 export interface AllocationResult {
   amounts: Record<string, AllocationAmounts>;
-  conceptId: string | null;
-  applied: number;
-  advance: number;
+  appliedTotal: number;
+  advanceTotal: number;
+  items: DetailedDueItem[];
 }
 
 export function roundMoney(value: number): number {
@@ -21,29 +35,101 @@ export function parseAmount(value: string): number {
   return Number.isFinite(parsed) ? roundMoney(parsed) : 0;
 }
 
-function topPriorityConceptId(hierarchy: PaymentHierarchyConfig[]): string | null {
-  const ranked = hierarchy
-    .filter(h => h.priority_order !== null && !h.billing_concept?.is_late_interest)
-    .sort((a, b) => (a.priority_order ?? 0) - (b.priority_order ?? 0));
-  return ranked[0]?.concept_id ?? null;
+/**
+ * Desglosa las deudas por concepto individual y las ordena:
+ * 1. Por el orden de prelación/prioridad configurado para el concepto.
+ * 2. De la más antigua a la más reciente por período/vencimiento.
+ */
+export function buildDetailedDueItems(
+  dues: Due[],
+  hierarchy: PaymentHierarchyConfig[],
+  concepts: BillingConcept[]
+): DetailedDueItem[] {
+  const items: DetailedDueItem[] = [];
+
+  // Mapeo de prioridades según prelación
+  const priorityMap = new Map<string, number>();
+  hierarchy.forEach(h => {
+    if (h.concept_id) {
+      priorityMap.set(h.concept_id, h.priority_order ?? 999);
+    }
+  });
+
+  const conceptMap = new Map<string, BillingConcept>();
+  concepts.forEach(c => conceptMap.set(c.id, c));
+
+  dues.forEach(due => {
+    // Si la deuda viene agrupada en dues, desglosamos capital e intereses si existen
+    // 1. Línea de Intereses de Mora (si la deuda registra intereses)
+    if (due.interest_balance && due.interest_balance > 0) {
+      const interestConcept = concepts.find(c => c.is_late_interest);
+      const conceptId = interestConcept?.id || 'interest-default';
+      items.push({
+        id: `${due.id}-interest`,
+        dueId: due.id,
+        period: due.period,
+        dueDate: due.due_date,
+        conceptId: conceptId,
+        conceptCode: interestConcept?.code || 'INT',
+        conceptName: interestConcept?.name || 'Intereses de Mora',
+        balance: roundMoney(due.interest_balance),
+        priorityOrder: priorityMap.get(conceptId) ?? 1, // Por defecto primera prioridad
+        isInterest: true,
+        eligibleForDiscount: false,
+        discountAmount: 0,
+      });
+    }
+
+    // 2. Línea de Capital / Concepto Principal (Administración, Retroactivo, etc.)
+    const mainConcept = conceptMap.get(due.concept_id);
+    const conceptId = due.concept_id || 'main-default';
+    const mainBalance = roundMoney(due.balance - (due.interest_balance || 0));
+
+    if (mainBalance > 0) {
+      items.push({
+        id: `${due.id}-capital`,
+        dueId: due.id,
+        period: due.period,
+        dueDate: due.due_date,
+        conceptId: conceptId,
+        conceptCode: mainConcept?.code || 'ADM',
+        conceptName: mainConcept?.name || 'Cuota de Administración',
+        balance: mainBalance,
+        priorityOrder: priorityMap.get(conceptId) ?? (mainConcept?.is_late_interest ? 1 : 2),
+        isInterest: false,
+        eligibleForDiscount: !!mainConcept?.maneja_descuento,
+        discountAmount: 0, // Se calculará según la fecha contable/período
+      });
+    }
+  });
+
+  // Ordenamiento compuesto: 1° Prioridad del concepto, 2° Fecha de vencimiento/Período más antiguo
+  return items.sort((a, b) => {
+    if (a.priorityOrder !== b.priorityOrder) {
+      return a.priorityOrder - b.priorityOrder;
+    }
+    return a.dueDate.localeCompare(b.dueDate);
+  });
 }
 
 export function allocateReceipt(
-  dues: Due[],
-  hierarchy: PaymentHierarchyConfig[],
-  total: number,
+  items: DetailedDueItem[],
+  totalReceived: number
 ): AllocationResult {
-  const conceptId = topPriorityConceptId(hierarchy);
-  const oldestFirst = [...dues].sort((a, b) => a.due_date.localeCompare(b.due_date));
   const amounts: Record<string, AllocationAmounts> = {};
+  let remaining = roundMoney(Math.max(totalReceived, 0));
 
-  let remaining = roundMoney(Math.max(total, 0));
-  for (const due of oldestFirst) {
-    const pay = roundMoney(Math.min(remaining, Math.max(due.balance, 0)));
-    amounts[due.id] = { capital: pay, interest: 0 };
+  for (const item of items) {
+    const pay = roundMoney(Math.min(remaining, item.balance));
+    amounts[item.id] = { applied: pay };
     remaining = roundMoney(remaining - pay);
   }
 
-  const applied = roundMoney(Math.max(total, 0) - remaining);
-  return { amounts, conceptId, applied, advance: remaining };
+  const appliedTotal = roundMoney(Math.max(totalReceived, 0) - remaining);
+  return {
+    amounts,
+    appliedTotal,
+    advanceTotal: remaining,
+    items,
+  };
 }
