@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Loader2, Printer, RotateCcw } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Loader2, Printer, RotateCcw, XCircle } from 'lucide-react';
 import { supabase, Due, PaymentHierarchyConfig, PaymentMethod, Unit, BillingConcept } from '@/lib/supabase';
 import { formatCOP } from '@/lib/format';
 import { useOrg } from '@/contexts/OrganizationContext';
@@ -54,7 +54,8 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
   const [discountTiers, setDiscountTiers] = useState<any[]>([]);
   const [dues, setDues] = useState<Due[]>([]);
   const [invoicesMap, setInvoicesMap] = useState<Record<string, any>>({});
-  
+  const [editingId, setEditingId] = useState<string | null>(null);
+
   const [header, setHeader] = useState<HeaderState>({
     unitId: '',
     paymentDate: today,
@@ -113,7 +114,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     ]);
 
     if (unitsRes.error || methodsRes.error || hierarchyRes.error || conceptsRes.error) {
-      setReferenceError('No se pudieron cargar los datos de referencia para tesorería. Intente nuevamente.');
+      setReferenceError('No se pudieron cargar los datos de referencia para tesorería.');
       setLoadingReference(false);
       return;
     }
@@ -135,9 +136,10 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
   useEffect(() => { loadReferenceData(); }, [loadReferenceData]);
 
-  // Cargar datos iniciales en caso de edición
+  // Cargar datos al entrar en modo edición
   useEffect(() => {
     if (initialData) {
+      setEditingId(initialData.id || null);
       setHeader({
         unitId: initialData.unit_id || '',
         paymentDate: initialData.payment_date || todayISO(),
@@ -158,7 +160,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         .select('*')
         .eq('organization_id', activeOrg.id)
         .eq('unit_id', unitId)
-        .in('status', ['pendiente', 'parcial'])
+        .in('status', ['pendiente', 'parcial', 'PENDIENTE', 'PARCIAL'])
         .order('due_date', { ascending: true }),
       supabase
         .from('invoices')
@@ -253,6 +255,19 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     setOverrides(null);
   }
 
+  function cancelEdit() {
+    setEditingId(null);
+    setHeader({
+      unitId: '',
+      paymentDate: today,
+      accountingDate: today,
+      paymentMethodId: '',
+      total: '',
+      notes: '',
+    });
+    setOverrides(null);
+  }
+
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     if (!activeOrg) return;
@@ -299,11 +314,11 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
     const receiptNumber = (data as { receipt_number?: unknown } | null)?.receipt_number;
     if (error || typeof receiptNumber !== 'string') {
-      setFormError(error?.message || 'No se pudo registrar el recibo. Intente nuevamente.');
+      setFormError(error?.message || 'No se pudo guardar el recibo. Intente nuevamente.');
       return;
     }
 
-    setSuccessMessage(`Recibo ${receiptNumber} registrado correctamente.`);
+    setSuccessMessage(`Recibo ${receiptNumber} ${editingId ? 'actualizado' : 'registrado'} correctamente.`);
     setPrintable({
       receiptNumber,
       organizationName: activeOrg.name,
@@ -335,6 +350,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
       }).filter(l => l.applied > 0 || l.discount > 0),
     });
 
+    setEditingId(null);
     setHeader(prev => ({ ...prev, total: '', notes: '' }));
     setOverrides(null);
     await loadPendingDues(header.unitId);
@@ -357,6 +373,17 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
   return (
     <form onSubmit={handleSave} className="space-y-6">
+      {editingId && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center justify-between">
+          <p className="text-sm font-medium text-blue-900">
+            Modificando recibo de caja. Ajuste la información necesaria y haga clic en <strong>Actualizar recibo de caja</strong>.
+          </p>
+          <Button type="button" variant="outline" size="sm" onClick={cancelEdit}>
+            <XCircle className="w-4 h-4 mr-1 text-gray-600" /> Cancelar edición
+          </Button>
+        </div>
+      )}
+
       <Card>
         <div className="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           <Select label="Unidad *" value={header.unitId} onChange={e => updateHeader('unitId', e.target.value)} required>
@@ -471,7 +498,13 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
         <div className="flex justify-end px-6 pb-6">
           <Button type="submit" disabled={saving || !header.unitId || detailedItems.length === 0 || advance < 0 || (advance > 0 && !selectedAdvanceConceptId)}>
-            {saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Registrando...</> : 'Registrar recibo de caja'}
+            {saving ? (
+              <><Loader2 className="w-4 h-4 animate-spin" /> Guardando...</>
+            ) : editingId ? (
+              'Actualizar recibo de caja'
+            ) : (
+              'Registrar recibo de caja'
+            )}
           </Button>
         </div>
       </Card>
