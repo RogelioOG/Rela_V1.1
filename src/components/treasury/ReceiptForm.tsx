@@ -29,6 +29,11 @@ interface HeaderState {
   notes: string;
 }
 
+interface ReceiptFormProps {
+  initialData?: any;
+  onClearInitialData?: () => void;
+}
+
 function todayISO(): string {
   const now = new Date();
   const offset = now.getTimezoneOffset() * 60000;
@@ -39,7 +44,7 @@ function unitLabel(unit: Unit): string {
   return unit.tower ? `Torre ${unit.tower} · ${unit.unit_label}` : unit.unit_label;
 }
 
-export function ReceiptForm() {
+export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProps) {
   const { activeOrg } = useOrg();
   const today = todayISO();
   const [units, setUnits] = useState<Unit[]>([]);
@@ -130,6 +135,21 @@ export function ReceiptForm() {
 
   useEffect(() => { loadReferenceData(); }, [loadReferenceData]);
 
+  // Cargar datos iniciales en caso de edición
+  useEffect(() => {
+    if (initialData) {
+      setHeader({
+        unitId: initialData.unit_id || '',
+        paymentDate: initialData.payment_date || todayISO(),
+        accountingDate: initialData.accounting_date || todayISO(),
+        paymentMethodId: initialData.payment_method_id || '',
+        total: String(initialData.total_amount || ''),
+        notes: initialData.notes || '',
+      });
+      if (onClearInitialData) onClearInitialData();
+    }
+  }, [initialData, onClearInitialData]);
+
   const loadPendingDues = useCallback(async (unitId: string) => {
     if (!activeOrg) return;
     const [duesRes, invoicesRes] = await Promise.all([
@@ -173,7 +193,6 @@ export function ReceiptForm() {
     loadPendingDues(header.unitId).finally(() => setLoadingDues(false));
   }, [header.unitId, loadPendingDues]);
 
-  // Construcción de ítems detallados aplicando prelación, snapshot, intereses y descuentos por escalón
   const detailedItems = useMemo(() => {
     return buildDetailedDueItems(dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate);
   }, [dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate]);
