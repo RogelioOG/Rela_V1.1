@@ -1,7 +1,7 @@
 import type { Due, PaymentHierarchyConfig, BillingConcept } from '@/lib/supabase';
 
 export interface DetailedDueItem {
-  id: string; // Identificador único de la línea
+  id: string; // Identificador único de la línea (dueId + tipo)
   dueId: string;
   period: string;
   dueDate: string;
@@ -36,15 +36,17 @@ export function parseAmount(value: string): number {
 }
 
 /**
- * Desglosa las deudas leyendo el "items_snapshot" de la factura asociada,
- * garantizando que se muestren todos los conceptos reales (Administración, Retroactivo, Intereses, etc.)
- * ordenados por: 1° Prelación del concepto, 2° Antigüedad del período.
+ * Desglosa las deudas leyendo el "items_snapshot" de la factura y los intereses,
+ * calculando el descuento por pronto pago según la fecha de pago del recibo
+ * y ordenando estrictamente por: 1° Prelación, 2° Antigüedad.
  */
 export function buildDetailedDueItems(
   dues: Due[],
   hierarchy: PaymentHierarchyConfig[],
   concepts: BillingConcept[],
-  invoicesMap: Record<string, any> = {}
+  invoicesMap: Record<string, any> = {},
+  discountTiers: any[] = [],
+  paymentDateStr: string = ''
 ): DetailedDueItem[] {
   const items: DetailedDueItem[] = [];
 
@@ -59,13 +61,29 @@ export function buildDetailedDueItems(
   const conceptMap = new Map<string, BillingConcept>();
   concepts.forEach(c => conceptMap.set(c.id, c));
 
+  // Determinar si aplica descuento por pronto pago según la fecha de pago y discount_tiers
+  let applicableDiscountPercent = 0;
+  if (paymentDateStr && discountTiers.length > 0) {
+    const paymentDay = new Date(paymentDateStr + 'T00:00:00').getDate();
+    // Ordenar escalones por orden o valor para evaluar el más favorable primero
+    const sortedTiers = [...discountTiers].sort((a, b) => (a.tier_order || 0) - (b.tier_order || 0));
+    
+    for (const tier of sortedTiers) {
+      if (tier.is_active && paymentDay <= (tier.valid_until_day || 0)) {
+        if (tier.discount_type === 'porcentaje') {
+          applicableDiscountPercent = Number(tier.discount_value || 0);
+          break;
+        }
+      }
+    }
+  }
+
   dues.forEach(due => {
-    // Buscamos si la deuda tiene un invoice asociado y un items_snapshot válido
     const inv = invoicesMap[due.id] || invoicesMap[due.unit_id + '_' + due.period];
     const snapshotItems = inv?.items_snapshot;
 
+    // 1. Si hay items_snapshot en la factura, los desglosamos uno a uno (Admon, Retroactivo, etc.)
     if (Array.isArray(snapshotItems) && snapshotItems.length > 0) {
-      // Si tenemos el snapshot de la factura, desglosamos cada ítem exactamente como se facturó
       snapshotItems.forEach((snap: any, index: number) => {
         const concept = conceptMap.get(snap.conceptId);
         const isInterest = !!concept?.is_late_interest || snap.conceptCode?.includes('MORA');
@@ -73,6 +91,15 @@ export function buildDetailedDueItems(
         const amount = roundMoney(snap.amount || 0);
 
         if (amount > 0) {
+          // Evaluar si este concepto es elegible para descuento
+          let itemDiscount = 0;
+          const isEligibleByTier = concept && (concept.maneja_descuento || 
+            discountTiers.some(t => Array.isArray(t.calculation_base_concept_ids) && t.calculation_base_concept_ids.includes(conceptId)));
+
+          if (isEligibleByTier && applicableDiscountPercent > 0 && !isInterest) {
+            itemDiscount = roundMoney((amount * applicableDiscountPercent) / 100);
+          }
+
           items.push({
             id: `${due.id}-snap-${index}`,
             dueId: due.id,
@@ -84,16 +111,22 @@ export function buildDetailedDueItems(
             balance: amount,
             priorityOrder: priorityMap.get(conceptId) ?? (isInterest ? 1 : 2),
             isInterest: isInterest,
-            eligibleForDiscount: !!concept?.maneja_descuento,
-            discountAmount: 0,
+            eligibleForDiscount: !!isEligibleByTier,
+            discountAmount: itemDiscount,
           });
         }
       });
-    } else {
-      // Fallback por seguridad si el snapshot no viniera cargado: desglose estándar de la deuda
-      if (due.interest_balance && due.interest_balance > 0) {
-        const interestConcept = concepts.find(c => c.is_late_interest);
-        const conceptId = interestConcept?.id || 'interest-default';
+    }
+
+    // 2. Incluir explícitamente los Intereses de Mora si la obligación registra un saldo por intereses
+    const interestBalance = roundMoney(due.interest_balance || inv?.interest_amount || 0);
+    if (interestBalance > 0) {
+      const interestConcept = concepts.find(c => c.is_late_interest);
+      const conceptId = interestConcept?.id || 'interest-default';
+      
+      // Evitar duplicar si ya venía en el snapshot
+      const alreadyInItems = items.some(i => i.dueId === due.id && i.isInterest);
+      if (!alreadyInItems) {
         items.push({
           id: `${due.id}-interest`,
           dueId: due.id,
@@ -102,31 +135,10 @@ export function buildDetailedDueItems(
           conceptId: conceptId,
           conceptCode: interestConcept?.code || 'INT',
           conceptName: interestConcept?.name || 'Intereses de Mora',
-          balance: roundMoney(due.interest_balance),
-          priorityOrder: priorityMap.get(conceptId) ?? 1,
+          balance: interestBalance,
+          priorityOrder: priorityMap.get(conceptId) ?? 1, // Los intereses suelen ir de primeros según prelación
           isInterest: true,
           eligibleForDiscount: false,
-          discountAmount: 0,
-        });
-      }
-
-      const mainConcept = conceptMap.get(due.concept_id);
-      const conceptId = due.concept_id || 'main-default';
-      const mainBalance = roundMoney(due.balance - (due.interest_balance || 0));
-
-      if (mainBalance > 0) {
-        items.push({
-          id: `${due.id}-capital`,
-          dueId: due.id,
-          period: due.period,
-          dueDate: due.due_date,
-          conceptId: conceptId,
-          conceptCode: mainConcept?.code || 'ADM',
-          conceptName: mainConcept?.name || 'Cuota de Administración',
-          balance: mainBalance,
-          priorityOrder: priorityMap.get(conceptId) ?? 2,
-          isInterest: false,
-          eligibleForDiscount: !!mainConcept?.maneja_descuento,
           discountAmount: 0,
         });
       }
