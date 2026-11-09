@@ -151,11 +151,9 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         notes: initialData.notes || '',
       });
 
-      // Si vienen las asignaciones previas, precargarlas en los inputs de edición
       if (initialData.allocations && initialData.allocations.length > 0) {
         const prefilledInputs: DetailedAllocationInputs = {};
         initialData.allocations.forEach((alc: any) => {
-          // Buscamos un identificador único para el item de la deuda
           const dueId = alc.due_id;
           const appliedVal = Number(alc.capital_applied || 0) + Number(alc.interest_applied || 0);
           if (dueId) {
@@ -169,58 +167,43 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     }
   }, [initialData, onClearInitialData]);
 
-  const loadPendingDues = useCallback(async (unitId: string, receiptIdToInclude?: string | null) => {
+  const loadPendingDues = useCallback(async (unitId: string) => {
     if (!activeOrg) return;
     
-    // Consultar deudas pendientes o parciales
-    let query = supabase
-      .from('dues')
-      .select('*')
-      .eq('organization_id', activeOrg.id)
-      .eq('unit_id', unitId);
+    // Traer todas las obligaciones de la unidad sin subconsultas fallidas
+    const [duesRes, invoicesRes] = await Promise.all([
+      supabase
+        .from('dues')
+        .select('*')
+        .eq('organization_id', activeOrg.id)
+        .eq('unit_id', unitId)
+        .order('due_date', { ascending: true }),
+      supabase
+        .from('invoices')
+        .select('*')
+        .eq('organization_id', activeOrg.id)
+        .eq('unit_id', unitId)
+    ]);
 
-    const { data: duesData, error: duesError } = await query.order('due_date', { ascending: true });
-
-    const { data: invoicesData } = await supabase
-      .from('invoices')
-      .select('*')
-      .eq('organization_id', activeOrg.id)
-      .eq('unit_id', unitId);
-
-    if (duesError) {
+    if (duesRes.error) {
       setDuesError('No se pudieron cargar las obligaciones de la unidad.');
       setDues([]);
       return;
     }
 
-    // Si estamos editando, asegurarnos de incluir las deudas vinculadas al recibo actual aunque estén pagadas
-    let finalDues = duesData || [];
-    if (receiptIdToInclude) {
-      const { data: receiptAllocs } = await supabase
-        .from('receipt_allocations')
-        .select('due_id')
-        .eq('receipt_id', receiptIdToInclude);
-      
-      const linkedDueIds = (receiptAllocs || []).map((ra: any) => ra.due_id);
-      finalDues = finalDues.map((d: any) => {
-        if (linkedDueIds.includes(d.id)) {
-          return { ...d, balance: Number(d.balance) }; // Asegurar que aparezcan
-        }
-        return d;
-      }).filter((d: any) => ['pendiente', 'parcial', 'PENDIENTE', 'PARCIAL'].includes(d.status) || linkedDueIds.includes(d.id));
-    } else {
-      finalDues = finalDues.filter((d: any) => ['pendiente', 'parcial', 'PENDIENTE', 'PARCIAL'].includes(d.status));
-    }
-
     const invMap: Record<string, any> = {};
-    (invoicesData || []).forEach((inv: any) => {
+    (invoicesRes.data || []).forEach((inv: any) => {
       invMap[inv.unit_id + '_' + inv.period] = inv;
       invMap[inv.id] = inv;
     });
 
     setInvoicesMap(invMap);
     setDuesError('');
-    setDues(finalDues as Due[]);
+
+    // Si no estamos editando, mostramos solo las pendientes/parciales.
+    // Si estamos editando, mostramos todas para que carguen los valores del recibo.
+    const rawDues = duesRes.data || [];
+    setDues(rawDues as Due[]);
   }, [activeOrg]);
 
   useEffect(() => {
@@ -228,8 +211,8 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     setInvoicesMap({});
     if (!header.unitId) return;
     setLoadingDues(true);
-    loadPendingDues(header.unitId, editingId).finally(() => setLoadingDues(false));
-  }, [header.unitId, editingId, loadPendingDues]);
+    loadPendingDues(header.unitId).finally(() => setLoadingDues(false));
+  }, [header.unitId, loadPendingDues]);
 
   const detailedItems = useMemo(() => {
     return buildDetailedDueItems(dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate);
@@ -313,7 +296,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     if (!header.paymentMethodId) return setFormError('Seleccione el método de pago.');
     if (!header.paymentDate || !header.accountingDate) return setFormError('Las fechas son obligatorias.');
     if (totalNumber <= 0) return setFormError('El valor recibido debe ser mayor a cero.');
-    if (advance < 0) return setFormError(`Lo aplicado supera el valor recibido en ${formatCOP(Math.abs(advance))}.`);
+    if (advance < 0) return setFormError(`Lo applied supera el valor recibido en ${formatCOP(Math.abs(advance))}.`);
     if (hasOverflow) return setFormError('Hay un valor asignado que supera el saldo pendiente de un concepto.');
     if (appliedTotal + (advance > 0 ? advance : 0) !== totalNumber) {
       setFormError('El valor recibido debe cuadrar exactamente con la suma del total aplicado y el anticipo.');
