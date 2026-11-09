@@ -16,6 +16,7 @@ const inputClass =
 export function ReceiptAllocationTable({ items, inputs, onChange }: ReceiptAllocationTableProps) {
   const totalApplied = items.reduce((sum, item) => sum + parseAmount(inputs[item.id] ?? '0'), 0);
   const totalBalance = items.reduce((sum, item) => sum + item.balance, 0);
+  const totalDiscounts = items.reduce((sum, item) => sum + (item.discountAmount || 0), 0);
 
   return (
     <div className="space-y-6">
@@ -58,7 +59,7 @@ export function ReceiptAllocationTable({ items, inputs, onChange }: ReceiptAlloc
               <tr className="border-t border-gray-200 bg-gray-50 font-semibold text-sm">
                 <td colSpan={3} className="px-4 py-3 text-gray-900">Total Saldo Pendiente</td>
                 <td className="px-4 py-3 text-right text-gray-900">{formatCOP(totalBalance)}</td>
-                <td />
+                <td className="px-4 py-3 text-right text-green-600">{formatCOP(totalDiscounts)}</td>
               </tr>
             </tfoot>
           </table>
@@ -77,7 +78,8 @@ export function ReceiptAllocationTable({ items, inputs, onChange }: ReceiptAlloc
               <tr className="border-b border-gray-200 bg-gray-50">
                 <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Período</th>
                 <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-3">Concepto Discriminado</th>
-                <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Saldo Pendiente</th>
+                <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Saldo Base</th>
+                <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Descuento</th>
                 <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Valor a Aplicar</th>
                 <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-3">Nuevo Saldo</th>
               </tr>
@@ -85,8 +87,11 @@ export function ReceiptAllocationTable({ items, inputs, onChange }: ReceiptAlloc
             <tbody className="divide-y divide-gray-100 bg-white">
               {items.map(item => {
                 const appliedVal = parseAmount(inputs[item.id] ?? '0');
-                const isOverflow = appliedVal > item.balance;
-                const remaining = Math.max(item.balance - appliedVal, 0);
+                const discount = item.discountAmount || 0;
+                // Cobertura total = lo que se paga + lo que se descuenta
+                const coveredVal = appliedVal + discount;
+                const isOverflow = appliedVal > (item.netBalance > 0 ? item.netBalance : item.balance);
+                const remaining = Math.max(item.balance - coveredVal, 0);
 
                 return (
                   <tr key={item.id} className="hover:bg-gray-50">
@@ -99,6 +104,9 @@ export function ReceiptAllocationTable({ items, inputs, onChange }: ReceiptAlloc
                       </div>
                     </td>
                     <td className="px-4 py-3 text-sm text-right text-gray-900">{formatCOP(item.balance)}</td>
+                    <td className="px-4 py-3 text-sm text-right text-green-600 font-medium">
+                      {discount > 0 ? formatCOP(discount) : '$ 0'}
+                    </td>
                     <td className="px-4 py-3 text-right">
                       <input
                         type="number"
@@ -109,16 +117,18 @@ export function ReceiptAllocationTable({ items, inputs, onChange }: ReceiptAlloc
                         onChange={e => onChange(item.id, e.target.value)}
                         className={`${inputClass} ${isOverflow ? 'border-red-400 bg-red-50 text-red-900' : ''}`}
                       />
-                      {isOverflow && <p className="mt-1 text-xs text-red-600">Supera el saldo</p>}
+                      {isOverflow && <p className="mt-1 text-xs text-red-600">Supera el saldo neto</p>}
                     </td>
-                    <td className="px-4 py-3 text-sm text-right text-gray-700">{formatCOP(remaining)}</td>
+                    <td className={`px-4 py-3 text-sm text-right font-medium ${remaining === 0 ? 'text-green-700 font-bold' : 'text-gray-700'}`}>
+                      {formatCOP(remaining)}
+                    </td>
                   </tr>
                 );
               })}
             </tbody>
             <tfoot>
               <tr className="border-t border-gray-200 bg-gray-50 font-semibold text-sm">
-                <td colSpan={3} className="px-4 py-3 text-gray-900">Total Aplicado a Conceptos</td>
+                <td colSpan={4} className="px-4 py-3 text-gray-900">Total Aplicado a Conceptos</td>
                 <td className="px-4 py-3 text-right text-blue-700 font-bold">{formatCOP(totalApplied)}</td>
                 <td />
               </tr>
