@@ -55,6 +55,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
   const [dues, setDues] = useState<Due[]>([]);
   const [invoicesMap, setInvoicesMap] = useState<Record<string, any>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingReceiptNumber, setEditingReceiptNumber] = useState<string | null>(null);
 
   const [header, setHeader] = useState<HeaderState>({
     unitId: '',
@@ -140,6 +141,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
   useEffect(() => {
     if (initialData) {
       setEditingId(initialData.id || null);
+      setEditingReceiptNumber(initialData.receipt_number || null);
       setHeader({
         unitId: initialData.unit_id || '',
         paymentDate: initialData.payment_date || todayISO(),
@@ -148,52 +150,86 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         total: String(initialData.total_amount || ''),
         notes: initialData.notes || '',
       });
+
+      // Si vienen las asignaciones previas, precargarlas en los inputs de edición
+      if (initialData.allocations && initialData.allocations.length > 0) {
+        const prefilledInputs: DetailedAllocationInputs = {};
+        initialData.allocations.forEach((alc: any) => {
+          // Buscamos un identificador único para el item de la deuda
+          const dueId = alc.due_id;
+          const appliedVal = Number(alc.capital_applied || 0) + Number(alc.interest_applied || 0);
+          if (dueId) {
+            prefilledInputs[dueId] = String(appliedVal);
+          }
+        });
+        setOverrides(prefilledInputs);
+      }
+
       if (onClearInitialData) onClearInitialData();
     }
   }, [initialData, onClearInitialData]);
 
-  const loadPendingDues = useCallback(async (unitId: string) => {
+  const loadPendingDues = useCallback(async (unitId: string, receiptIdToInclude?: string | null) => {
     if (!activeOrg) return;
-    const [duesRes, invoicesRes] = await Promise.all([
-      supabase
-        .from('dues')
-        .select('*')
-        .eq('organization_id', activeOrg.id)
-        .eq('unit_id', unitId)
-        .in('status', ['pendiente', 'parcial', 'PENDIENTE', 'PARCIAL'])
-        .order('due_date', { ascending: true }),
-      supabase
-        .from('invoices')
-        .select('*')
-        .eq('organization_id', activeOrg.id)
-        .eq('unit_id', unitId)
-    ]);
+    
+    // Consultar deudas pendientes o parciales
+    let query = supabase
+      .from('dues')
+      .select('*')
+      .eq('organization_id', activeOrg.id)
+      .eq('unit_id', unitId);
 
-    if (duesRes.error) {
-      setDuesError('No se pudieron cargar las obligaciones pendientes de la unidad.');
+    const { data: duesData, error: duesError } = await query.order('due_date', { ascending: true });
+
+    const { data: invoicesData } = await supabase
+      .from('invoices')
+      .select('*')
+      .eq('organization_id', activeOrg.id)
+      .eq('unit_id', unitId);
+
+    if (duesError) {
+      setDuesError('No se pudieron cargar las obligaciones de la unidad.');
       setDues([]);
       return;
     }
 
+    // Si estamos editando, asegurarnos de incluir las deudas vinculadas al recibo actual aunque estén pagadas
+    let finalDues = duesData || [];
+    if (receiptIdToInclude) {
+      const { data: receiptAllocs } = await supabase
+        .from('receipt_allocations')
+        .select('due_id')
+        .eq('receipt_id', receiptIdToInclude);
+      
+      const linkedDueIds = (receiptAllocs || []).map((ra: any) => ra.due_id);
+      finalDues = finalDues.map((d: any) => {
+        if (linkedDueIds.includes(d.id)) {
+          return { ...d, balance: Number(d.balance) }; // Asegurar que aparezcan
+        }
+        return d;
+      }).filter((d: any) => ['pendiente', 'parcial', 'PENDIENTE', 'PARCIAL'].includes(d.status) || linkedDueIds.includes(d.id));
+    } else {
+      finalDues = finalDues.filter((d: any) => ['pendiente', 'parcial', 'PENDIENTE', 'PARCIAL'].includes(d.status));
+    }
+
     const invMap: Record<string, any> = {};
-    (invoicesRes.data || []).forEach((inv: any) => {
+    (invoicesData || []).forEach((inv: any) => {
       invMap[inv.unit_id + '_' + inv.period] = inv;
       invMap[inv.id] = inv;
     });
 
     setInvoicesMap(invMap);
     setDuesError('');
-    setDues((duesRes.data || []) as Due[]);
+    setDues(finalDues as Due[]);
   }, [activeOrg]);
 
   useEffect(() => {
     setDues([]);
     setInvoicesMap({});
-    setOverrides(null);
     if (!header.unitId) return;
     setLoadingDues(true);
-    loadPendingDues(header.unitId).finally(() => setLoadingDues(false));
-  }, [header.unitId, loadPendingDues]);
+    loadPendingDues(header.unitId, editingId).finally(() => setLoadingDues(false));
+  }, [header.unitId, editingId, loadPendingDues]);
 
   const detailedItems = useMemo(() => {
     return buildDetailedDueItems(dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate);
@@ -257,6 +293,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
   function cancelEdit() {
     setEditingId(null);
+    setEditingReceiptNumber(null);
     setHeader({
       unitId: '',
       paymentDate: today,
@@ -298,29 +335,53 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     setSaving(true);
     setFormError('');
 
-    const { data, error } = await supabase.rpc('save_receipt', {
-      p_organization_id: activeOrg.id,
-      p_unit_id: header.unitId,
-      p_payment_date: header.paymentDate,
-      p_accounting_date: header.accountingDate,
-      p_payment_method_id: header.paymentMethodId,
-      p_total_amount: totalNumber,
-      p_notes: header.notes,
-      p_allocations: allocations,
-      p_advance_concept_id: advance > 0 ? (selectedAdvanceConceptId || null) : null,
-      p_advance_amount: advance > 0 ? advance : 0,
-    });
-    setSaving(false);
+    let receiptNumber = editingReceiptNumber;
 
-    const receiptNumber = (data as { receipt_number?: unknown } | null)?.receipt_number;
-    if (error || typeof receiptNumber !== 'string') {
-      setFormError(error?.message || 'No se pudo guardar el recibo. Intente nuevamente.');
-      return;
+    if (editingId) {
+      const { data, error } = await supabase.rpc('update_receipt', {
+        p_receipt_id: editingId,
+        p_organization_id: activeOrg.id,
+        p_payment_date: header.paymentDate,
+        p_accounting_date: header.accountingDate,
+        p_payment_method_id: header.paymentMethodId,
+        p_total_amount: totalNumber,
+        p_notes: header.notes,
+        p_allocations: allocations,
+        p_advance_concept_id: advance > 0 ? (selectedAdvanceConceptId || null) : null,
+        p_advance_amount: advance > 0 ? advance : 0,
+      });
+
+      if (error || !data?.success) {
+        setSaving(false);
+        setFormError(error?.message || 'No se pudo actualizar el recibo.');
+        return;
+      }
+    } else {
+      const { data, error } = await supabase.rpc('save_receipt', {
+        p_organization_id: activeOrg.id,
+        p_unit_id: header.unitId,
+        p_payment_date: header.paymentDate,
+        p_accounting_date: header.accountingDate,
+        p_payment_method_id: header.paymentMethodId,
+        p_total_amount: totalNumber,
+        p_notes: header.notes,
+        p_allocations: allocations,
+        p_advance_concept_id: advance > 0 ? (selectedAdvanceConceptId || null) : null,
+        p_advance_amount: advance > 0 ? advance : 0,
+      });
+
+      if (error || !(data as any)?.receipt_number) {
+        setSaving(false);
+        setFormError(error?.message || 'No se pudo registrar el recibo.');
+        return;
+      }
+      receiptNumber = (data as any).receipt_number;
     }
 
+    setSaving(false);
     setSuccessMessage(`Recibo ${receiptNumber} ${editingId ? 'actualizado' : 'registrado'} correctamente.`);
     setPrintable({
-      receiptNumber,
+      receiptNumber: receiptNumber || 'RC-0001',
       organizationName: activeOrg.name,
       organizationNit: activeOrg.nit,
       unitLabel: unit ? unitLabel(unit) : '',
@@ -351,9 +412,10 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     });
 
     setEditingId(null);
+    setEditingReceiptNumber(null);
     setHeader(prev => ({ ...prev, total: '', notes: '' }));
     setOverrides(null);
-    await loadPendingDues(header.unitId);
+    if (header.unitId) await loadPendingDues(header.unitId);
   }
 
   if (!activeOrg) return <NoOrgSelected />;
@@ -376,7 +438,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
       {editingId && (
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center justify-between">
           <p className="text-sm font-medium text-blue-900">
-            Modificando recibo de caja. Ajuste la información necesaria y haga clic en <strong>Actualizar recibo de caja</strong>.
+            Modificando el recibo <strong>{editingReceiptNumber}</strong>. Ajuste la información y haga clic en <strong>Actualizar recibo de caja</strong>.
           </p>
           <Button type="button" variant="outline" size="sm" onClick={cancelEdit}>
             <XCircle className="w-4 h-4 mr-1 text-gray-600" /> Cancelar edición
@@ -407,7 +469,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
             <h2 className="text-base font-semibold text-gray-900">Gestión de Cobro y Aplicación</h2>
             <p className="text-sm text-gray-500">Obligaciones ordenadas por jerarquía de concepto y antigüedad de período.</p>
           </div>
-          {header.unitId && detailedItems.length > 0 && overrides && (
+          {header.unitId && detailedItems.length > 0 && (
             <Button type="button" variant="outline" size="sm" onClick={resetAllocation}>
               <RotateCcw className="w-4 h-4" /> Recalcular automáticamente
             </Button>
@@ -415,7 +477,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         </div>
 
         {!header.unitId ? (
-          <p className="text-center text-gray-500 py-12">Seleccione una unidad para ver sus obligaciones pendientes</p>
+          <p className="text-center text-gray-500 py-12">Seleccione una unidad para ver sus obligaciones</p>
         ) : loadingDues ? (
           <div className="flex items-center justify-center py-12"><Loader2 className="w-6 h-6 text-blue-600 animate-spin" /></div>
         ) : duesError ? (
@@ -434,7 +496,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
           <div className="p-6 space-y-4 bg-blue-50/50 rounded-lg border border-blue-100">
             <div>
               <h3 className="text-sm font-semibold text-blue-900">Asignación de Saldo a Favor / Anticipo Detectado</h3>
-              <p className="text-xs text-blue-700">El valor recibido excede las obligaciones en {formatCOP(advance)}. Seleccione el concepto donde se acreditará el excedente:</p>
+              <p className="text-xs text-blue-700">El valor recibido excede las obligaciones en {formatCOP(advance)}. Seleccione el concepto:</p>
             </div>
             <div className="max-w-md">
               <Select
@@ -468,31 +530,31 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
             <p className={`text-xl font-bold mt-1 ${advance < 0 ? 'text-red-700' : advance > 0 ? 'text-green-700' : 'text-gray-900'}`}>
               {formatCOP(Math.max(advance, 0))}
             </p>
-            {advance < 0 && <p className="text-xs text-red-700 mt-1">Lo aplicado supera el valor recibido</p>}
           </div>
         </div>
 
-        {(formError || successMessage) && (
+        {formError && (
           <div className="px-6 pb-4">
-            {formError && (
-              <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-red-600" />
-                <p className="text-sm text-red-700">{formError}</p>
+            <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-red-600" />
+              <p className="text-sm text-red-700">{formError}</p>
+            </div>
+          </div>
+        )}
+
+        {successMessage && (
+          <div className="px-6 pb-4">
+            <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-green-600" />
+                <p className="text-sm text-green-700">{successMessage}</p>
               </div>
-            )}
-            {successMessage && (
-              <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-green-600" />
-                  <p className="text-sm text-green-700">{successMessage}</p>
-                </div>
-                {printable && (
-                  <Button type="button" variant="outline" size="sm" onClick={() => setPrintOpen(true)}>
-                    <Printer className="w-4 h-4" /> Ver e imprimir recibo
-                  </Button>
-                )}
-              </div>
-            )}
+              {printable && (
+                <Button type="button" variant="outline" size="sm" onClick={() => setPrintOpen(true)}>
+                  <Printer className="w-4 h-4" /> Ver e imprimir recibo
+                </Button>
+              )}
+            </div>
           </div>
         )}
 
