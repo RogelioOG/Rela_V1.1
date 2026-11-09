@@ -47,6 +47,7 @@ export function ReceiptForm() {
   const [methods, setMethods] = useState<PaymentMethod[]>([]);
   const [hierarchy, setHierarchy] = useState<PaymentHierarchyConfig[]>([]);
   const [concepts, setConcepts] = useState<BillingConcept[]>([]);
+  const [discountTiers, setDiscountTiers] = useState<any[]>([]);
   const [dues, setDues] = useState<Due[]>([]);
   const [invoicesMap, setInvoicesMap] = useState<Record<string, any>>({});
   
@@ -76,7 +77,7 @@ export function ReceiptForm() {
     setLoadingReference(true);
     setReferenceError('');
 
-    const [unitsRes, methodsRes, hierarchyRes, conceptsRes] = await Promise.all([
+    const [unitsRes, methodsRes, hierarchyRes, conceptsRes, discountsRes] = await Promise.all([
       supabase
         .from('units')
         .select('*')
@@ -101,6 +102,10 @@ export function ReceiptForm() {
         .eq('organization_id', activeOrg.id)
         .eq('is_active', true)
         .order('name', { ascending: true }),
+      supabase
+        .from('discount_tiers')
+        .select('*')
+        .eq('organization_id', activeOrg.id),
     ]);
 
     if (unitsRes.error || methodsRes.error || hierarchyRes.error || conceptsRes.error) {
@@ -114,6 +119,7 @@ export function ReceiptForm() {
     setHierarchy((hierarchyRes.data || []) as PaymentHierarchyConfig[]);
     const allConcepts = (conceptsRes.data || []) as BillingConcept[];
     setConcepts(allConcepts);
+    setDiscountTiers(discountsRes.data || []);
 
     const firstAdvanceConcept = allConcepts.find(c => (c as any).advance_account_id);
     if (firstAdvanceConcept) {
@@ -144,13 +150,14 @@ export function ReceiptForm() {
 
     if (duesRes.error) {
       setDuesError('No se pudieron cargar las obligaciones pendientes de la unidad.');
-      setDues();
+      setDues([]);
       return;
     }
 
     const invMap: Record<string, any> = {};
     (invoicesRes.data || []).forEach((inv: any) => {
       invMap[inv.unit_id + '_' + inv.period] = inv;
+      invMap[inv.id] = inv;
     });
 
     setInvoicesMap(invMap);
@@ -167,9 +174,10 @@ export function ReceiptForm() {
     loadPendingDues(header.unitId).finally(() => setLoadingDues(false));
   }, [header.unitId, loadPendingDues]);
 
+  // Construcción de ítems detallados aplicando prelación, snapshot, intereses y descuentos por escalón
   const detailedItems = useMemo(() => {
-    return buildDetailedDueItems(dues, hierarchy, concepts, invoicesMap);
-  }, [dues, hierarchy, concepts, invoicesMap]);
+    return buildDetailedDueItems(dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate);
+  }, [dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate]);
 
   const totalNumber = parseAmount(header.total);
   const autoAllocation = useMemo(() => {
