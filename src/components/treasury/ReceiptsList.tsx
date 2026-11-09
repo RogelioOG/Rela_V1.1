@@ -9,7 +9,6 @@ import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
 import { PrintableReceipt, ReceiptPrintView } from './ReceiptPrintView';
-import { Badge } from '@/components/ui/Badge';
 
 interface ReceiptsListProps {
   onEditReceipt?: (receipt: any) => void;
@@ -124,9 +123,7 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     if (!window.confirm('¿Está seguro de ELIMINAR definitivamente este recibo de la base de datos?')) return;
 
     setActionLoading(receiptId);
-    // 1. Revertir saldos primero
     await supabase.rpc('void_receipt', { p_receipt_id: receiptId, p_organization_id: activeOrg.id });
-    // 2. Eliminar asignaciones y recibo
     await supabase.from('receipt_allocations').delete().eq('receipt_id', receiptId);
     const { error } = await supabase.from('receipts').delete().eq('id', receiptId);
     setActionLoading(null);
@@ -140,6 +137,21 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     await loadReceipts();
   }
 
+  async function handleEdit(rec: any) {
+    if (!activeOrg) return;
+    if (!window.confirm(`¿Desea editar el recibo ${rec.receipt_number}? Se cargarán los datos en el formulario para su modificación.`)) return;
+
+    setActionLoading(rec.id);
+    // Anulamos primero para liberar los saldos de la cartera en la BD
+    await supabase.rpc('void_receipt', { p_receipt_id: rec.id, p_organization_id: activeOrg.id });
+    setActionLoading(null);
+
+    setPrintOpen(false);
+    if (onEditReceipt) {
+      onEditReceipt(rec);
+    }
+  }
+
   if (!activeOrg) return <NoOrgSelected />;
 
   return (
@@ -148,7 +160,7 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
         <div className="p-6 flex flex-wrap items-center justify-between gap-4 border-b border-gray-200">
           <div>
             <h2 className="text-base font-semibold text-gray-900">Historial de Recaudos (Recibos de Caja)</h2>
-            <p className="text-sm text-gray-500">Consulte, reimprima, anule o elimine los comprobantes de pago emitidos.</p>
+            <p className="text-sm text-gray-500">Consulte, reimprima, edite, anule o elimine los comprobantes de pago emitidos.</p>
           </div>
           <div className="w-full sm:w-72">
             <Input
@@ -220,11 +232,22 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
                                 type="button"
                                 variant="outline"
                                 size="sm"
+                                className="text-blue-700 border-blue-300 hover:bg-blue-50"
+                                disabled={isProcessing}
+                                onClick={() => handleEdit(rec)}
+                              >
+                                {isProcessing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Edit3 className="w-3.5 h-3.5 mr-1" />} Editar
+                              </Button>
+
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
                                 className="text-amber-700 border-amber-300 hover:bg-amber-50"
                                 disabled={isProcessing}
                                 onClick={() => handleVoidReceipt(rec.id)}
                               >
-                                {isProcessing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Ban className="w-3.5 h-3.5 mr-1" />} Anular
+                                <Ban className="w-3.5 h-3.5 mr-1" /> Anular
                               </Button>
 
                               <Button
@@ -256,6 +279,14 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
           <div className="flex items-center gap-2">
             {currentRawReceipt && currentRawReceipt.status !== 'anulado' && (
               <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="text-blue-700 border-blue-300 hover:bg-blue-50"
+                  onClick={() => handleEdit(currentRawReceipt)}
+                >
+                  <Edit3 className="w-4 h-4 mr-1" /> Editar Recibo
+                </Button>
                 <Button
                   type="button"
                   variant="outline"
