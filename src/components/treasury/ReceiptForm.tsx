@@ -12,8 +12,7 @@ import {
   buildDetailedDueItems,
   allocateReceipt,
   parseAmount,
-  roundMoney,
-  DetailedDueItem
+  roundMoney
 } from '@/components/treasury/receiptAllocation';
 import {
   DetailedAllocationInputs,
@@ -299,13 +298,22 @@ export function ReceiptForm() {
       applied: appliedTotal,
       advance: Math.max(advance, 0),
       notes: header.notes,
-      lines: detailedItems.map(item => ({
-        period: item.period,
-        dueDate: item.dueDate,
-        capital: item.isInterest ? 0 : parseAmount(currentInputs[item.id] ?? '0'),
-        interest: item.isInterest ? parseAmount(currentInputs[item.id] ?? '0') : 0,
-        balanceAfter: Math.max(item.balance - parseAmount(currentInputs[item.id] ?? '0'), 0),
-      })).filter(l => l.capital + l.interest > 0),
+      lines: detailedItems.map(item => {
+        const appliedVal = parseAmount(currentInputs[item.id] ?? '0');
+        const discountVal = item.discountAmount || 0;
+        const balanceAfter = Math.max(item.balance - discountVal - appliedVal, 0);
+
+        return {
+          period: item.period,
+          dueDate: item.dueDate,
+          conceptName: item.conceptName,
+          conceptCode: item.conceptCode,
+          initialBalance: item.balance,
+          discount: discountVal,
+          applied: appliedVal,
+          balanceAfter: balanceAfter,
+        };
+      }).filter(l => l.applied > 0 || l.discount > 0),
     });
 
     setHeader(prev => ({ ...prev, total: '', notes: '' }));
