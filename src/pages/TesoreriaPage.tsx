@@ -2,11 +2,13 @@ import { useState } from 'react';
 import { PaymentMethodsConfig } from '@/components/treasury/PaymentMethodsConfig';
 import { PaymentHierarchyConfig } from '@/components/treasury/PaymentHierarchyConfig';
 import { ReceiptForm } from '@/components/treasury/ReceiptForm';
+import { ReceiptsList } from '@/components/treasury/ReceiptsList';
 
-type TreasuryTab = 'recibos' | 'metodos' | 'prelacion';
+type TreasuryTab = 'recibos' | 'historial' | 'metodos' | 'prelacion';
 
 const tabs: { id: TreasuryTab; label: string }[] = [
-  { id: 'recibos', label: 'Recibos de Caja' },
+  { id: 'recibos', label: 'Nuevo Recibo' },
+  { id: 'historial', label: 'Historial de Recaudos' },
   { id: 'metodos', label: 'Métodos de Pago' },
   { id: 'prelacion', label: 'Prelación de Pagos' },
 ];
@@ -38,6 +40,7 @@ export default function TesoreriaPage() {
       </div>
 
       {activeTab === 'recibos' && <ReceiptForm />}
+      {activeTab === 'historial' && <ReceiptsList />}
       {activeTab === 'metodos' && <PaymentMethodsConfig />}
       {activeTab === 'prelacion' && <PaymentHierarchyConfig />}
     </div>
