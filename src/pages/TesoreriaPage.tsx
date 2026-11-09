@@ -15,6 +15,12 @@ const tabs: { id: TreasuryTab; label: string }[] = [
 
 export default function TesoreriaPage() {
   const [activeTab, setActiveTab] = useState<TreasuryTab>('recibos');
+  const [editingReceiptData, setEditingReceiptData] = useState<any | null>(null);
+
+  function handleEditReceipt(receipt: any) {
+    setEditingReceiptData(receipt);
+    setActiveTab('recibos');
+  }
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -39,8 +45,15 @@ export default function TesoreriaPage() {
         ))}
       </div>
 
-      {activeTab === 'recibos' && <ReceiptForm />}
-      {activeTab === 'historial' && <ReceiptsList />}
+      {activeTab === 'recibos' && (
+        <ReceiptForm 
+          initialData={editingReceiptData} 
+          onClearInitialData={() => setEditingReceiptData(null)} 
+        />
+      )}
+      {activeTab === 'historial' && (
+        <ReceiptsList onEditReceipt={handleEditReceipt} />
+      )}
       {activeTab === 'metodos' && <PaymentMethodsConfig />}
       {activeTab === 'prelacion' && <PaymentHierarchyConfig />}
     </div>
