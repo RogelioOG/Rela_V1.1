@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react';
-import { BookOpen, Plus, Trash2, Pencil, Loader2, ChevronRight, ChevronDown, AlertTriangle, Calendar, Lock, Unlock, Clock } from 'lucide-react';
+import { BookOpen, Plus, Trash2, Pencil, Loader2, ChevronRight, ChevronDown, AlertTriangle, Calendar, Lock, Unlock, Clock, Hash } from 'lucide-react';
 import { supabase, Account, JournalEntry, JournalLine, AccountingDocument, AccountingPeriod, ThirdParty } from '@/lib/supabase';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { Card, CardBody } from '@/components/ui/Card';
+import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input, Select } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
-import { formatCOP, formatShortDate, formatDateTime, accountingDocLabels, defaultAccountingDocs } from '@/lib/format';
+import { formatCOP, formatShortDate, formatDateTime, defaultAccountingDocs } from '@/lib/format';
 
 interface EditLine {
   id?: string;
@@ -26,6 +26,10 @@ function monthLabel(month: number, year: number): string {
 }
 
 function pad2(n: number): string { return String(n).padStart(2, '0'); }
+function pad4(n?: number | string | null): string {
+  if (n === undefined || n === null || n === '') return '0000';
+  return String(n).padStart(4, '0');
+}
 
 function monthRange(month: number, year: number): { start: string; end: string } {
   const start = `${year}-${pad2(month)}-01`;
@@ -52,6 +56,7 @@ export default function AsientosPage() {
   // Entry modal
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingDocNumber, setEditingDocNumber] = useState<number | null>(null);
   const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), description: '', document_type: 'NT' });
   const [lines, setLines] = useState<EditLine[]>([]);
   const [saving, setSaving] = useState(false);
@@ -113,6 +118,7 @@ export default function AsientosPage() {
 
   function openCreate() {
     setEditingId(null);
+    setEditingDocNumber(null);
     const defaultDate = activePeriod ? activePeriod.start_date : new Date().toISOString().slice(0, 10);
     setForm({ date: defaultDate, description: '', document_type: 'NT' });
     setLines([{ account_id: '', debit: '', credit: '', third_party_id: '' }, { account_id: '', debit: '', credit: '', third_party_id: '' }]);
@@ -123,6 +129,7 @@ export default function AsientosPage() {
 
   function openEdit(je: JournalEntry & { journal_lines?: JournalLine[] }) {
     setEditingId(je.id);
+    setEditingDocNumber(je.document_number ?? null);
     setForm({ date: je.date, description: je.description, document_type: je.document_type || 'NT' });
     setLines((je.journal_lines || []).map(l => ({ id: l.id, account_id: l.account_id, debit: String(l.debit), credit: String(l.credit), third_party_id: l.third_party_id || '' })));
     setError('');
@@ -239,14 +246,12 @@ export default function AsientosPage() {
     const label = monthLabel(month, year);
     const { start, end } = monthRange(month, year);
 
-    // Check if period already exists
     const existing = periods.find(p => p.month === month && p.year === year);
     if (existing) {
       setError('Ya existe un periodo para ' + label);
       setPeriodSaving(false); return;
     }
 
-    // Close previous open period if requested
     if (closePrevious) {
       const openPeriods = periods.filter(p => p.status === 'open');
       for (const op of openPeriods) {
@@ -293,7 +298,6 @@ export default function AsientosPage() {
     await loadData();
   }
 
-  // Filtered entries by document type and period
   const filteredEntries = entries.filter(je => {
     const docMatch = !filterDocType || je.document_type === filterDocType;
     let periodMatch = true;
@@ -310,13 +314,15 @@ export default function AsientosPage() {
 
   const totalDebit = lines.reduce((s, l) => s + (parseFloat(l.debit) || 0), 0);
   const totalCredit = lines.reduce((s, l) => s + (parseFloat(l.credit) || 0), 0);
+  const selectedDocObj = docs.find(d => d.prefix === form.document_type);
+  const displayConsecutive = editingId ? editingDocNumber : selectedDocObj?.next_consecutive;
 
   return (
     <div className="max-w-7xl mx-auto">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Asientos Contables</h1>
-          <p className="text-gray-500 mt-1">Asientos manuales y de ajuste · Los asientos automáticos del POS no se listan aquí</p>
+          <p className="text-gray-500 mt-1">Comprobantes contables, causaciones y recibos sincronizados con consecutivos autorizados</p>
         </div>
         <div className="flex gap-2">
           {canManagePeriods && (
@@ -357,7 +363,7 @@ export default function AsientosPage() {
         <div>
           <label className="block text-xs text-gray-500 mb-1">Tipo de Documento</label>
           <select value={filterDocType} onChange={(e) => setFilterDocType(e.target.value)}
-            className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[160px]">
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[180px]">
             <option value="">Todos los documentos</option>
             {docs.map(d => <option key={d.prefix} value={d.prefix}>{d.prefix} — {d.label}</option>)}
           </select>
@@ -383,14 +389,16 @@ export default function AsientosPage() {
         ) : filteredEntries.length === 0 ? (
           <div className="text-center py-16">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gray-100 mb-4"><BookOpen className="w-8 h-8 text-gray-400" /></div>
-            <p className="text-gray-500">No hay asientos contables manuales registrados</p>
-            <p className="text-sm text-gray-400 mt-1">Cree un nuevo asiento para comenzar.</p>
+            <p className="text-gray-500">No hay asientos contables registrados</p>
+            <p className="text-sm text-gray-400 mt-1">Cree un nuevo asiento o registre un documento para comenzar.</p>
           </div>
         ) : (
           <div className="divide-y divide-gray-100">
             {filteredEntries.map(je => {
               const expanded = expandedEntry === je.id;
               const debit = (je.journal_lines || []).reduce((s, l) => s + l.debit, 0);
+              const docPrefix = je.document_type || 'NT';
+              const formattedNum = `${docPrefix}-${pad4(je.document_number)}`;
               return (
                 <div key={je.id}>
                   <div className="flex items-center justify-between px-6 py-3 hover:bg-gray-50">
@@ -399,7 +407,7 @@ export default function AsientosPage() {
                       <div className="text-left min-w-0">
                         <p className="text-sm font-medium text-gray-900 truncate">{je.description || 'Sin descripción'}</p>
                         <p className="text-xs text-gray-500">
-                          {formatShortDate(je.date)} · {je.document_type || 'NT'} {je.document_number || ''}
+                          {formatShortDate(je.date)} · <span className="font-semibold text-blue-700">{formattedNum}</span>
                         </p>
                       </div>
                     </button>
@@ -414,21 +422,21 @@ export default function AsientosPage() {
                     </div>
                   </div>
                   {expanded && je.journal_lines && (
-                    <div className="px-12 py-2 bg-gray-50">
+                    <div className="px-12 py-3 bg-gray-50">
                       <table className="w-full text-sm">
-                        <thead><tr className="text-xs text-gray-500">
-                          <th className="text-left py-1">Cuenta</th><th className="text-left py-1">Tercero</th><th className="text-right py-1">Débito</th><th className="text-right py-1">Crédito</th>
+                        <thead><tr className="text-xs text-gray-500 border-b border-gray-200">
+                          <th className="text-left py-1.5">Cuenta</th><th className="text-left py-1.5">Tercero</th><th className="text-right py-1.5">Débito</th><th className="text-right py-1.5">Crédito</th>
                         </tr></thead>
-                        <tbody>
+                        <tbody className="divide-y divide-gray-100">
                           {je.journal_lines.map(line => {
                             const acc = accounts.find(a => a.id === line.account_id);
                             const tp = thirdParties.find(t => t.id === line.third_party_id);
                             return (
                               <tr key={line.id}>
-                                <td className="py-1 text-gray-700">{acc ? `${acc.code} — ${acc.name}` : 'N/A'}</td>
-                                <td className="py-1 text-gray-600">{tp ? tp.name : '—'}</td>
-                                <td className="py-1 text-right text-gray-900">{line.debit > 0 ? formatCOP(line.debit) : '-'}</td>
-                                <td className="py-1 text-right text-gray-900">{line.credit > 0 ? formatCOP(line.credit) : '-'}</td>
+                                <td className="py-1.5 text-gray-700">{acc ? `${acc.code} — ${acc.name}` : 'N/A'}</td>
+                                <td className="py-1.5 text-gray-600">{tp ? tp.name : '—'}</td>
+                                <td className="py-1.5 text-right text-gray-900">{line.debit > 0 ? formatCOP(line.debit) : '-'}</td>
+                                <td className="py-1.5 text-right text-gray-900">{line.credit > 0 ? formatCOP(line.credit) : '-'}</td>
                               </tr>
                             );
                           })}
@@ -443,69 +451,166 @@ export default function AsientosPage() {
         )}
       </Card>
 
-      {/* Create/Edit Entry Modal */}
-      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editingId ? 'Editar Asiento Contable' : 'Nuevo Asiento Contable'} size="lg">
-        <form onSubmit={handleSubmit} className="space-y-4">
+      {/* Create/Edit Entry Modal - Ampliado al 92% de ancho de pantalla */}
+      <Modal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title={
+          editingId
+            ? `Editar Asiento Contable · ${form.document_type}-${pad4(editingDocNumber)}`
+            : 'Nuevo Asiento Contable'
+        }
+        size="xl"
+        className="!max-w-[92vw] w-full"
+      >
+        <form onSubmit={handleSubmit} className="space-y-5">
           {periodError && (
             <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 flex items-start gap-2">
               <Lock className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
               <p className="text-sm text-red-700">{periodError}</p>
             </div>
           )}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <Input label="Fecha *" type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} required />
-            <Select label="Documento Contable *" value={form.document_type} onChange={(e) => setForm({ ...form, document_type: e.target.value })} required>
-              {docs.length === 0 ? (
-                <option value="NT">NT — Comprobante Contable</option>
-              ) : (
-                docs.map(d => <option key={d.prefix} value={d.prefix}>{d.prefix} — {d.label}</option>)
-              )}
-            </Select>
-            <Input label="Descripción" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Concepto del asiento" />
+
+          {/* Banner de Consecutivo Visible */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
+            <div className="flex items-center gap-2.5">
+              <Hash className="w-5 h-5 text-blue-600" />
+              <div>
+                <p className="text-xs font-medium text-blue-700 uppercase tracking-wider">
+                  {editingId ? 'Consecutivo del Documento Registrado' : 'Próximo Consecutivo Parametrizado'}
+                </p>
+                <p className="text-base font-bold text-blue-950">
+                  {form.document_type}-{pad4(displayConsecutive)}
+                  {selectedDocObj ? ` (${selectedDocObj.label})` : ''}
+                </p>
+              </div>
+            </div>
+            <Badge variant="blue">{editingId ? 'Modo Edición' : 'Consecutivo Automático'}</Badge>
           </div>
 
-          {!editingId && docs.find(d => d.prefix === form.document_type) && (
-            <div className="rounded-lg bg-blue-50 border border-blue-200 px-4 py-2">
-              <p className="text-xs text-blue-700">
-                Se asignará el número <strong>{docs.find(d => d.prefix === form.document_type)?.next_consecutive}</strong> al documento <strong>{form.document_type}</strong>.
-              </p>
+          {/* Datos de Encabezado con amplio espacio */}
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+            <div className="md:col-span-3">
+              <Input label="Fecha *" type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} required />
             </div>
-          )}
+            <div className="md:col-span-4">
+              <Select
+                label="Documento Contable *"
+                value={form.document_type}
+                onChange={(e) => setForm({ ...form, document_type: e.target.value })}
+                disabled={!!editingId}
+                required
+              >
+                {docs.length === 0 ? (
+                  <option value="NT">NT — Comprobante Contable</option>
+                ) : (
+                  docs.map(d => <option key={d.prefix} value={d.prefix}>{d.prefix} — {d.label}</option>)
+                )}
+              </Select>
+            </div>
+            <div className="md:col-span-5">
+              <Input label="Descripción / Concepto General" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Ej: Recibo de Caja No. RC-0001 o ajuste contable..." />
+            </div>
+          </div>
 
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <p className="text-sm font-medium text-gray-700">Líneas del Asiento</p>
-              <Button type="button" size="sm" variant="outline" onClick={addLine}><Plus className="w-3 h-3" /> Línea</Button>
+          {/* Sección de Líneas del Asiento con columnas amplias */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between border-b border-gray-200 pb-2">
+              <p className="text-sm font-semibold text-gray-800">Detalle de Movimientos (Partida Doble)</p>
+              <Button type="button" size="sm" variant="outline" onClick={addLine}>
+                <Plus className="w-4 h-4" /> Agregar Línea
+              </Button>
             </div>
-            {lines.map((line, idx) => (
-              <div key={idx} className="grid grid-cols-12 gap-2 items-center">
-                <div className="col-span-4">
-                  <select value={line.account_id} onChange={(e) => updateLine(idx, 'account_id', e.target.value)}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    <option value="">Seleccione cuenta</option>
-                    {accounts.map(a => <option key={a.id} value={a.id}>{a.code} — {a.name}</option>)}
-                  </select>
+
+            {/* Encabezados de la tabla de líneas */}
+            <div className="hidden lg:grid lg:grid-cols-12 gap-3 px-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+              <div className="lg:col-span-4">Cuenta Contable *</div>
+              <div className="lg:col-span-3">Tercero *</div>
+              <div className="lg:col-span-2 text-right">Débito ($)</div>
+              <div className="lg:col-span-2 text-right">Crédito ($)</div>
+              <div className="lg:col-span-1 text-center">Acción</div>
+            </div>
+
+            <div className="space-y-2.5 max-h-[45vh] overflow-y-auto pr-1">
+              {lines.map((line, idx) => (
+                <div key={idx} className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-center bg-gray-50/70 p-2.5 rounded-lg border border-gray-200/80">
+                  <div className="lg:col-span-4">
+                    <label className="block lg:hidden text-xs text-gray-500 mb-1">Cuenta Contable</label>
+                    <select
+                      value={line.account_id}
+                      onChange={(e) => updateLine(idx, 'account_id', e.target.value)}
+                      className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="">Seleccione cuenta contable...</option>
+                      {accounts.map(a => <option key={a.id} value={a.id}>{a.code} — {a.name}</option>)}
+                    </select>
+                  </div>
+
+                  <div className="lg:col-span-3">
+                    <label className="block lg:hidden text-xs text-gray-500 mb-1">Tercero</label>
+                    <select
+                      value={line.third_party_id}
+                      onChange={(e) => updateLine(idx, 'third_party_id', e.target.value)}
+                      className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="">Seleccione tercero...</option>
+                      {thirdParties.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    </select>
+                  </div>
+
+                  <div className="lg:col-span-2">
+                    <label className="block lg:hidden text-xs text-gray-500 mb-1">Débito</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="0.00"
+                      value={line.debit}
+                      onChange={(e) => updateLine(idx, 'debit', e.target.value)}
+                      className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-right font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div className="lg:col-span-2">
+                    <label className="block lg:hidden text-xs text-gray-500 mb-1">Crédito</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="0.00"
+                      value={line.credit}
+                      onChange={(e) => updateLine(idx, 'credit', e.target.value)}
+                      className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-right font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div className="lg:col-span-1 flex justify-end lg:justify-center">
+                    <button
+                      type="button"
+                      onClick={() => removeLine(idx)}
+                      className="p-2 rounded-lg text-red-500 hover:bg-red-50 hover:text-red-700 transition-colors"
+                      title="Eliminar línea"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
-                <div className="col-span-4">
-                  <select value={line.third_party_id} onChange={(e) => updateLine(idx, 'third_party_id', e.target.value)}
-                    className="w-full rounded-lg border border-gray-300 px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    <option value="">Tercero *</option>
-                    {thirdParties.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                  </select>
-                </div>
-                <input type="number" step="0.01" placeholder="Débito" value={line.debit} onChange={(e) => updateLine(idx, 'debit', e.target.value)}
-                  className="col-span-1 rounded-lg border border-gray-300 px-2 py-2 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                <input type="number" step="0.01" placeholder="Crédito" value={line.credit} onChange={(e) => updateLine(idx, 'credit', e.target.value)}
-                  className="col-span-2 rounded-lg border border-gray-300 px-2 py-2 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                <button type="button" onClick={() => removeLine(idx)} className="col-span-1 p-2 text-red-400 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>
-              </div>
-            ))}
+              ))}
+            </div>
+
             {lines.length > 0 && (
-              <div className="flex justify-between text-sm border-t border-gray-200 pt-2">
-                <span className="font-medium text-gray-700">Totales:</span>
-                <div className="flex gap-6">
-                  <span className={Math.abs(totalDebit - totalCredit) < 0.01 ? 'text-green-600 font-medium' : 'text-red-600 font-medium'}>Débito: {formatCOP(totalDebit)}</span>
-                  <span className={Math.abs(totalDebit - totalCredit) < 0.01 ? 'text-green-600 font-medium' : 'text-red-600 font-medium'}>Crédito: {formatCOP(totalCredit)}</span>
+              <div className="flex flex-wrap items-center justify-between gap-4 bg-gray-100 rounded-lg px-4 py-3 text-sm border border-gray-200">
+                <span className="font-semibold text-gray-700">Sumas Iguales (Balance):</span>
+                <div className="flex flex-wrap gap-6">
+                  <span className={Math.abs(totalDebit - totalCredit) < 0.01 ? 'text-green-700 font-bold' : 'text-red-600 font-bold'}>
+                    Total Débito: {formatCOP(totalDebit)}
+                  </span>
+                  <span className={Math.abs(totalDebit - totalCredit) < 0.01 ? 'text-green-700 font-bold' : 'text-red-600 font-bold'}>
+                    Total Crédito: {formatCOP(totalCredit)}
+                  </span>
+                  {Math.abs(totalDebit - totalCredit) >= 0.01 && (
+                    <span className="text-red-600 font-semibold">
+                      Diferencia: {formatCOP(Math.abs(totalDebit - totalCredit))}
+                    </span>
+                  )}
                 </div>
               </div>
             )}
@@ -518,9 +623,11 @@ export default function AsientosPage() {
             </div>
           )}
 
-          <div className="flex justify-end gap-3 pt-2">
+          <div className="flex justify-end gap-3 pt-3 border-t border-gray-200">
             <Button type="button" variant="outline" onClick={() => setModalOpen(false)}>Cancelar</Button>
-            <Button type="submit" disabled={saving}>{saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Guardando...</> : (editingId ? 'Guardar Cambios' : 'Crear Asiento')}</Button>
+            <Button type="submit" disabled={saving}>
+              {saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Guardando...</> : (editingId ? 'Guardar Cambios' : 'Crear Asiento')}
+            </Button>
           </div>
         </form>
       </Modal>
@@ -538,7 +645,6 @@ export default function AsientosPage() {
       {/* Period Management Modal */}
       <Modal open={periodModalOpen} onClose={() => setPeriodModalOpen(false)} title="Gestionar Periodos Contables" size="lg">
         <div className="space-y-5">
-          {/* Create new period */}
           <div className="rounded-lg border border-gray-200 p-4 space-y-3">
             <h4 className="text-sm font-semibold text-gray-700">Crear Nuevo Periodo</h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -558,7 +664,6 @@ export default function AsientosPage() {
             </Button>
           </div>
 
-          {/* Existing periods list */}
           <div>
             <h4 className="text-sm font-semibold text-gray-700 mb-2">Periodos Existentes</h4>
             {periods.length === 0 ? (
@@ -608,7 +713,6 @@ export default function AsientosPage() {
                 <p className="text-sm font-medium text-yellow-800">¿Cerrar el periodo {closeTargetPeriod.label}?</p>
                 <p className="text-xs text-yellow-700 mt-1">
                   Al cerrar el periodo, no se podrán crear ni editar asientos con fechas dentro de este rango.
-                  Podrá ver toda la información histórica, pero el periodo quedará bloqueado para nuevas entradas.
                 </p>
               </div>
             </div>
