@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { Unit, Due, PaymentAgreement, DiscountTier, BillingConcept } from '@/lib/supabase';
 import { Organization, supabase } from '@/lib/supabase';
+import { resolveInterestConcept, assertInterestAccounts } from '@/lib/interestAccounts';
 import { Card, CardBody } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -560,10 +561,9 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
       const defaultReceivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
       const defaultIncomeAcc = accounts.find(a => a.code.startsWith('4')) || accounts[1] || accounts[0];
 
-      // Búsqueda dinámica estándar del concepto de intereses de mora
-      const interestConcept = concepts.find(
-        c => c.is_late_interest === true || c.code === 'MORA_ADM' || c.category === 'penalizacion'
-      );
+      // Sub-concepto de intereses de mora parametrizado (valida antes de guardar nada)
+      const interestConcept = resolveInterestConcept(concepts);
+      assertInterestAccounts(interestConcept, liquidation.some(r => (r.interestAmount || 0) > 0));
 
       const batchInvoices = [];
 
@@ -664,32 +664,22 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // CAUSACIÓN DE INTERESES DE MORA
-          if (row.interestAmount > 0) {
-            const interestDebitAcc = interestConcept?.counterpart_account_id || defaultReceivableAcc?.id;
-            const interestCreditAcc = interestConcept?.income_account_id || defaultIncomeAcc?.id;
-
-            // 🛑 PRUEBA DE FUEGO: Abre la consola de tu navegador (F12) al contabilizar
-            console.log("CONCEPTOS DE INTERESES ENCONTRADOS:", interestConcept);
-            console.log("CUENTA DÉBITO A INSERTAR:", interestDebitAcc);
-            console.log("CUENTA CRÉDITO A INSERTAR:", interestCreditAcc);
-
-            if (interestDebitAcc && interestCreditAcc) {
-              linesToInsert.push({
-                journal_entry_id: je.id,
-                account_id: interestDebitAcc,
-                debit: row.interestAmount,
-                credit: 0,
-                third_party_id: assignedThirdPartyId,
-              });
-              linesToInsert.push({
-                journal_entry_id: je.id,
-                account_id: interestCreditAcc,
-                debit: 0,
-                credit: row.interestAmount,
-                third_party_id: assignedThirdPartyId,
-              });
-            }
+          // CAUSACIÓN DE INTERESES DE MORA: solo con las cuentas parametrizadas del sub-concepto
+          if (row.interestAmount > 0 && interestConcept) {
+            linesToInsert.push({
+              journal_entry_id: je.id,
+              account_id: interestConcept.counterpart_account_id,
+              debit: row.interestAmount,
+              credit: 0,
+              third_party_id: assignedThirdPartyId,
+            });
+            linesToInsert.push({
+              journal_entry_id: je.id,
+              account_id: interestConcept.income_account_id,
+              debit: 0,
+              credit: row.interestAmount,
+              third_party_id: assignedThirdPartyId,
+            });
           }
 
           if (linesToInsert.length === 0 && row.currentCharges > 0) {
@@ -730,7 +720,11 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
       setIsFinalized(true);
     } catch (e) {
       console.warn('Error al registrar asientos contables en bloque:', e);
-      setError('Ocurrió un inconveniente al contabilizar.');
+      setError(
+        e instanceof Error && e.message.startsWith('CONFIG:')
+          ? e.message.replace('CONFIG:', '').trim()
+          : 'Ocurrió un inconveniente al contabilizar.'
+      );
     }
 
     setFinalizing(false);
