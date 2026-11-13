@@ -664,10 +664,15 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
-          // CAUSACIÓN DE INTERESES DE MORA: Tratado estándar dinámicamente con las cuentas parametrizadas
+          // CAUSACIÓN DE INTERESES DE MORA
           if (row.interestAmount > 0) {
             const interestDebitAcc = interestConcept?.counterpart_account_id || defaultReceivableAcc?.id;
             const interestCreditAcc = interestConcept?.income_account_id || defaultIncomeAcc?.id;
+
+            // 🛑 PRUEBA DE FUEGO: Abre la consola de tu navegador (F12) al contabilizar
+            console.log("CONCEPTOS DE INTERESES ENCONTRADOS:", interestConcept);
+            console.log("CUENTA DÉBITO A INSERTAR:", interestDebitAcc);
+            console.log("CUENTA CRÉDITO A INSERTAR:", interestCreditAcc);
 
             if (interestDebitAcc && interestCreditAcc) {
               linesToInsert.push({
