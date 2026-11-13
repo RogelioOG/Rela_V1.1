@@ -10,6 +10,7 @@ import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
 import { formatCOP } from '@/lib/format';
 import Paso2FormatoEnvio from '@/components/facturacion/Paso2FormatoEnvio';
+import { resolveInterestConcept, assertInterestAccounts } from '@/lib/interestAccounts';
 
 export interface ChargeLine {
   conceptId: string;
@@ -593,10 +594,9 @@ export default function ProcesoFacturacionPage() {
       const defaultReceivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
       const defaultIncomeAcc = accounts.find(a => a.code.startsWith('4')) || accounts[1] || accounts[0];
 
-      // Búsqueda del concepto de intereses de mora por bandera, código o categoría
-      const interestConcept = concepts.find(
-        c => c.is_late_interest === true || c.code === 'MORA_ADM' || c.category === 'penalizacion'
-      );
+      // Sub-concepto de intereses de mora parametrizado (valida antes de guardar nada)
+      const interestConcept = resolveInterestConcept(concepts);
+      assertInterestAccounts(interestConcept, liquidation.some(r => (r.interestAmount || 0) > 0));
 
       for (let i = 0; i < liquidation.length; i++) {
         const row = liquidation[i];
@@ -681,22 +681,18 @@ export default function ProcesoFacturacionPage() {
             }
           }
 
-          // CAUSACIÓN DE INTERESES DE MORA: Forzando estrictamente las cuentas de orden de MORA_ADM
-          if (row.interestAmount > 0) {
-            // UUIDs fijos extraídos de tu configuración de MORA_ADM en la base de datos
-            const moraDebitAccId = 'b9e38d60-ce8c-4b72-9955-ef6a511805c5'; // Cuenta de orden débito
-            const moraCreditAccId = '3944487e-aff4-42b0-a4f8-7fa294a2af79'; // Cuenta de orden crédito
-
+          // CAUSACIÓN DE INTERESES DE MORA: solo con las cuentas parametrizadas del sub-concepto
+          if (row.interestAmount > 0 && interestConcept) {
             linesToInsert.push({
               journal_entry_id: je.id,
-              account_id: moraDebitAccId,
+              account_id: interestConcept.counterpart_account_id,
               debit: row.interestAmount,
               credit: 0,
               third_party_id: assignedThirdPartyId,
             });
             linesToInsert.push({
               journal_entry_id: je.id,
-              account_id: moraCreditAccId,
+              account_id: interestConcept.income_account_id,
               debit: 0,
               credit: row.interestAmount,
               third_party_id: assignedThirdPartyId,
@@ -719,7 +715,11 @@ export default function ProcesoFacturacionPage() {
       loadData();
     } catch (err) {
       console.warn('Error al finalizar y contabilizar:', err);
-      setError('Ocurrió un inconveniente al contabilizar el periodo.');
+      setError(
+        err instanceof Error && err.message.startsWith('CONFIG:')
+          ? err.message.replace('CONFIG:', '').trim()
+          : 'Ocurrió un inconveniente al contabilizar el periodo.'
+      );
     }
     setLoading(false);
   }
