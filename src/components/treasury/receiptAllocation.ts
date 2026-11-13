@@ -56,17 +56,17 @@ export function buildDetailedDueItems(
   const conceptMap = new Map<string, BillingConcept>();
   concepts.forEach(c => conceptMap.set(c.id, c));
 
-  let applicableDiscountPercent = 0;
+  // Selección inteligente del escalón de descuento aplicable según la fecha de pago
+  let matchedTier: any = null;
   if (paymentDateStr && discountTiers.length > 0) {
     const paymentDay = new Date(paymentDateStr + 'T00:00:00').getDate();
-    const sortedTiers = [...discountTiers].sort((a, b) => (a.tier_order || 0) - (b.tier_order || 0));
+    // Ordenar los escalones por orden o por día válido de menor a mayor
+    const sortedTiers = [...discountTiers].sort((a, b) => (a.valid_until_day || 0) - (b.valid_until_day || 0));
     
     for (const tier of sortedTiers) {
       if (tier.is_active && paymentDay <= (tier.valid_until_day || 0)) {
-        if (tier.discount_type === 'porcentaje') {
-          applicableDiscountPercent = Number(tier.discount_value || 0);
-          break;
-        }
+        matchedTier = tier;
+        break; // Tomamos el primer escalón válido al que alcance a llegar por fecha
       }
     }
   }
@@ -84,11 +84,23 @@ export function buildDetailedDueItems(
 
         if (amount > 0) {
           let itemDiscount = 0;
-          const isEligibleByTier = concept && (concept.maneja_descuento || 
+          
+          const isEligibleByConcept = concept && (concept.maneja_descuento || 
             discountTiers.some(t => Array.isArray(t.calculation_base_concept_ids) && t.calculation_base_concept_ids.includes(conceptId)));
 
-          if (isEligibleByTier && applicableDiscountPercent > 0 && !isInterest) {
-            itemDiscount = roundMoney((amount * applicableDiscountPercent) / 100);
+          if (matchedTier && isEligibleByConcept && !isInterest) {
+            const baseConceptIds = matchedTier.calculation_base_concept_ids;
+            const appliesToThisConcept = !baseConceptIds || baseConceptIds.length === 0 || baseConceptIds.includes(conceptId);
+
+            if (appliesToThisConcept) {
+              const valNum = Number(matchedTier.discount_value || 0);
+              if (matchedTier.discount_type === 'porcentaje') {
+                itemDiscount = roundMoney((amount * valNum) / 100);
+              } else if (matchedTier.discount_type === 'monto') {
+                // Si es monto fijo, se distribuye proporcionalmente o se aplica hasta el monto del ítem
+                itemDiscount = roundMoney(Math.min(valNum, amount));
+              }
+            }
           }
 
           const netBal = roundMoney(Math.max(amount - itemDiscount, 0));
@@ -105,7 +117,7 @@ export function buildDetailedDueItems(
             netBalance: netBal,
             priorityOrder: priorityMap.get(conceptId) ?? (isInterest ? 1 : 2),
             isInterest: isInterest,
-            eligibleForDiscount: !!isEligibleByTier,
+            eligibleForDiscount: !!isEligibleByConcept,
             discountAmount: itemDiscount,
           });
         }
@@ -154,7 +166,6 @@ export function allocateReceipt(
   let remaining = roundMoney(Math.max(totalReceived, 0));
 
   for (const item of items) {
-    // Se distribuye contra el saldo neto (que ya incluye el descuento descontado si aplica)
     const targetBalance = item.netBalance > 0 ? item.netBalance : item.balance;
     const pay = roundMoney(Math.min(remaining, targetBalance));
     amounts[item.id] = { applied: pay };
