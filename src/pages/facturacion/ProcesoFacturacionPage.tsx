@@ -367,7 +367,6 @@ export default function ProcesoFacturacionPage() {
       const periodDue = dues.find(d => d.unit_id === unit.id && d.period === billingPeriod) || null;
 
       if (periodDue) {
-        // Recuperamos con precisión el interés si el periodo ya está finalizado y guardado en dues
         const expectedBase = priorBalance + currentCharges;
         if (periodDue.amount > expectedBase) {
           interestAmount = round2(periodDue.amount - expectedBase);
@@ -557,6 +556,174 @@ export default function ProcesoFacturacionPage() {
     return totals;
   }, [discountRows, activeTiers]);
 
+  async function handleFinalizeProcess() {
+    if (!activeOrg) return;
+    setLoading(true);
+    setError('');
+
+    try {
+      const periodStartDate = `${billingPeriod}-01`;
+      const periodEndDate = `${billingPeriod}-28`;
+
+      const { data: docConfig } = await supabase
+        .from('accounting_documents')
+        .select('*')
+        .eq('organization_id', activeOrg.id)
+        .eq('prefix', 'CC')
+        .single();
+
+      let nextSeq = docConfig?.next_consecutive || 1;
+
+      const [{ data: accountsData }, { data: conceptsData }, { data: thirdPartiesData }] = await Promise.all([
+        supabase.from('accounts').select('*').eq('organization_id', activeOrg.id),
+        supabase.from('billing_concepts').select('*').eq('organization_id', activeOrg.id),
+        supabase.from('third_parties').select('*').eq('organization_id', activeOrg.id),
+      ]);
+
+      const accounts = accountsData || [];
+      const concepts = conceptsData || [];
+      const thirdParties = thirdPartiesData || [];
+
+      const conceptMap = new Map<string, any>();
+      for (const c of concepts) {
+        conceptMap.set(c.id, c);
+        if (c.code) conceptMap.set(c.code.toUpperCase(), c);
+      }
+
+      const defaultReceivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
+      const defaultIncomeAcc = accounts.find(a => a.code.startsWith('4')) || accounts[1] || accounts[0];
+
+      for (let i = 0; i < liquidation.length; i++) {
+        const row = liquidation[i];
+        const invoiceNumber = `CC-${String(nextSeq + i).padStart(4, '0')}`;
+        const rowId = row.rowId || 'inv-' + Math.random().toString(36).substring(2, 9);
+
+        let assignedThirdPartyId = row.unit.third_party_id || null;
+        if (!assignedThirdPartyId && thirdParties.length > 0) {
+          const tpMatch = thirdParties.find(t => t.document_number === row.unit.owner_document);
+          if (tpMatch) assignedThirdPartyId = tpMatch.id;
+        }
+
+        await supabase.from('dues').insert({
+          organization_id: activeOrg.id,
+          unit_id: row.unit.id,
+          period: billingPeriod,
+          amount: row.netTotal,
+          balance: row.netTotal,
+          status: 'pendiente',
+          due_date: periodEndDate,
+        });
+
+        const snapshotItems = row.chargeLines && row.chargeLines.length > 0 ? row.chargeLines : [
+          { conceptName: 'Cuota de Administración / Cargos', amount: row.currentCharges }
+        ];
+
+        const cleanCharges = row.currentCharges;
+        const grossTotal = round2(cleanCharges + (row.priorBalance || 0) + (row.interestAmount || 0));
+
+        await supabase.from('invoices').insert({
+          organization_id: activeOrg.id,
+          unit_id: row.unit.id,
+          period: billingPeriod,
+          invoice_number: invoiceNumber,
+          issue_date: periodStartDate,
+          due_date: periodEndDate,
+          subtotal: row.currentCharges,
+          interest_amount: row.interestAmount,
+          discount_amount: row.discountAmount,
+          total_amount: grossTotal,
+          status: 'pendiente',
+          items_snapshot: snapshotItems,
+        });
+
+        const { data: je, error: jeErr } = await supabase.from('journal_entries').insert({
+          organization_id: activeOrg.id,
+          date: periodStartDate,
+          description: `Causación Cuota de Cobro ${invoiceNumber} - ${row.unit.tower ? row.unit.tower + '-' : ''}${row.unit.unit_label} Periodo ${billingPeriod}`,
+          document_type: 'CC',
+          document_number: nextSeq + i,
+          is_manual: true,
+        }).select().single();
+
+        if (!jeErr && je) {
+          const linesToInsert = [];
+
+          if (row.chargeLines && row.chargeLines.length > 0) {
+            for (const cl of row.chargeLines) {
+              const conceptDef = conceptMap.get(cl.conceptId) || conceptMap.get(cl.conceptCode?.toUpperCase());
+              const debitAccId = conceptDef?.counterpart_account_id || defaultReceivableAcc?.id;
+              const creditAccId = conceptDef?.income_account_id || defaultIncomeAcc?.id;
+
+              if (cl.amount > 0) {
+                if (debitAccId) {
+                  linesToInsert.push({
+                    journal_entry_id: je.id,
+                    account_id: debitAccId,
+                    debit: cl.amount,
+                    credit: 0,
+                    third_party_id: assignedThirdPartyId,
+                  });
+                }
+                if (creditAccId) {
+                  linesToInsert.push({
+                    journal_entry_id: je.id,
+                    account_id: creditAccId,
+                    debit: 0,
+                    credit: cl.amount,
+                    third_party_id: assignedThirdPartyId,
+                  });
+                }
+              }
+            }
+          }
+
+          // CAUSACIÓN DE INTERESES DE MORA: Respetando estrictamente las cuentas de orden del concepto
+          if (row.interestAmount > 0) {
+            const interestConcept = concepts.find(c => c.is_late_interest || c.code === 'MORA_ADM' || c.category === 'penalizacion');
+            
+            // Débito: Cuenta contrapartida configurada en el concepto (ej: 86200501)
+            const interestDebitAcc = interestConcept?.counterpart_account_id || defaultReceivableAcc?.id;
+            
+            // Crédito: Cuenta de ingreso / orden configurada en el concepto (ej: 81200501)
+            const interestCreditAcc = interestConcept?.income_account_id || defaultIncomeAcc?.id;
+
+            if (interestDebitAcc && interestCreditAcc) {
+              linesToInsert.push({
+                journal_entry_id: je.id,
+                account_id: interestDebitAcc,
+                debit: row.interestAmount,
+                credit: 0,
+                third_party_id: assignedThirdPartyId,
+              });
+              linesToInsert.push({
+                journal_entry_id: je.id,
+                account_id: interestCreditAcc,
+                debit: 0,
+                credit: row.interestAmount,
+                third_party_id: assignedThirdPartyId,
+              });
+            }
+          }
+
+          await supabase.from('journal_lines').insert(linesToInsert);
+        }
+      }
+
+      if (docConfig) {
+        await supabase.from('accounting_documents')
+          .update({ next_consecutive: nextSeq + liquidation.length })
+          .eq('id', docConfig.id);
+      }
+
+      setIsFinalized(true);
+      loadData();
+    } catch (err) {
+      console.warn('Error al finalizar y contabilizar:', err);
+      setError('Ocurrió un inconveniente al contabilizar el periodo.');
+    }
+    setLoading(false);
+  }
+
   if (!activeOrg) return <NoOrgSelected />;
 
   return (
@@ -656,7 +823,6 @@ export default function ProcesoFacturacionPage() {
                         onChange={(e) => handleInterestRateChange(e.target.value)}
                         placeholder="Ej: 0.50"
                       />
-                      <p className="text-xs text-gray-400 mt-1">Parámetro de cálculo. No editable por propiedad.</p>
                     </div>
                     <div>
                       <Input
@@ -667,7 +833,6 @@ export default function ProcesoFacturacionPage() {
                         onChange={(e) => setGraceDays(e.target.value)}
                         placeholder="Ej: 5"
                       />
-                      <p className="text-xs text-gray-400 mt-1">Días posteriores al vencimiento sin interés.</p>
                     </div>
                     <div>
                       <Select
@@ -678,34 +843,6 @@ export default function ProcesoFacturacionPage() {
                         <option value="cierre_mes_anterior">Día de cierre del mes anterior</option>
                         <option value="inicio_mes_facturar">Día 1 del mes a facturar</option>
                       </Select>
-                      <p className="text-xs text-gray-400 mt-1">Define el corte de saldos elegibles según el periodo activo ({billingPeriod}).</p>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <Input
-                        label="Fecha de Inicio de Cobro Personalizada (opcional)"
-                        type="date"
-                        value={customStartDate}
-                        onChange={(e) => setCustomStartDate(e.target.value)}
-                        placeholder="DD/MM/AAAA"
-                      />
-                      <p className="text-xs text-gray-400 mt-1">
-                        Si se especifica, anula la regla de corte anterior. Solo se liquidan saldos a esta fecha.
-                      </p>
-                    </div>
-                    <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3 flex items-center gap-3">
-                      <Calendar className="w-5 h-5 text-blue-600 flex-shrink-0" />
-                      <div>
-                        <p className="text-xs text-gray-500">Fecha de corte efectiva</p>
-                        <p className="text-sm font-semibold text-gray-900">
-                          {effectiveCutoffDate.toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' })}
-                        </p>
-                        <p className="text-xs text-gray-400 mt-0.5">
-                          {customStartDate ? 'Fecha personalizada (activa)' : cutoffRuleLabels[cutoffRule]}
-                        </p>
-                      </div>
                     </div>
                   </div>
 
@@ -714,16 +851,6 @@ export default function ProcesoFacturacionPage() {
                       {reviewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Calculator className="w-4 h-4" />}
                       Revisar Liquidación
                     </Button>
-                    {reviewed && defaultedAgreements.length === 0 && (
-                      <span className="text-sm text-green-600 flex items-center gap-1">
-                        <CheckCircle2 className="w-4 h-4" /> Revisión completada sin incumplimientos
-                      </span>
-                    )}
-                    {reviewed && defaultedAgreements.length > 0 && (
-                      <span className="text-sm text-red-600 flex items-center gap-1">
-                        <AlertTriangle className="w-4 h-4" /> {defaultedAgreements.length} acuerdo(s) incumplido(s) detectado(s)
-                      </span>
-                    )}
                   </div>
 
                   {reviewed && (
@@ -808,6 +935,12 @@ export default function ProcesoFacturacionPage() {
                     </table>
                   </div>
                 )}
+                <div className="p-4 border-t border-gray-200 flex justify-end">
+                  <Button onClick={handleFinalizeProcess} disabled={loading}>
+                    {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                    Finalizar y Contabilizar Periodo
+                  </Button>
+                </div>
               </Card>
             )}
             </>
@@ -820,33 +953,11 @@ export default function ProcesoFacturacionPage() {
                   <Layers className="w-5 h-5 text-blue-600" />
                   Paso 2: Descuentos por Propiedad
                 </h2>
-                <div className="flex items-center gap-2">
-                  {activeTiers.map((t, index) => (
-                    <Badge key={t.id} variant="blue">
-                      Descuento {index + 1}: {t.discount_type === 'porcentaje' ? `${t.discount_value}%` : formatCOP(t.discount_value)} ({t.name} — día {t.valid_until_day})
-                    </Badge>
-                  ))}
-                </div>
               </div>
               <div className="p-5">
-                {isFinalized ? (
-                  <div className="text-center py-10 space-y-4">
-                    <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-green-100 text-green-700">
-                      <CheckCircle2 className="w-8 h-8" />
-                    </div>
-                    <h3 className="text-lg font-bold text-gray-900">El periodo ya fue contabilizado</h3>
-                    <p className="text-sm text-gray-500 max-w-md mx-auto">
-                      Los descuentos ya fueron aplicados y facturados. Puede avanzar directamente al Paso 3.
-                    </p>
-                    <div className="pt-2">
-                      <Button onClick={() => setCurrentStep(3)}>
-                        Ir al Paso 3: Formatos y Envío <ChevronRight className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  </div>
-                ) : discountRows.length === 0 ? (
+                {discountRows.length === 0 ? (
                   <div className="text-center py-12">
-                    <p className="text-gray-500">No hay propiedades con cargos para aplicar descuentos. Vuelva al Paso 1 y asegúrese de liquidar.</p>
+                    <p className="text-gray-500">No hay propiedades con cargos.</p>
                   </div>
                 ) : (
                   <>
@@ -859,7 +970,7 @@ export default function ProcesoFacturacionPage() {
                           {activeTiers.map((t, index) => (
                             <th key={t.id} className="text-right text-xs font-semibold text-blue-700 uppercase px-4 py-3">
                               Descuento {index + 1}<br/>
-                              <span className="text-[10px] text-gray-500 normal-case">({t.name} - {t.discount_type === 'porcentaje' ? `${t.discount_value}%` : formatCOP(t.discount_value)})</span>
+                              <span className="text-[10px] text-gray-500 normal-case">({t.name})</span>
                             </th>
                           ))}
                         </tr>
@@ -878,34 +989,19 @@ export default function ProcesoFacturacionPage() {
                               const inputVal = tierDetail?.overrideString !== undefined ? tierDetail.overrideString : String(tierDetail?.discountAmount || 0);
                               return (
                                 <td key={tier.id} className="px-4 py-3 text-right">
-                                  <div className="flex items-center justify-end gap-1">
-                                    <input
-                                      type="number"
-                                      step="0.01"
-                                      value={inputVal}
-                                      onChange={(e) => handleTierDiscountChange(rowIdx, tier.id, e.target.value)}
-                                      placeholder="0"
-                                      className="w-28 rounded border border-gray-300 px-2 py-1 text-xs text-right focus:outline-none focus:ring-1 focus:ring-blue-500"
-                                    />
-                                    <span className="text-xs text-gray-400">COP</span>
-                                  </div>
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    value={inputVal}
+                                    onChange={(e) => handleTierDiscountChange(rowIdx, tier.id, e.target.value)}
+                                    className="w-28 rounded border border-gray-300 px-2 py-1 text-xs text-right focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                  />
                                 </td>
                               );
                             })}
                           </tr>
                         ))}
                       </tbody>
-                      <tfoot>
-                        <tr className="border-t-2 border-gray-300 bg-gray-50 font-bold">
-                          <td className="px-4 py-3 text-gray-700">Totales ({discountRows.length})</td>
-                          <td className="px-4 py-3 text-right text-gray-900">{formatCOP(totalDiscountBase)}</td>
-                          {activeTiers.map(tier => (
-                            <td key={tier.id} className="px-4 py-3 text-right text-red-600">
-                              -{formatCOP(totalDiscountAmountsByTier[tier.id] || 0)}
-                            </td>
-                          ))}
-                        </tr>
-                      </tfoot>
                     </table>
                   </div>
                   <div className="mt-4 flex justify-between">
@@ -948,45 +1044,9 @@ export default function ProcesoFacturacionPage() {
               <p className="text-sm font-semibold text-red-800">
                 Se detectaron {defaultedAgreements.length} acuerdo(s) de pago incumplido(s)
               </p>
-              <p className="text-sm text-red-700 mt-1">
-                Las siguientes propiedades tienen acuerdos de pago en estado de incumplimiento.
-                Revise la situación antes de proceder con la facturación.
-              </p>
             </div>
           </div>
-
-          <div className="overflow-x-auto rounded-lg border border-gray-200">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-200 bg-gray-50">
-                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-2">Propiedad</th>
-                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-2 hidden sm:table-cell">Periodo Inicial</th>
-                  <th className="text-left text-xs font-semibold text-gray-600 uppercase px-4 py-2 hidden sm:table-cell">Periodo Final</th>
-                  <th className="text-right text-xs font-semibold text-gray-600 uppercase px-4 py-2">Cuota Mensual</th>
-                  <th className="text-center text-xs font-semibold text-gray-600 uppercase px-4 py-2">Estado</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {defaultedAgreements.map((a) => (
-                  <tr key={a.id} className="hover:bg-gray-50">
-                    <td className="px-4 py-3">
-                      <p className="text-sm font-medium text-gray-900">{a.units?.tower} {a.units?.unit_label}</p>
-                      <p className="text-xs text-gray-500">{a.units?.owner_name || ''}</p>
-                    </td>
-                    <td className="px-4 py-3 text-sm text-gray-700 hidden sm:table-cell">{a.start_period}</td>
-                    <td className="px-4 py-3 text-sm text-gray-700 hidden sm:table-cell">{a.end_period}</td>
-                    <td className="px-4 py-3 text-right text-sm text-gray-900">{formatCOP(a.monthly_amount)}</td>
-                    <td className="px-4 py-3 text-center">
-                      <Badge variant="red">Incumplido</Badge>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
           <div className="flex justify-end gap-3 pt-2">
-            <Button variant="outline" onClick={() => setWarningOpen(false)}>Cerrar y Revisar</Button>
             <Button onClick={() => setWarningOpen(false)}>
               <CheckCircle2 className="w-4 h-4" /> Continuar con Facturación
             </Button>
