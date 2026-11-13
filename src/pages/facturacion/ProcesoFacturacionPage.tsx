@@ -593,17 +593,10 @@ export default function ProcesoFacturacionPage() {
       const defaultReceivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
       const defaultIncomeAcc = accounts.find(a => a.code.startsWith('4')) || accounts[1] || accounts[0];
 
-      // Validación estricta del concepto de intereses de mora antes de procesar
+      // Búsqueda del concepto de intereses de mora por bandera, código o categoría
       const interestConcept = concepts.find(
-        c => c.is_late_interest === true || c.category === 'penalizacion' || c.code?.toUpperCase().includes('MORA')
+        c => c.is_late_interest === true || c.code === 'MORA_ADM' || c.category === 'penalizacion'
       );
-
-      const hasAnyInterest = liquidation.some(r => r.interestAmount > 0);
-      if (hasAnyInterest && (!interestConcept || !interestConcept.counterpart_account_id || !interestConcept.income_account_id)) {
-        setError('No se encontró un concepto de Intereses de Mora activo con sus cuentas de orden/ingreso parametrizadas. Verifica la configuración del concepto MORA_ADM.');
-        setLoading(false);
-        return;
-      }
 
       for (let i = 0; i < liquidation.length; i++) {
         const row = liquidation[i];
@@ -688,22 +681,27 @@ export default function ProcesoFacturacionPage() {
             }
           }
 
-          // CAUSACIÓN DE INTERESES DE MORA: Respeta estrictamente las cuentas de orden configuradas en el concepto
+          // CAUSACIÓN DE INTERESES DE MORA: Utiliza de forma estricta las cuentas de orden parametrizadas en MORA_ADM
           if (row.interestAmount > 0 && interestConcept) {
-            linesToInsert.push({
-              journal_entry_id: je.id,
-              account_id: interestConcept.counterpart_account_id!,
-              debit: row.interestAmount,
-              credit: 0,
-              third_party_id: assignedThirdPartyId,
-            });
-            linesToInsert.push({
-              journal_entry_id: je.id,
-              account_id: interestConcept.income_account_id!,
-              debit: 0,
-              credit: row.interestAmount,
-              third_party_id: assignedThirdPartyId,
-            });
+            const debitAcc = interestConcept.counterpart_account_id;
+            const creditAcc = interestConcept.income_account_id;
+
+            if (debitAcc && creditAcc) {
+              linesToInsert.push({
+                journal_entry_id: je.id,
+                account_id: debitAcc,
+                debit: row.interestAmount,
+                credit: 0,
+                third_party_id: assignedThirdPartyId,
+              });
+              linesToInsert.push({
+                journal_entry_id: je.id,
+                account_id: creditAcc,
+                debit: 0,
+                credit: row.interestAmount,
+                third_party_id: assignedThirdPartyId,
+              });
+            }
           }
 
           if (linesToInsert.length > 0) {
