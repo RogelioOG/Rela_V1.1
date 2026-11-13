@@ -56,6 +56,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
   const [invoicesMap, setInvoicesMap] = useState<Record<string, any>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingReceiptNumber, setEditingReceiptNumber] = useState<string | null>(null);
+  const [activeRevenuePeriod, setActiveRevenuePeriod] = useState<{ start_date: string; end_date: string; name: string } | null>(null);
 
   const [header, setHeader] = useState<HeaderState>({
     unitId: '',
@@ -83,7 +84,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     setLoadingReference(true);
     setReferenceError('');
 
-    const [unitsRes, methodsRes, hierarchyRes, conceptsRes, discountsRes] = await Promise.all([
+    const [unitsRes, methodsRes, hierarchyRes, conceptsRes, discountsRes, periodRes] = await Promise.all([
       supabase
         .from('units')
         .select('*')
@@ -112,6 +113,12 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         .from('discount_tiers')
         .select('*')
         .eq('organization_id', activeOrg.id),
+      supabase
+        .from('revenue_periods')
+        .select('start_date, end_date, name')
+        .eq('organization_id', activeOrg.id)
+        .eq('is_work_period_active', true)
+        .maybeSingle(),
     ]);
 
     if (unitsRes.error || methodsRes.error || hierarchyRes.error || conceptsRes.error) {
@@ -126,6 +133,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     const allConcepts = (conceptsRes.data || []) as BillingConcept[];
     setConcepts(allConcepts);
     setDiscountTiers(discountsRes.data || []);
+    setActiveRevenuePeriod(periodRes.data || null);
 
     const firstAdvanceConcept = allConcepts.find(c => (c as any).advance_account_id);
     if (firstAdvanceConcept) {
@@ -137,7 +145,6 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
   useEffect(() => { loadReferenceData(); }, [loadReferenceData]);
 
-  // Cargar datos al entrar en modo edición
   useEffect(() => {
     if (initialData) {
       setEditingId(initialData.id || null);
@@ -170,7 +177,6 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
   const loadPendingDues = useCallback(async (unitId: string) => {
     if (!activeOrg) return;
     
-    // Traer todas las obligaciones de la unidad sin subconsultas fallidas
     const [duesRes, invoicesRes] = await Promise.all([
       supabase
         .from('dues')
@@ -199,11 +205,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
     setInvoicesMap(invMap);
     setDuesError('');
-
-    // Si no estamos editando, mostramos solo las pendientes/parciales.
-    // Si estamos editando, mostramos todas para que carguen los valores del recibo.
-    const rawDues = duesRes.data || [];
-    setDues(rawDues as Due[]);
+    setDues((duesRes.data || []) as Due[]);
   }, [activeOrg]);
 
   useEffect(() => {
@@ -295,8 +297,24 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     if (!header.unitId) return setFormError('Seleccione la unidad que realiza el pago.');
     if (!header.paymentMethodId) return setFormError('Seleccione el método de pago.');
     if (!header.paymentDate || !header.accountingDate) return setFormError('Las fechas son obligatorias.');
+
+    // Validación estricta del periodo activo de tesorería
+    if (activeRevenuePeriod) {
+      if (header.paymentDate < activeRevenuePeriod.start_date || header.paymentDate > activeRevenuePeriod.end_date) {
+        setFormError(`La fecha de pago está fuera del periodo de trabajo activo (${activeRevenuePeriod.name}: ${activeRevenuePeriod.start_date} a ${activeRevenuePeriod.end_date}).`);
+        return;
+      }
+      if (header.accountingDate < activeRevenuePeriod.start_date || header.accountingDate > activeRevenuePeriod.end_date) {
+        setFormError(`La fecha contable está fuera del periodo de trabajo activo (${activeRevenuePeriod.name}: ${activeRevenuePeriod.start_date} a ${activeRevenuePeriod.end_date}).`);
+        return;
+      }
+    } else {
+      setFormError('No hay un periodo de trabajo activo configurado en el Calendario de Recaudo.');
+      return;
+    }
+
     if (totalNumber <= 0) return setFormError('El valor recibido debe ser mayor a cero.');
-    if (advance < 0) return setFormError(`Lo applied supera el valor recibido en ${formatCOP(Math.abs(advance))}.`);
+    if (advance < 0) return setFormError(`Lo aplicado supera el valor recibido en ${formatCOP(Math.abs(advance))}.`);
     if (hasOverflow) return setFormError('Hay un valor asignado que supera el saldo pendiente de un concepto.');
     if (appliedTotal + (advance > 0 ? advance : 0) !== totalNumber) {
       setFormError('El valor recibido debe cuadrar exactamente con la suma del total aplicado y el anticipo.');
