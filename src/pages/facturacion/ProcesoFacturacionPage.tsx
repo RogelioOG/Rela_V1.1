@@ -1055,4 +1055,3 @@ export default function ProcesoFacturacionPage() {
       </Modal>
     </div>
   );
-}
