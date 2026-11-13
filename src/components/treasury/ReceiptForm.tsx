@@ -216,11 +216,13 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     loadPendingDues(header.unitId).finally(() => setLoadingDues(false));
   }, [header.unitId, loadPendingDues]);
 
-  const detailedItems = useMemo(() => {
-    return buildDetailedDueItems(dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate);
-  }, [dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate]);
-
   const totalNumber = parseAmount(header.total);
+
+  // Se pasa totalNumber como último parámetro para validar el umbral mínimo del descuento
+  const detailedItems = useMemo(() => {
+    return buildDetailedDueItems(dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate, totalNumber);
+  }, [dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate, totalNumber]);
+
   const autoAllocation = useMemo(() => {
     return allocateReceipt(detailedItems, totalNumber);
   }, [detailedItems, totalNumber]);
@@ -321,14 +323,16 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
       return;
     }
 
+    // Se incluye discount_applied para que el backend lo reciba y contabilice el descuento correctamente
     const allocations = detailedItems
       .map(item => ({
         due_id: item.dueId,
         concept_id: item.conceptId,
         capital_applied: item.isInterest ? 0 : parseAmount(currentInputs[item.id] ?? '0'),
         interest_applied: item.isInterest ? parseAmount(currentInputs[item.id] ?? '0') : 0,
+        discount_applied: item.discountAmount || 0,
       }))
-      .filter(a => a.capital_applied + a.interest_applied > 0);
+      .filter(a => a.capital_applied + a.interest_applied + a.discount_applied > 0);
 
     const unit = units.find(u => u.id === header.unitId);
     const method = methods.find(m => m.id === header.paymentMethodId);
