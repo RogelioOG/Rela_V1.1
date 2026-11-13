@@ -3,7 +3,7 @@ import {
   FileText, Eye, Download, Mail, Send, CheckCircle2, AlertTriangle,
   Loader2, Layers, FileStack, Trash2
 } from 'lucide-react';
-import { Unit, Due, PaymentAgreement, DiscountTier } from '@/lib/supabase';
+import { Unit, Due, PaymentAgreement, DiscountTier, BillingConcept } from '@/lib/supabase';
 import { Organization, supabase } from '@/lib/supabase';
 import { Card, CardBody } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -37,7 +37,7 @@ export interface LiquidationRow {
   totalWithInterest?: number;
   baseAmount?: number;
   rowId: string;
-  invoiceNumber?: string; // <-- Guardamos el consecutivo real aquí
+  invoiceNumber?: string;
   issueDate?: string;
   dueDate?: string;
 }
@@ -416,7 +416,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
               discountAmount: Number(inv.discount_amount) || 0,
               netTotal: Number(inv.total_amount) || 0,
               rowId: inv.id,
-              invoiceNumber: inv.invoice_number, // Consecutivo real guardado
+              invoiceNumber: inv.invoice_number,
               issueDate: inv.issue_date,
               dueDate: inv.due_date,
               due: matchingRow?.due,
@@ -548,7 +548,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
       ]);
 
       const accounts = accountsData || [];
-      const concepts = conceptsData || [];
+      const concepts = (conceptsData || []) as BillingConcept[];
       const thirdParties = thirdPartiesData || [];
 
       const conceptMap = new Map<string, any>();
@@ -559,6 +559,11 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
       const defaultReceivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
       const defaultIncomeAcc = accounts.find(a => a.code.startsWith('4')) || accounts[1] || accounts[0];
+
+      // Búsqueda dinámica estándar del concepto de intereses de mora
+      const interestConcept = concepts.find(
+        c => c.is_late_interest === true || c.code === 'MORA_ADM' || c.category === 'penalizacion'
+      );
 
       const batchInvoices = [];
 
@@ -610,7 +615,7 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         const reconstructedRow: LiquidationRow = {
           ...row,
           rowId: assignedInvoiceId,
-          invoiceNumber: invoiceNumber, // Asignamos el consecutivo real
+          invoiceNumber: invoiceNumber,
           issueDate: periodStartDate,
           dueDate: periodEndDate,
         };
@@ -659,19 +664,22 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             }
           }
 
+          // CAUSACIÓN DE INTERESES DE MORA: Tratado estándar dinámicamente con las cuentas parametrizadas
           if (row.interestAmount > 0) {
-            const interestAccId = defaultIncomeAcc?.id;
-            if (defaultReceivableAcc?.id && interestAccId) {
+            const interestDebitAcc = interestConcept?.counterpart_account_id || defaultReceivableAcc?.id;
+            const interestCreditAcc = interestConcept?.income_account_id || defaultIncomeAcc?.id;
+
+            if (interestDebitAcc && interestCreditAcc) {
               linesToInsert.push({
                 journal_entry_id: je.id,
-                account_id: defaultReceivableAcc.id,
+                account_id: interestDebitAcc,
                 debit: row.interestAmount,
                 credit: 0,
                 third_party_id: assignedThirdPartyId,
               });
               linesToInsert.push({
                 journal_entry_id: je.id,
-                account_id: interestAccId,
+                account_id: interestCreditAcc,
                 debit: 0,
                 credit: row.interestAmount,
                 third_party_id: assignedThirdPartyId,
