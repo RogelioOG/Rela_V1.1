@@ -681,27 +681,26 @@ export default function ProcesoFacturacionPage() {
             }
           }
 
-          // CAUSACIÓN DE INTERESES DE MORA: Utiliza de forma estricta las cuentas de orden parametrizadas en MORA_ADM
-          if (row.interestAmount > 0 && interestConcept) {
-            const debitAcc = interestConcept.counterpart_account_id;
-            const creditAcc = interestConcept.income_account_id;
+          // CAUSACIÓN DE INTERESES DE MORA: Forzando estrictamente las cuentas de orden de MORA_ADM
+          if (row.interestAmount > 0) {
+            // UUIDs fijos extraídos de tu configuración de MORA_ADM en la base de datos
+            const moraDebitAccId = 'b9e38d60-ce8c-4b72-9955-ef6a511805c5'; // Cuenta de orden débito
+            const moraCreditAccId = '3944487e-aff4-42b0-a4f8-7fa294a2af79'; // Cuenta de orden crédito
 
-            if (debitAcc && creditAcc) {
-              linesToInsert.push({
-                journal_entry_id: je.id,
-                account_id: debitAcc,
-                debit: row.interestAmount,
-                credit: 0,
-                third_party_id: assignedThirdPartyId,
-              });
-              linesToInsert.push({
-                journal_entry_id: je.id,
-                account_id: creditAcc,
-                debit: 0,
-                credit: row.interestAmount,
-                third_party_id: assignedThirdPartyId,
-              });
-            }
+            linesToInsert.push({
+              journal_entry_id: je.id,
+              account_id: moraDebitAccId,
+              debit: row.interestAmount,
+              credit: 0,
+              third_party_id: assignedThirdPartyId,
+            });
+            linesToInsert.push({
+              journal_entry_id: je.id,
+              account_id: moraCreditAccId,
+              debit: 0,
+              credit: row.interestAmount,
+              third_party_id: assignedThirdPartyId,
+            });
           }
 
           if (linesToInsert.length > 0) {
