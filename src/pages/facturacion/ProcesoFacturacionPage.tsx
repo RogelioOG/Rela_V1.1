@@ -593,10 +593,21 @@ export default function ProcesoFacturacionPage() {
       const defaultReceivableAcc = accounts.find(a => a.code.startsWith('13')) || accounts[0];
       const defaultIncomeAcc = accounts.find(a => a.code.startsWith('4')) || accounts[1] || accounts[0];
 
+      // Validación estricta del concepto de intereses de mora antes de procesar
+      const interestConcept = concepts.find(
+        c => c.is_late_interest === true || c.category === 'penalizacion' || c.code?.toUpperCase().includes('MORA')
+      );
+
+      const hasAnyInterest = liquidation.some(r => r.interestAmount > 0);
+      if (hasAnyInterest && (!interestConcept || !interestConcept.counterpart_account_id || !interestConcept.income_account_id)) {
+        setError('No se encontró un concepto de Intereses de Mora activo con sus cuentas de orden/ingreso parametrizadas. Verifica la configuración del concepto MORA_ADM.');
+        setLoading(false);
+        return;
+      }
+
       for (let i = 0; i < liquidation.length; i++) {
         const row = liquidation[i];
         const invoiceNumber = `CC-${String(nextSeq + i).padStart(4, '0')}`;
-        const rowId = row.rowId || 'inv-' + Math.random().toString(36).substring(2, 9);
 
         let assignedThirdPartyId = row.unit.third_party_id || null;
         if (!assignedThirdPartyId && thirdParties.length > 0) {
@@ -677,35 +688,27 @@ export default function ProcesoFacturacionPage() {
             }
           }
 
-          // CAUSACIÓN DE INTERESES DE MORA: Respetando estrictamente las cuentas de orden del concepto
-          if (row.interestAmount > 0) {
-            const interestConcept = concepts.find(c => c.is_late_interest || c.code === 'MORA_ADM' || c.category === 'penalizacion');
-            
-            // Débito: Cuenta contrapartida configurada en el concepto (ej: 86200501)
-            const interestDebitAcc = interestConcept?.counterpart_account_id || defaultReceivableAcc?.id;
-            
-            // Crédito: Cuenta de ingreso / orden configurada en el concepto (ej: 81200501)
-            const interestCreditAcc = interestConcept?.income_account_id || defaultIncomeAcc?.id;
-
-            if (interestDebitAcc && interestCreditAcc) {
-              linesToInsert.push({
-                journal_entry_id: je.id,
-                account_id: interestDebitAcc,
-                debit: row.interestAmount,
-                credit: 0,
-                third_party_id: assignedThirdPartyId,
-              });
-              linesToInsert.push({
-                journal_entry_id: je.id,
-                account_id: interestCreditAcc,
-                debit: 0,
-                credit: row.interestAmount,
-                third_party_id: assignedThirdPartyId,
-              });
-            }
+          // CAUSACIÓN DE INTERESES DE MORA: Respeta estrictamente las cuentas de orden configuradas en el concepto
+          if (row.interestAmount > 0 && interestConcept) {
+            linesToInsert.push({
+              journal_entry_id: je.id,
+              account_id: interestConcept.counterpart_account_id!,
+              debit: row.interestAmount,
+              credit: 0,
+              third_party_id: assignedThirdPartyId,
+            });
+            linesToInsert.push({
+              journal_entry_id: je.id,
+              account_id: interestConcept.income_account_id!,
+              debit: 0,
+              credit: row.interestAmount,
+              third_party_id: assignedThirdPartyId,
+            });
           }
 
-          await supabase.from('journal_lines').insert(linesToInsert);
+          if (linesToInsert.length > 0) {
+            await supabase.from('journal_lines').insert(linesToInsert);
+          }
         }
       }
 
