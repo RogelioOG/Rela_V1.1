@@ -562,7 +562,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         )}
 
         <div className="flex justify-end px-6 pb-6">
-          <Button type="submit" disabled={saving || !header.unitId || detailedItems.length === 0 || advance < 0 || (advance > 0 && !selectedAdvanceConceptId)}>
+          <Button type="submit" disabled={saving || !header.unitId || (detailedItems.length === 0 && advance <= 0) || advance < 0 || (advance > 0 && !selectedAdvanceConceptId)}>
             {saving ? (
               <><Loader2 className="w-4 h-4 animate-spin" /> Guardando...</>
             ) : editingId ? (
