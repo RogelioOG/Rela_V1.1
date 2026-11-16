@@ -88,9 +88,13 @@ export function ReceiptAllocationTable({ items, inputs, onChange }: ReceiptAlloc
               {items.map(item => {
                 const appliedVal = parseAmount(inputs[item.id] ?? '0');
                 const discount = item.discountAmount || 0;
-                // Cobertura total = lo que se paga + lo que se descuenta
-                const coveredVal = appliedVal + discount;
+                
+                // CORRECCIÓN: El descuento solo se resta del saldo si el descuento es mayor a 0 (es decir, si aplica por valor mínimo y fecha)
+                const effectiveDiscount = discount > 0 ? discount : 0;
+                const coveredVal = appliedVal + effectiveDiscount;
                 const isOverflow = appliedVal > (item.netBalance > 0 ? item.netBalance : item.balance);
+                
+                // El nuevo saldo resta lo pagado y el descuento efectivo (si aplica)
                 const remaining = Math.max(item.balance - coveredVal, 0);
 
                 return (
