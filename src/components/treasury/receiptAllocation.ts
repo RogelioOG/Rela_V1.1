@@ -57,17 +57,6 @@ export function buildDetailedDueItems(
   const conceptMap = new Map<string, BillingConcept>();
   concepts.forEach(c => conceptMap.set(c.id, c));
 
-  // Calcular el saldo pendiente total bruto de todas las obligaciones para validar el umbral mínimo
-  let totalPendingBalance = 0;
-  dues.forEach(due => {
-    const inv = invoicesMap[due.id] || invoicesMap[due.unit_id + '_' + due.period];
-    const snapshotItems = inv?.items_snapshot;
-    if (Array.isArray(snapshotItems)) {
-      snapshotItems.forEach((snap: any) => { totalPendingBalance += Number(snap.amount || 0); });
-    }
-    totalPendingBalance += Number(due.interest_balance || inv?.interest_amount || 0);
-  });
-
   // Selección inteligente del escalón de descuento aplicable según fecha y valor mínimo
   let matchedTier: any = null;
   if (paymentDateStr && discountTiers.length > 0) {
@@ -76,9 +65,11 @@ export function buildDetailedDueItems(
     
     for (const tier of sortedTiers) {
       if (tier.is_active && paymentDay <= (tier.valid_until_day || 0)) {
-        // Validar si exige un valor mínimo de pago (si está parametrizado o se asume pago total de la obligación)
+        // Validar el monto mínimo exigido por el escalón frente al valor total recibido
         const minRequired = Number(tier.min_payment_amount || tier.minimum_amount || 0);
-        const satisfiesMinimum = totalReceived <= 0 || totalReceived >= minRequired || (minRequired === 0 && totalReceived >= totalPendingBalance);
+        
+        // El descuento solo aplica si el valor recibido cubre al menos el mínimo exigido
+        const satisfiesMinimum = totalReceived >= minRequired && (minRequired === 0 || totalReceived > 0);
         
         if (satisfiesMinimum) {
           matchedTier = tier;
