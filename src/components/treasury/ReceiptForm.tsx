@@ -183,6 +183,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         .select('*')
         .eq('organization_id', activeOrg.id)
         .eq('unit_id', unitId)
+        .gt('balance', 0) // Excluir obligaciones con saldo cero (ya pagadas)
         .order('due_date', { ascending: true }),
       supabase
         .from('invoices')
@@ -218,7 +219,6 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
   const totalNumber = parseAmount(header.total);
 
-  // Se pasa totalNumber como último parámetro para validar el umbral mínimo del descuento
   const detailedItems = useMemo(() => {
     return buildDetailedDueItems(dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate, totalNumber);
   }, [dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate, totalNumber]);
@@ -300,7 +300,6 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     if (!header.paymentMethodId) return setFormError('Seleccione el método de pago.');
     if (!header.paymentDate || !header.accountingDate) return setFormError('Las fechas son obligatorias.');
 
-    // Validación estricta del periodo activo de tesorería
     if (activeRevenuePeriod) {
       if (header.paymentDate < activeRevenuePeriod.start_date || header.paymentDate > activeRevenuePeriod.end_date) {
         setFormError(`La fecha de pago está fuera del periodo de trabajo activo (${activeRevenuePeriod.name}: ${activeRevenuePeriod.start_date} a ${activeRevenuePeriod.end_date}).`);
@@ -323,7 +322,6 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
       return;
     }
 
-    // Se incluye discount_applied para que el backend lo reciba y contabilice el descuento correctamente
     const allocations = detailedItems
       .map(item => ({
         due_id: item.dueId,
