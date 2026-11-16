@@ -9,7 +9,7 @@ export interface DetailedDueItem {
   conceptCode: string;
   conceptName: string;
   balance: number;
-  netBalance: number; // Saldo real restando el descuento pronto pago si aplica
+  netBalance: number;
   priorityOrder: number;
   isInterest: boolean;
   eligibleForDiscount: boolean;
@@ -57,7 +57,18 @@ export function buildDetailedDueItems(
   const conceptMap = new Map<string, BillingConcept>();
   concepts.forEach(c => conceptMap.set(c.id, c));
 
-  // Selección inteligente del escalón de descuento aplicable según fecha y valor mínimo
+  // Calcular el total de la deuda pendiente para saber si el pago cubre la totalidad requerida para el descuento
+  let totalPendingBalance = 0;
+  dues.forEach(due => {
+    const inv = invoicesMap[due.id] || invoicesMap[due.unit_id + '_' + due.period];
+    const snapshotItems = inv?.items_snapshot;
+    if (Array.isArray(snapshotItems)) {
+      snapshotItems.forEach((snap: any) => { totalPendingBalance += Number(snap.amount || 0); });
+    }
+    totalPendingBalance += Number(due.interest_balance || inv?.interest_amount || 0);
+  });
+
+  // Selección inteligente del escalón de descuento por fecha
   let matchedTier: any = null;
   if (paymentDateStr && discountTiers.length > 0) {
     const paymentDay = new Date(paymentDateStr + 'T00:00:00').getDate();
@@ -65,17 +76,21 @@ export function buildDetailedDueItems(
     
     for (const tier of sortedTiers) {
       if (tier.is_active && paymentDay <= (tier.valid_until_day || 0)) {
-        // Validar el monto mínimo exigido por el escalón frente al valor total recibido
-        const minRequired = Number(tier.min_payment_amount || tier.minimum_amount || 0);
-        
-        // El descuento solo aplica si el valor recibido cubre al menos el mínimo exigido
-        const satisfiesMinimum = totalReceived >= minRequired && (minRequired === 0 || totalReceived > 0);
-        
-        if (satisfiesMinimum) {
-          matchedTier = tier;
-          break;
-        }
+        matchedTier = tier;
+        break;
       }
+    }
+  }
+
+  // Validar si el valor recibido cumple con el monto mínimo del escalón (o si se exige pago total de la deuda)
+  let satisfiesMinimum = false;
+  if (matchedTier) {
+    const minRequired = Number(matchedTier.min_payment_amount || matchedTier.minimum_amount || 0);
+    // Si hay un mínimo configurado, el total recibido debe ser >= minRequired; de lo contrario se asume que debe cubrir el saldo total pendiente
+    if (minRequired > 0) {
+      satisfiesMinimum = totalReceived >= minRequired;
+    } else {
+      satisfiesMinimum = totalReceived >= totalPendingBalance && totalPendingBalance > 0;
     }
   }
 
@@ -96,7 +111,8 @@ export function buildDetailedDueItems(
           const isEligibleByConcept = concept && (concept.maneja_descuento || 
             discountTiers.some(t => Array.isArray(t.calculation_base_concept_ids) && t.calculation_base_concept_ids.includes(conceptId)));
 
-          if (matchedTier && isEligibleByConcept && !isInterest) {
+          // El descuento solo se calcula si hay tier válido, es elegible, no es interés Y CUMPLE EL VALOR MÍNIMO
+          if (matchedTier && satisfiesMinimum && isEligibleByConcept && !isInterest) {
             const baseConceptIds = matchedTier.calculation_base_concept_ids;
             const appliesToThisConcept = !baseConceptIds || baseConceptIds.length === 0 || baseConceptIds.includes(conceptId);
 
