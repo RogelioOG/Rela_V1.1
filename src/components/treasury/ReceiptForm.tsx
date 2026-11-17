@@ -233,33 +233,46 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     });
   }, [dues, hierarchy]);
 
-  // Cálculo flexible y robusto de descuentos por pronto pago
+  // Cálculo de ítems detallados con evaluación de escalones de descuento
   const detailedItems = useMemo(() => {
     const totalPendingBalance = sortedDues.reduce((sum, d) => sum + Number(d.balance || 0), 0);
 
-    // Buscar escalón de descuento aplicable validando fecha
     let applicableTier: any = null;
     if (header.paymentDate && discountTiers.length > 0) {
+      const paymentDay = new Date(header.paymentDate + 'T00:00:00').getDate();
+
       applicableTier = discountTiers.find(tier => {
+        // Evaluar por fecha completa o por día límite del mes
         const limitDate = tier.limit_date || tier.due_date_limit || tier.end_date;
-        const matchesDate = limitDate ? header.paymentDate <= limitDate : true;
-        return matchesDate;
+        const limitDay = Number(tier.limit_day || tier.day_limit || tier.max_day || 0);
+
+        if (limitDate) {
+          return header.paymentDate <= limitDate;
+        }
+        if (limitDay > 0) {
+          return paymentDay <= limitDay;
+        }
+        return true; // Si no tiene restricción estricta de fecha, aplica por defecto
       });
     }
 
     let totalPotentialDiscount = 0;
     if (applicableTier) {
-      const pct = Number(applicableTier.discount_percentage || applicableTier.percentage || 0);
-      const amt = Number(applicableTier.discount_amount || applicableTier.amount || 0);
+      const pct = Number(applicableTier.discount_percentage || applicableTier.percentage || applicableTier.discount_pct || 0);
+      const amt = Number(applicableTier.discount_amount || applicableTier.amount || applicableTier.value || 0);
       
       if (pct > 0) {
         totalPotentialDiscount = (totalPendingBalance * pct) / 100;
       } else if (amt > 0) {
         totalPotentialDiscount = amt;
+      } else {
+        // Si el tier existe pero no hallamos el campo exacto, intentamos tomar cualquier valor numérico disponible
+        const fallbackVal = Number(applicableTier.value || applicableTier.discount || 0);
+        totalPotentialDiscount = fallbackVal > 100 ? fallbackVal : (totalPendingBalance * fallbackVal) / 100;
       }
     }
 
-    // Regla flexible: El descuento aplica si el valor recibido es >= (Saldo Total - Descuento) O si cubre el saldo total pendiente
+    // Si hay escalón configurado, permitimos el descuento siempre que pague el monto mínimo requerido o superior
     const minRequiredForDiscount = Math.max(totalPendingBalance - totalPotentialDiscount, 0);
     const qualifiesForDiscount = (totalNumber >= minRequiredForDiscount || totalNumber >= totalPendingBalance) && totalPotentialDiscount > 0;
 
