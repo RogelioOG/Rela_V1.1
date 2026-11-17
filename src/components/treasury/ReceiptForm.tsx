@@ -9,7 +9,6 @@ import { Input, Select, TextArea } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
 import {
-  allocateReceipt,
   parseAmount,
   roundMoney
 } from '@/components/treasury/receiptAllocation';
@@ -218,24 +217,38 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
   const totalNumber = parseAmount(header.total);
 
-  // Lógica robusta de construcción y evaluación del pronto pago según umbral mínimo y fecha
-  const detailedItems = useMemo(() => {
-    // 1. Calcular el saldo total pendiente de todas las deudas cargadas
-    const totalPendingBalance = dues.reduce((sum, d) => sum + Number(d.balance || 0), 0);
+  // Ordenar obligaciones según jerarquía y antigüedad
+  const sortedDues = useMemo(() => {
+    if (!dues.length) return [];
+    
+    // Crear un mapa de prioridades basado en hierarchy
+    const priorityMap = new Map<string, number>();
+    hierarchy.forEach((h, idx) => {
+      priorityMap.set(h.concept_id, h.priority_order ?? idx);
+    });
 
-    // 2. Encontrar si aplica algún escalón de descuento por pronto pago activo para la fecha de pago
+    return [...dues].sort((a, b) => {
+      const pA = priorityMap.get(a.concept_id) ?? 999;
+      const pB = priorityMap.get(b.concept_id) ?? 999;
+      if (pA !== pB) return pA - pB;
+      return (a.due_date || '').localeCompare(b.due_date || '');
+    });
+  }, [dues, hierarchy]);
+
+  // Cálculo de ítems detallados y aplicación de descuentos por pronto pago
+  const detailedItems = useMemo(() => {
+    const totalPendingBalance = sortedDues.reduce((sum, d) => sum + Number(d.balance || 0), 0);
+
+    // Buscar escalón de descuento aplicable según la fecha de pago
     let applicableTier: any = null;
     if (header.paymentDate && discountTiers.length > 0) {
       applicableTier = discountTiers.find(tier => {
-        // Validar fecha límite del escalón si existe
         const limitDate = tier.limit_date || tier.due_date_limit;
         const matchesDate = limitDate ? header.paymentDate <= limitDate : true;
         return matchesDate;
       });
     }
 
-    // 3. Determinar si el valor recibido cumple con el pago mínimo para activar el descuento
-    // El pago mínimo es el total del saldo menos el descuento posible del escalón
     let totalPotentialDiscount = 0;
     if (applicableTier) {
       if (applicableTier.discount_percentage) {
@@ -245,18 +258,15 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
       }
     }
 
+    // El pago mínimo requerido para acceder al descuento es: Saldo Total - Descuento Total
     const minRequiredForDiscount = Math.max(totalPendingBalance - totalPotentialDiscount, 0);
     const qualifiesForDiscount = totalNumber >= minRequiredForDiscount && totalPotentialDiscount > 0;
 
-    // 4. Mapear los ítems de las deudas aplicando el descuento verificado
-    return dues.map(due => {
-      const invKey = due.unit_id + '_' + due.period;
-      const inv = invoicesMap[invKey] || invoicesMap[due.invoice_id || ''];
+    return sortedDues.map(due => {
       const concept = concepts.find(c => c.id === due.concept_id);
-      
       let conceptDiscount = 0;
+
       if (qualifiesForDiscount && concept && !concept.is_late_interest) {
-        // Distribuir el descuento proporcionalmente al saldo del concepto
         const proportion = Number(due.balance) / (totalPendingBalance || 1);
         conceptDiscount = roundMoney(totalPotentialDiscount * proportion);
       }
@@ -274,20 +284,36 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         isInterest: concept?.is_late_interest || false,
       };
     });
-  }, [dues, invoicesMap, concepts, discountTiers, header.paymentDate, totalNumber]);
+  }, [sortedDues, concepts, discountTiers, header.paymentDate, totalNumber]);
 
-  const autoAllocation = useMemo(() => {
-    return allocateReceipt(detailedItems, totalNumber);
+  // Distribución automática del dinero recibido entre las obligaciones
+  const autoAllocationAmounts = useMemo(() => {
+    const amounts: Record<string, number> = {};
+    let remainingMoney = totalNumber;
+
+    detailedItems.forEach(item => {
+      if (remainingMoney <= 0) {
+        amounts[item.id] = 0;
+        return;
+      }
+      // Lo que se necesita pagar de esta obligación es su saldo menos el descuento ya otorgado
+      const effectiveNeeded = Math.max(item.balance - item.discountAmount, 0);
+      const toApply = Math.min(remainingMoney, effectiveNeeded);
+      amounts[item.id] = roundMoney(toApply);
+      remainingMoney = roundMoney(remainingMoney - toApply);
+    });
+
+    return amounts;
   }, [detailedItems, totalNumber]);
 
   const currentInputs = useMemo(() => {
     if (overrides) return overrides;
     const initial: DetailedAllocationInputs = {};
     detailedItems.forEach(item => {
-      initial[item.id] = String(autoAllocation.amounts[item.id]?.applied ?? 0);
+      initial[item.id] = String(autoAllocationAmounts[item.id] ?? 0);
     });
     return initial;
-  }, [overrides, detailedItems, autoAllocation]);
+  }, [overrides, detailedItems, autoAllocationAmounts]);
 
   const appliedTotal = roundMoney(
     detailedItems.reduce((sum, item) => sum + parseAmount(currentInputs[item.id] ?? '0'), 0)
