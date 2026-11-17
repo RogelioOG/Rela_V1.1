@@ -9,7 +9,6 @@ import { Input, Select, TextArea } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
 import {
-  buildDetailedDueItems,
   allocateReceipt,
   parseAmount,
   roundMoney
@@ -183,7 +182,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         .select('*')
         .eq('organization_id', activeOrg.id)
         .eq('unit_id', unitId)
-        .gt('balance', 0) // Excluir obligaciones con saldo cero (ya pagadas)
+        .gt('balance', 0)
         .order('due_date', { ascending: true }),
       supabase
         .from('invoices')
@@ -219,9 +218,63 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
   const totalNumber = parseAmount(header.total);
 
+  // Lógica robusta de construcción y evaluación del pronto pago según umbral mínimo y fecha
   const detailedItems = useMemo(() => {
-    return buildDetailedDueItems(dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate, totalNumber);
-  }, [dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate, totalNumber]);
+    // 1. Calcular el saldo total pendiente de todas las deudas cargadas
+    const totalPendingBalance = dues.reduce((sum, d) => sum + Number(d.balance || 0), 0);
+
+    // 2. Encontrar si aplica algún escalón de descuento por pronto pago activo para la fecha de pago
+    let applicableTier: any = null;
+    if (header.paymentDate && discountTiers.length > 0) {
+      applicableTier = discountTiers.find(tier => {
+        // Validar fecha límite del escalón si existe
+        const limitDate = tier.limit_date || tier.due_date_limit;
+        const matchesDate = limitDate ? header.paymentDate <= limitDate : true;
+        return matchesDate;
+      });
+    }
+
+    // 3. Determinar si el valor recibido cumple con el pago mínimo para activar el descuento
+    // El pago mínimo es el total del saldo menos el descuento posible del escalón
+    let totalPotentialDiscount = 0;
+    if (applicableTier) {
+      if (applicableTier.discount_percentage) {
+        totalPotentialDiscount = (totalPendingBalance * Number(applicableTier.discount_percentage)) / 100;
+      } else if (applicableTier.discount_amount) {
+        totalPotentialDiscount = Number(applicableTier.discount_amount);
+      }
+    }
+
+    const minRequiredForDiscount = Math.max(totalPendingBalance - totalPotentialDiscount, 0);
+    const qualifiesForDiscount = totalNumber >= minRequiredForDiscount && totalPotentialDiscount > 0;
+
+    // 4. Mapear los ítems de las deudas aplicando el descuento verificado
+    return dues.map(due => {
+      const invKey = due.unit_id + '_' + due.period;
+      const inv = invoicesMap[invKey] || invoicesMap[due.invoice_id || ''];
+      const concept = concepts.find(c => c.id === due.concept_id);
+      
+      let conceptDiscount = 0;
+      if (qualifiesForDiscount && concept && !concept.is_late_interest) {
+        // Distribuir el descuento proporcionalmente al saldo del concepto
+        const proportion = Number(due.balance) / (totalPendingBalance || 1);
+        conceptDiscount = roundMoney(totalPotentialDiscount * proportion);
+      }
+
+      return {
+        id: due.id,
+        dueId: due.id,
+        conceptId: due.concept_id,
+        conceptName: concept?.name || 'Concepto',
+        conceptCode: concept?.code || 'CON',
+        period: due.period,
+        dueDate: due.due_date,
+        balance: Number(due.balance || 0),
+        discountAmount: conceptDiscount,
+        isInterest: concept?.is_late_interest || false,
+      };
+    });
+  }, [dues, invoicesMap, concepts, discountTiers, header.paymentDate, totalNumber]);
 
   const autoAllocation = useMemo(() => {
     return allocateReceipt(detailedItems, totalNumber);
