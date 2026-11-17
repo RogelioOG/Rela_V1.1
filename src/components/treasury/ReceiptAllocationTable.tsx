@@ -17,6 +17,7 @@ export function ReceiptAllocationTable({ items, inputs, onChange }: ReceiptAlloc
   const totalApplied = items.reduce((sum, item) => sum + parseAmount(inputs[item.id] ?? '0'), 0);
   const totalBalance = items.reduce((sum, item) => sum + item.balance, 0);
   const totalDiscounts = items.reduce((sum, item) => sum + (item.discountAmount || 0), 0);
+  const totalNetBalance = totalBalance - totalDiscounts;
 
   return (
     <div className="space-y-6">
@@ -57,9 +58,21 @@ export function ReceiptAllocationTable({ items, inputs, onChange }: ReceiptAlloc
             </tbody>
             <tfoot>
               <tr className="border-t border-gray-200 bg-gray-50 font-semibold text-sm">
-                <td colSpan={3} className="px-4 py-3 text-gray-900">Total Saldo Pendiente</td>
+                <td colSpan={3} className="px-4 py-3 text-gray-900">Total Saldo Pendiente Base</td>
                 <td className="px-4 py-3 text-right text-gray-900">{formatCOP(totalBalance)}</td>
-                <td className="px-4 py-3 text-right text-green-600">{formatCOP(totalDiscounts)}</td>
+                <td className="px-4 py-3 text-right text-green-600">{totalDiscounts > 0 ? formatCOP(totalDiscounts) : '$ 0'}</td>
+              </tr>
+              {totalDiscounts > 0 && (
+                <tr className="border-t border-gray-100 bg-green-50/40 font-bold text-sm">
+                  <td colSpan={3} className="px-4 py-2.5 text-green-900">Total Descuento Pronto Pago Aplicado</td>
+                  <td className="px-4 py-2.5 text-right text-green-700" />
+                  <td className="px-4 py-2.5 text-right text-green-700">- {formatCOP(totalDiscounts)}</td>
+                </tr>
+              )}
+              <tr className="border-t border-gray-200 bg-gray-100 font-bold text-sm">
+                <td colSpan={3} className="px-4 py-3 text-gray-900">Total Neto a Pagar (Con Descuento)</td>
+                <td className="px-4 py-3 text-right text-gray-900">{formatCOP(totalNetBalance)}</td>
+                <td className="px-4 py-3 text-right text-green-700">{formatCOP(totalDiscounts)} dto.</td>
               </tr>
             </tfoot>
           </table>
@@ -89,12 +102,10 @@ export function ReceiptAllocationTable({ items, inputs, onChange }: ReceiptAlloc
                 const appliedVal = parseAmount(inputs[item.id] ?? '0');
                 const discount = item.discountAmount || 0;
                 
-                // CORRECCIÓN: El descuento solo se resta del saldo si el descuento es mayor a 0 (es decir, si aplica por valor mínimo y fecha)
                 const effectiveDiscount = discount > 0 ? discount : 0;
                 const coveredVal = appliedVal + effectiveDiscount;
                 const isOverflow = appliedVal > (item.netBalance > 0 ? item.netBalance : item.balance);
                 
-                // El nuevo saldo resta lo pagado y el descuento efectivo (si aplica)
                 const remaining = Math.max(item.balance - coveredVal, 0);
 
                 return (
