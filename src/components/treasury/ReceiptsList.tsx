@@ -40,8 +40,9 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
           due_id,
           capital_applied,
           interest_applied,
+          discount_applied,
           concept:billing_concepts(name, code),
-          due:dues(period, due_date)
+          due:dues(period, due_date, balance)
         )
       `)
       .eq('organization_id', activeOrg.id)
@@ -69,16 +70,25 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
 
   function handleOpenPrint(rec: any) {
     setCurrentRawReceipt(rec);
-    const lines = (rec.allocations || []).map((alc: any) => ({
-      period: alc.due?.period || 'N/A',
-      dueDate: alc.due?.due_date || '',
-      conceptName: alc.concept?.name || 'Concepto',
-      conceptCode: alc.concept?.code || 'CON',
-      initialBalance: (alc.capital_applied || 0) + (alc.interest_applied || 0),
-      discount: 0,
-      applied: (alc.capital_applied || 0) + (alc.interest_applied || 0),
-      balanceAfter: 0,
-    }));
+    const lines = (rec.allocations || []).map((alc: any) => {
+      const applied = Number(alc.capital_applied || 0) + Number(alc.interest_applied || 0);
+      const discount = Number(alc.discount_applied || 0);
+      // Saldo inicial reconstruido = lo aplicado + el descuento + el saldo actual que quedó en la deuda
+      const currentBalance = Number(alc.due?.balance || 0);
+      const initialBalance = applied + discount + currentBalance;
+      const balanceAfter = Math.max(initialBalance - discount - applied, 0);
+
+      return {
+        period: alc.due?.period || 'N/A',
+        dueDate: alc.due?.due_date || '',
+        conceptName: alc.concept?.name || 'Concepto',
+        conceptCode: alc.concept?.code || 'CON',
+        initialBalance: initialBalance,
+        discount: discount,
+        applied: applied,
+        balanceAfter: balanceAfter,
+      };
+    });
 
     setSelectedReceipt({
       receiptNumber: rec.receipt_number,
@@ -142,7 +152,6 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     if (!window.confirm(`¿Desea editar el recibo ${rec.receipt_number}? Se cargarán los datos en el formulario para su modificación.`)) return;
 
     setActionLoading(rec.id);
-    // Anulamos primero para liberar los saldos de la cartera en la BD
     await supabase.rpc('void_receipt', { p_receipt_id: rec.id, p_organization_id: activeOrg.id });
     setActionLoading(null);
 
