@@ -133,21 +133,30 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
 
     setActionLoading(receiptId);
     
-    // Llamar a la función RPC robusta en la base de datos para borrar y revertir saldos dinámicamente
-    const { data, error } = await supabase.rpc('delete_receipt', {
-      p_receipt_id: receiptId,
-      p_organization_id: activeOrg.id,
-    });
-    
-    setActionLoading(null);
+    try {
+      const { data, error } = await supabase.rpc('delete_receipt', {
+        p_receipt_id: receiptId,
+        p_organization_id: activeOrg.id,
+      });
+      
+      setActionLoading(null);
 
-    if (error || !data?.success) {
-      alert(error?.message || 'Error al eliminar el recibo de caja.');
-      return;
+      if (error) {
+        alert('Error de base de datos: ' + error.message);
+        return;
+      }
+
+      if (!data?.success) {
+        alert('No se pudo completar la eliminación del recibo.');
+        return;
+      }
+
+      setPrintOpen(false);
+      await loadReceipts();
+    } catch (err: any) {
+      setActionLoading(null);
+      alert('Ocurrió un error inesperado: ' + (err?.message || err));
     }
-
-    setPrintOpen(false);
-    await loadReceipts();
   }
 
   async function handleEdit(rec: any) {
