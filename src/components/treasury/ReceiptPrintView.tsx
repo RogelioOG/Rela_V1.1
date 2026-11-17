@@ -14,7 +14,7 @@ export interface ReceiptLine {
 export interface PrintableReceipt {
   receiptNumber: string;
   organizationName: string;
-  organizationNit?: string;
+  organizationNit?: string | null;
   unitLabel: string;
   ownerName: string;
   paymentDate: string;

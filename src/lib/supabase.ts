@@ -250,6 +250,7 @@ export interface Due {
   amount: number;
   interest_rate: number;
   balance: number;
+  interest_balance?: number;
   status: 'pendiente' | 'pagada' | 'parcial' | 'anulada';
   created_at: string;
   units?: Unit;

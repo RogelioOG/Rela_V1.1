@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { formatCOP, formatShortDate } from '@/lib/format';
+import { BlockingReceipt, BlockingReceiptsAlert } from '@/components/treasury/BlockingReceiptsAlert';
 
 export interface ChargeLine {
   conceptId?: string;
@@ -373,6 +374,8 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
   const [finalizing, setFinalizing] = useState(false);
   const [generatedInvoices, setGeneratedInvoices] = useState<{ id: string; invoiceNumber: string; row: LiquidationRow }[]>([]);
   const [deletingBatch, setDeletingBatch] = useState(false);
+  const [blockingReceipts, setBlockingReceipts] = useState<BlockingReceipt[]>([]);
+  const [blockingOpen, setBlockingOpen] = useState(false);
   const [currentNextSeq, setCurrentNextSeq] = useState<number>(1);
 
   useEffect(() => {
@@ -732,11 +735,23 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
   async function handleDeleteBatch() {
     if (!confirm('¿Está seguro de eliminar toda la facturación de este periodo en bloque? Se reversarán los asientos contables, las facturas emitidas y se liberarán los consecutivos.')) return;
+    if (!org) return;
     setDeletingBatch(true);
     setError('');
     try {
-      if (org) {
-        const { data: duesToDelete } = await supabase
+      const { data: blocking, error: blockingErr } = await supabase.rpc('get_blocking_receipts_for_period', {
+        p_organization_id: org.id,
+        p_period: billingPeriod,
+      });
+      if (blockingErr) throw new Error('No se pudo verificar los recibos asociados al período.');
+      if (blocking && blocking.length > 0) {
+        setDeletingBatch(false);
+        setBlockingReceipts(blocking as BlockingReceipt[]);
+        setBlockingOpen(true);
+        return;
+      }
+
+      const { data: duesToDelete } = await supabase
           .from('dues')
           .select('id')
           .eq('organization_id', org.id)
@@ -744,7 +759,20 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
 
         const countToDelete = duesToDelete?.length || 0;
 
-        await supabase.from('dues').delete().eq('organization_id', org.id).eq('period', billingPeriod);
+        const { error: duesDelErr } = await supabase.from('dues').delete().eq('organization_id', org.id).eq('period', billingPeriod);
+        if (duesDelErr) {
+          const { data: fallbackBlocking } = await supabase.rpc('get_blocking_receipts_for_period', {
+            p_organization_id: org.id,
+            p_period: billingPeriod,
+          });
+          if (fallbackBlocking && fallbackBlocking.length > 0) {
+            setDeletingBatch(false);
+            setBlockingReceipts(fallbackBlocking as BlockingReceipt[]);
+            setBlockingOpen(true);
+            return;
+          }
+          throw new Error('No se pudo eliminar la facturación: ' + duesDelErr.message);
+        }
         await supabase.from('invoices').delete().eq('organization_id', org.id).eq('period', billingPeriod);
         
         const { data: entriesToDelete } = await supabase
@@ -775,7 +803,6 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
             setCurrentNextSeq(newConsecutive);
           }
         }
-      }
 
       setIsFinalized(false);
       setGeneratedInvoices([]);
@@ -1070,8 +1097,13 @@ export default function Paso2FormatoEnvio({ liquidation, agreements, org, billin
         </div>
       </div>
 
-      <Modal open={!!previewRow} onClose={() => setPreviewRow(null)} title={`Vista Previa — ${previewRow?.unit.tower} ${previewRow?.unit.unit_label}`} size="lg">
-        {previewRow && (
+      <BlockingReceiptsAlert
+        open={blockingOpen}
+        onClose={() => setBlockingOpen(false)}
+        period={billingPeriod}
+        receipts={blockingReceipts}
+      />
+      <Modal open={!!previewRow} onClose={() => setPreviewRow(null)} title={`Vista Previa — ${previewRow?.unit.tower} ${previewRow?.unit.unit_label}`} size="lg">        {previewRow && (
           <div className="space-y-4">
             <div className="flex justify-between items-center">
               <Badge variant="blue">Plantilla: {templateLabels[template]}</Badge>
