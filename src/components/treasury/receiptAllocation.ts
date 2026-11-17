@@ -89,9 +89,9 @@ export function buildDetailedDueItems(
     });
   }
 
-  // 3. Validar si el valor recibido cumple con el pago mínimo para activar el descuento
-  let satisfiesMinimum = false;
+  // 3. Calcular el monto total del descuento potencial del escalón
   let totalPotentialDiscount = 0;
+  let satisfiesMinimum = false;
 
   if (matchedTier) {
     const minRequired = Number(matchedTier.min_payment_amount || matchedTier.minimum_amount || 0);
@@ -99,9 +99,9 @@ export function buildDetailedDueItems(
     const typeCheck = matchedTier.discount_type || (valNum <= 100 ? 'porcentaje' : 'monto');
     
     if (typeCheck === 'porcentaje' || valNum <= 100) {
-      totalPotentialDiscount = (totalPendingBalance * valNum) / 100;
+      totalPotentialDiscount = roundMoney((totalPendingBalance * valNum) / 100);
     } else {
-      totalPotentialDiscount = valNum;
+      totalPotentialDiscount = roundMoney(valNum);
     }
 
     const netTarget = Math.max(totalPendingBalance - totalPotentialDiscount, 0);
@@ -113,12 +113,11 @@ export function buildDetailedDueItems(
     }
   }
 
-  // 4. Verificar si se cumple la condición del concepto base parametrizado (ej. Administración)
+  // 4. Validar concepto base (ej. Administración)
   let baseConceptFulfilled = true;
   if (matchedTier && Array.isArray(matchedTier.calculation_base_concept_ids) && matchedTier.calculation_base_concept_ids.length > 0) {
     const baseIds = matchedTier.calculation_base_concept_ids;
-    // Comprobar si dentro de las deudas pendientes de la unidad existen los conceptos base requeridos
-    const hasBaseConceptInDues = dues.some(due => {
+    baseConceptFulfilled = dues.some(due => {
       const inv = invoicesMap[due.unit_id + '_' + due.period] || invoicesMap[due.id] || invoicesMap[due.invoice_id];
       const snapshotItems = inv?.items_snapshot;
       if (Array.isArray(snapshotItems)) {
@@ -126,14 +125,11 @@ export function buildDetailedDueItems(
       }
       return baseIds.includes(due.concept_id);
     });
-
-    // Si el escalón exige concepto base, se otorga el descuento si la unidad lo incluye en su estado de cuenta
-    baseConceptFulfilled = hasBaseConceptInDues;
   }
 
   const applyGlobalDiscount = Boolean(matchedTier && satisfiesMinimum && baseConceptFulfilled && totalPotentialDiscount > 0);
 
-  // Recolectar ítems y aplicar descuento distribuido proporcionalmente al total
+  // Recolectar todos los ítems primero
   dues.forEach(due => {
     const inv = invoicesMap[due.unit_id + '_' + due.period] || invoicesMap[due.id] || invoicesMap[due.invoice_id];
     const snapshotItems = inv?.items_snapshot;
@@ -146,17 +142,6 @@ export function buildDetailedDueItems(
         const amount = roundMoney(snap.amount || 0);
 
         if (amount > 0) {
-          let itemDiscount = 0;
-          // El descuento aplica a conceptos que no sean de mora si se cumple la regla general del escalón
-          const isEligible = !isInterest;
-
-          if (applyGlobalDiscount && isEligible) {
-            const proportion = amount / (totalPendingBalance || 1);
-            itemDiscount = roundMoney(totalPotentialDiscount * proportion);
-          }
-
-          const netBal = roundMoney(Math.max(amount - itemDiscount, 0));
-
           items.push({
             id: `${due.id}-snap-${index}`,
             dueId: due.id,
@@ -166,28 +151,19 @@ export function buildDetailedDueItems(
             conceptCode: concept?.code || snap.conceptCode || 'CON',
             conceptName: concept?.name || snap.conceptName || 'Concepto de Cobro',
             balance: amount,
-            netBalance: netBal,
+            netBalance: amount, // Se ajustará al aplicar el descuento en cascada
             priorityOrder: priorityMap.get(conceptId) ?? (isInterest ? 1 : 2),
             isInterest: isInterest,
-            eligibleForDiscount: isEligible,
-            discountAmount: itemDiscount,
+            eligibleForDiscount: !isInterest,
+            discountAmount: 0,
           });
         }
       });
     } else {
       const amount = roundMoney(due.balance || 0);
       if (amount > 0) {
-        let itemDiscount = 0;
         const concept = conceptMap.get(due.concept_id);
         const isInterest = !!concept?.is_late_interest;
-        const isEligible = !isInterest;
-
-        if (applyGlobalDiscount && isEligible) {
-          const proportion = amount / (totalPendingBalance || 1);
-          itemDiscount = roundMoney(totalPotentialDiscount * proportion);
-        }
-
-        const netBal = roundMoney(Math.max(amount - itemDiscount, 0));
 
         items.push({
           id: due.id,
@@ -198,11 +174,11 @@ export function buildDetailedDueItems(
           conceptCode: concept?.code || 'CON',
           conceptName: concept?.name || 'Cuota de Administración',
           balance: amount,
-          netBalance: netBal,
+          netBalance: amount,
           priorityOrder: priorityMap.get(due.concept_id) ?? 2,
           isInterest: isInterest,
-          eligibleForDiscount: isEligible,
-          discountAmount: itemDiscount,
+          eligibleForDiscount: !isInterest,
+          discountAmount: 0,
         });
       }
     }
@@ -233,12 +209,34 @@ export function buildDetailedDueItems(
     }
   });
 
-  return items.sort((a, b) => {
+  // Ordenar primero por prelación y antigüedad
+  items.sort((a, b) => {
     if (a.priorityOrder !== b.priorityOrder) {
       return a.priorityOrder - b.priorityOrder;
     }
     return a.dueDate.localeCompare(b.dueDate);
   });
+
+  // 5. Aplicar el descuento EN CASCADA (al primer concepto elegible que encuentre, sin prorratear)
+  if (applyGlobalDiscount) {
+    let remainingDiscount = totalPotentialDiscount;
+
+    for (const item of items) {
+      if (remainingDiscount <= 0) break;
+      if (item.eligibleForDiscount && item.balance > 0) {
+        const discountToApply = roundMoney(Math.min(remainingDiscount, item.balance));
+        item.discountAmount = discountToApply;
+        remainingDiscount = roundMoney(remainingDiscount - discountToApply);
+      }
+    }
+  }
+
+  // Calcular netBalance final para cada ítem
+  items.forEach(item => {
+    item.netBalance = roundMoney(Math.max(item.balance - item.discountAmount, 0));
+  });
+
+  return items;
 }
 
 export function allocateReceipt(
