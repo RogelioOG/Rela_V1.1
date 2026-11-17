@@ -73,7 +73,6 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     const lines = (rec.allocations || []).map((alc: any) => {
       const applied = Number(alc.capital_applied || 0) + Number(alc.interest_applied || 0);
       const discount = Number(alc.discount_applied || 0);
-      // Saldo inicial reconstruido = lo aplicado + el descuento + el saldo actual que quedó en la deuda
       const currentBalance = Number(alc.due?.balance || 0);
       const initialBalance = applied + discount + currentBalance;
       const balanceAfter = Math.max(initialBalance - discount - applied, 0);
@@ -130,16 +129,20 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
 
   async function handleDeleteReceipt(receiptId: string) {
     if (!activeOrg) return;
-    if (!window.confirm('¿Está seguro de ELIMINAR definitivamente este recibo de la base de datos?')) return;
+    if (!window.confirm('¿Está seguro de ELIMINAR definitivamente este recibo de la base de datos? Se revertirá la cartera y se eliminará el comprobante.')) return;
 
     setActionLoading(receiptId);
-    await supabase.rpc('void_receipt', { p_receipt_id: receiptId, p_organization_id: activeOrg.id });
-    await supabase.from('receipt_allocations').delete().eq('receipt_id', receiptId);
-    const { error } = await supabase.from('receipts').delete().eq('id', receiptId);
+    
+    // Llamar a la función RPC robusta en la base de datos para borrar y revertir saldos dinámicamente
+    const { data, error } = await supabase.rpc('delete_receipt', {
+      p_receipt_id: receiptId,
+      p_organization_id: activeOrg.id,
+    });
+    
     setActionLoading(null);
 
-    if (error) {
-      alert('Error al eliminar el recibo: ' + error.message);
+    if (error || !data?.success) {
+      alert(error?.message || 'Error al eliminar el recibo de caja.');
       return;
     }
 
