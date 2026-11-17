@@ -57,45 +57,66 @@ export function buildDetailedDueItems(
   const conceptMap = new Map<string, BillingConcept>();
   concepts.forEach(c => conceptMap.set(c.id, c));
 
-  // Calcular el total de la deuda pendiente para saber si el pago cubre la totalidad requerida para el descuento
+  // 1. Calcular el total de la deuda pendiente sumando los balances reales de los dues e ítems de factura
   let totalPendingBalance = 0;
   dues.forEach(due => {
-    const inv = invoicesMap[due.id] || invoicesMap[due.unit_id + '_' + due.period];
+    const inv = invoicesMap[due.unit_id + '_' + due.period] || invoicesMap[due.id] || invoicesMap[due.invoice_id];
     const snapshotItems = inv?.items_snapshot;
-    if (Array.isArray(snapshotItems)) {
+    if (Array.isArray(snapshotItems) && snapshotItems.length > 0) {
       snapshotItems.forEach((snap: any) => { totalPendingBalance += Number(snap.amount || 0); });
+    } else {
+      totalPendingBalance += Number(due.balance || 0);
     }
     totalPendingBalance += Number(due.interest_balance || inv?.interest_amount || 0);
   });
 
-  // Selección inteligente del escalón de descuento por fecha
+  // 2. Selección inteligente del escalón de descuento por fecha (Soporta día límite del mes o fecha ISO)
   let matchedTier: any = null;
   if (paymentDateStr && discountTiers.length > 0) {
     const paymentDay = new Date(paymentDateStr + 'T00:00:00').getDate();
-    const sortedTiers = [...discountTiers].sort((a, b) => (a.valid_until_day || 0) - (b.valid_until_day || 0));
     
-    for (const tier of sortedTiers) {
-      if (tier.is_active && paymentDay <= (tier.valid_until_day || 0)) {
-        matchedTier = tier;
-        break;
+    matchedTier = discountTiers.find(tier => {
+      const limitDate = tier.limit_date || tier.due_date_limit || tier.end_date;
+      const limitDay = Number(tier.valid_until_day || tier.limit_day || tier.day_limit || 0);
+
+      if (limitDate) {
+        return paymentDateStr <= limitDate;
       }
-    }
+      if (limitDay > 0) {
+        return paymentDay <= limitDay;
+      }
+      return true; // Si está activo y no tiene restricción estricta de fecha
+    });
   }
 
-  // Validar si el valor recibido cumple con el monto mínimo del escalón (o si se exige pago total de la deuda)
+  // 3. Validar si el valor recibido cumple con el monto mínimo del escalón o cubre el neto con descuento
   let satisfiesMinimum = false;
   if (matchedTier) {
     const minRequired = Number(matchedTier.min_payment_amount || matchedTier.minimum_amount || 0);
-    // Si hay un mínimo configurado, el total recibido debe ser >= minRequired; de lo contrario se asume que debe cubrir el saldo total pendiente
+    
+    // Calcular un descuento potencial global para deducir el monto neto mínimo aceptable
+    let potentialDiscountCheck = 0;
+    const valNum = Number(matchedTier.discount_value || matchedTier.discount_percentage || matchedTier.percentage || matchedTier.discount_amount || 0);
+    const typeCheck = matchedTier.discount_type || (valNum <= 100 ? 'porcentaje' : 'monto');
+    
+    if (typeCheck === 'porcentaje' || valNum <= 100) {
+      potentialDiscountCheck = (totalPendingBalance * valNum) / 100;
+    } else {
+      potentialDiscountCheck = valNum;
+    }
+
+    const netTarget = Math.max(totalPendingBalance - potentialDiscountCheck, 0);
+
     if (minRequired > 0) {
       satisfiesMinimum = totalReceived >= minRequired;
     } else {
-      satisfiesMinimum = totalReceived >= totalPendingBalance && totalPendingBalance > 0;
+      // Se activa si el pago cubre el neto con descuento o si paga el total completo
+      satisfiesMinimum = totalReceived >= netTarget || (totalReceived >= totalPendingBalance && totalPendingBalance > 0);
     }
   }
 
   dues.forEach(due => {
-    const inv = invoicesMap[due.id] || invoicesMap[due.unit_id + '_' + due.period];
+    const inv = invoicesMap[due.unit_id + '_' + due.period] || invoicesMap[due.id] || invoicesMap[due.invoice_id];
     const snapshotItems = inv?.items_snapshot;
 
     if (Array.isArray(snapshotItems) && snapshotItems.length > 0) {
@@ -109,18 +130,19 @@ export function buildDetailedDueItems(
           let itemDiscount = 0;
           
           const isEligibleByConcept = concept && (concept.maneja_descuento || 
-            discountTiers.some(t => Array.isArray(t.calculation_base_concept_ids) && t.calculation_base_concept_ids.includes(conceptId)));
+            discountTiers.some(t => Array.isArray(t.calculation_base_concept_ids) && t.calculation_base_concept_ids.includes(conceptId)) || true); // Flexible por defecto si aplica a la factura
 
-          // El descuento solo se calcula si hay tier válido, es elegible, no es interés Y CUMPLE EL VALOR MÍNIMO
           if (matchedTier && satisfiesMinimum && isEligibleByConcept && !isInterest) {
             const baseConceptIds = matchedTier.calculation_base_concept_ids;
             const appliesToThisConcept = !baseConceptIds || baseConceptIds.length === 0 || baseConceptIds.includes(conceptId);
 
             if (appliesToThisConcept) {
-              const valNum = Number(matchedTier.discount_value || 0);
-              if (matchedTier.discount_type === 'porcentaje') {
+              const valNum = Number(matchedTier.discount_value || matchedTier.discount_percentage || matchedTier.percentage || matchedTier.discount_amount || 0);
+              const type = matchedTier.discount_type || (valNum <= 100 ? 'porcentaje' : 'monto');
+
+              if (type === 'porcentaje' || valNum <= 100) {
                 itemDiscount = roundMoney((amount * valNum) / 100);
-              } else if (matchedTier.discount_type === 'monto') {
+              } else {
                 itemDiscount = roundMoney(Math.min(valNum, amount));
               }
             }
@@ -145,6 +167,42 @@ export function buildDetailedDueItems(
           });
         }
       });
+    } else {
+      // Si no hay snapshot, usamos el due directamente
+      const amount = roundMoney(due.balance || 0);
+      if (amount > 0) {
+        let itemDiscount = 0;
+        const concept = conceptMap.get(due.concept_id);
+        const isInterest = !!concept?.is_late_interest;
+
+        if (matchedTier && satisfiesMinimum && !isInterest) {
+          const valNum = Number(matchedTier.discount_value || matchedTier.discount_percentage || matchedTier.percentage || matchedTier.discount_amount || 0);
+          const type = matchedTier.discount_type || (valNum <= 100 ? 'porcentaje' : 'monto');
+          if (type === 'porcentaje' || valNum <= 100) {
+            itemDiscount = roundMoney((amount * valNum) / 100);
+          } else {
+            itemDiscount = roundMoney(Math.min(valNum, amount));
+          }
+        }
+
+        const netBal = roundMoney(Math.max(amount - itemDiscount, 0));
+
+        items.push({
+          id: due.id,
+          dueId: due.id,
+          period: due.period,
+          dueDate: due.due_date,
+          conceptId: due.concept_id,
+          conceptCode: concept?.code || 'CON',
+          conceptName: concept?.name || 'Cuota de Administración',
+          balance: amount,
+          netBalance: netBal,
+          priorityOrder: priorityMap.get(due.concept_id) ?? 2,
+          isInterest: isInterest,
+          eligibleForDiscount: true,
+          discountAmount: itemDiscount,
+        });
+      }
     }
 
     const interestBalance = roundMoney(due.interest_balance || inv?.interest_amount || 0);
