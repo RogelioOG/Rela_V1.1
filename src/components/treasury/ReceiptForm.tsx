@@ -9,6 +9,8 @@ import { Input, Select, TextArea } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
 import {
+  buildDetailedDueItems,
+  allocateReceipt,
   parseAmount,
   roundMoney
 } from '@/components/treasury/receiptAllocation';
@@ -217,116 +219,22 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
   const totalNumber = parseAmount(header.total);
 
-  // Ordenar obligaciones según jerarquía y antigüedad
-  const sortedDues = useMemo(() => {
-    if (!dues.length) return [];
-    const priorityMap = new Map<string, number>();
-    hierarchy.forEach((h, idx) => {
-      priorityMap.set(h.concept_id, h.priority_order ?? idx);
-    });
-
-    return [...dues].sort((a, b) => {
-      const pA = priorityMap.get(a.concept_id) ?? 999;
-      const pB = priorityMap.get(b.concept_id) ?? 999;
-      if (pA !== pB) return pA - pB;
-      return (a.due_date || '').localeCompare(b.due_date || '');
-    });
-  }, [dues, hierarchy]);
-
-  // Cálculo de ítems detallados con evaluación de escalones de descuento
   const detailedItems = useMemo(() => {
-    const totalPendingBalance = sortedDues.reduce((sum, d) => sum + Number(d.balance || 0), 0);
+    return buildDetailedDueItems(dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate, totalNumber);
+  }, [dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate, totalNumber]);
 
-    let applicableTier: any = null;
-    if (header.paymentDate && discountTiers.length > 0) {
-      const paymentDay = new Date(header.paymentDate + 'T00:00:00').getDate();
-
-      applicableTier = discountTiers.find(tier => {
-        // Evaluar por fecha completa o por día límite del mes
-        const limitDate = tier.limit_date || tier.due_date_limit || tier.end_date;
-        const limitDay = Number(tier.limit_day || tier.day_limit || tier.max_day || 0);
-
-        if (limitDate) {
-          return header.paymentDate <= limitDate;
-        }
-        if (limitDay > 0) {
-          return paymentDay <= limitDay;
-        }
-        return true; // Si no tiene restricción estricta de fecha, aplica por defecto
-      });
-    }
-
-    let totalPotentialDiscount = 0;
-    if (applicableTier) {
-      const pct = Number(applicableTier.discount_percentage || applicableTier.percentage || applicableTier.discount_pct || 0);
-      const amt = Number(applicableTier.discount_amount || applicableTier.amount || applicableTier.value || 0);
-      
-      if (pct > 0) {
-        totalPotentialDiscount = (totalPendingBalance * pct) / 100;
-      } else if (amt > 0) {
-        totalPotentialDiscount = amt;
-      } else {
-        // Si el tier existe pero no hallamos el campo exacto, intentamos tomar cualquier valor numérico disponible
-        const fallbackVal = Number(applicableTier.value || applicableTier.discount || 0);
-        totalPotentialDiscount = fallbackVal > 100 ? fallbackVal : (totalPendingBalance * fallbackVal) / 100;
-      }
-    }
-
-    // Si hay escalón configurado, permitimos el descuento siempre que pague el monto mínimo requerido o superior
-    const minRequiredForDiscount = Math.max(totalPendingBalance - totalPotentialDiscount, 0);
-    const qualifiesForDiscount = (totalNumber >= minRequiredForDiscount || totalNumber >= totalPendingBalance) && totalPotentialDiscount > 0;
-
-    return sortedDues.map(due => {
-      const concept = concepts.find(c => c.id === due.concept_id);
-      let conceptDiscount = 0;
-
-      if (qualifiesForDiscount && concept && !concept.is_late_interest) {
-        const proportion = Number(due.balance) / (totalPendingBalance || 1);
-        conceptDiscount = roundMoney(totalPotentialDiscount * proportion);
-      }
-
-      return {
-        id: due.id,
-        dueId: due.id,
-        conceptId: due.concept_id,
-        conceptName: concept?.name || 'Concepto',
-        conceptCode: concept?.code || 'CON',
-        period: due.period,
-        dueDate: due.due_date,
-        balance: Number(due.balance || 0),
-        discountAmount: conceptDiscount,
-        isInterest: concept?.is_late_interest || false,
-      };
-    });
-  }, [sortedDues, concepts, discountTiers, header.paymentDate, totalNumber]);
-
-  // Distribución automática del dinero recibido
-  const autoAllocationAmounts = useMemo(() => {
-    const amounts: Record<string, number> = {};
-    let remainingMoney = totalNumber;
-
-    detailedItems.forEach(item => {
-      if (remainingMoney <= 0) {
-        amounts[item.id] = 0;
-        return;
-      }
-      const effectiveNeeded = Math.max(item.balance - item.discountAmount, 0);
-      const toApply = Math.min(remainingMoney, effectiveNeeded);
-      amounts[item.id] = roundMoney(toApply);
-      remainingMoney = roundMoney(remainingMoney - toApply);
-    });
-
-    return amounts;
+  const autoAllocation = useMemo(() => {
+    return allocateReceipt(detailedItems, totalNumber);
   }, [detailedItems, totalNumber]);
 
   const currentInputs = useMemo(() => {
     if (overrides) return overrides;
     const initial: DetailedAllocationInputs = {};
     detailedItems.forEach(item => {
-      initial[item.id] = String(autoAllocationAmounts[item.id] ?? 0);
+      initial[item.id] = String(autoAllocation.amounts[item.id]?.applied ?? 0);
     });
     return initial;
-  }, [overrides, detailedItems, autoAllocationAmounts]);
+  }, [overrides, detailedItems, autoAllocation]);
 
   const appliedTotal = roundMoney(
     detailedItems.reduce((sum, item) => sum + parseAmount(currentInputs[item.id] ?? '0'), 0)
@@ -402,7 +310,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         return;
       }
     } else {
-      setFormError('No hay un periodo de trabajo activo configurado en el Calendario de Recuudo.');
+      setFormError('No hay un periodo de trabajo activo configurado en el Calendario de Recaudo.');
       return;
     }
 
