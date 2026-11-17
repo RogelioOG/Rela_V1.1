@@ -220,8 +220,6 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
   // Ordenar obligaciones según jerarquía y antigüedad
   const sortedDues = useMemo(() => {
     if (!dues.length) return [];
-    
-    // Crear un mapa de prioridades basado en hierarchy
     const priorityMap = new Map<string, number>();
     hierarchy.forEach((h, idx) => {
       priorityMap.set(h.concept_id, h.priority_order ?? idx);
@@ -235,15 +233,15 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     });
   }, [dues, hierarchy]);
 
-  // Cálculo de ítems detallados y aplicación de descuentos por pronto pago
+  // Cálculo flexible y robusto de descuentos por pronto pago
   const detailedItems = useMemo(() => {
     const totalPendingBalance = sortedDues.reduce((sum, d) => sum + Number(d.balance || 0), 0);
 
-    // Buscar escalón de descuento aplicable según la fecha de pago
+    // Buscar escalón de descuento aplicable validando fecha
     let applicableTier: any = null;
     if (header.paymentDate && discountTiers.length > 0) {
       applicableTier = discountTiers.find(tier => {
-        const limitDate = tier.limit_date || tier.due_date_limit;
+        const limitDate = tier.limit_date || tier.due_date_limit || tier.end_date;
         const matchesDate = limitDate ? header.paymentDate <= limitDate : true;
         return matchesDate;
       });
@@ -251,16 +249,19 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
     let totalPotentialDiscount = 0;
     if (applicableTier) {
-      if (applicableTier.discount_percentage) {
-        totalPotentialDiscount = (totalPendingBalance * Number(applicableTier.discount_percentage)) / 100;
-      } else if (applicableTier.discount_amount) {
-        totalPotentialDiscount = Number(applicableTier.discount_amount);
+      const pct = Number(applicableTier.discount_percentage || applicableTier.percentage || 0);
+      const amt = Number(applicableTier.discount_amount || applicableTier.amount || 0);
+      
+      if (pct > 0) {
+        totalPotentialDiscount = (totalPendingBalance * pct) / 100;
+      } else if (amt > 0) {
+        totalPotentialDiscount = amt;
       }
     }
 
-    // El pago mínimo requerido para acceder al descuento es: Saldo Total - Descuento Total
+    // Regla flexible: El descuento aplica si el valor recibido es >= (Saldo Total - Descuento) O si cubre el saldo total pendiente
     const minRequiredForDiscount = Math.max(totalPendingBalance - totalPotentialDiscount, 0);
-    const qualifiesForDiscount = totalNumber >= minRequiredForDiscount && totalPotentialDiscount > 0;
+    const qualifiesForDiscount = (totalNumber >= minRequiredForDiscount || totalNumber >= totalPendingBalance) && totalPotentialDiscount > 0;
 
     return sortedDues.map(due => {
       const concept = concepts.find(c => c.id === due.concept_id);
@@ -286,7 +287,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     });
   }, [sortedDues, concepts, discountTiers, header.paymentDate, totalNumber]);
 
-  // Distribución automática del dinero recibido entre las obligaciones
+  // Distribución automática del dinero recibido
   const autoAllocationAmounts = useMemo(() => {
     const amounts: Record<string, number> = {};
     let remainingMoney = totalNumber;
@@ -296,7 +297,6 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         amounts[item.id] = 0;
         return;
       }
-      // Lo que se necesita pagar de esta obligación es su saldo menos el descuento ya otorgado
       const effectiveNeeded = Math.max(item.balance - item.discountAmount, 0);
       const toApply = Math.min(remainingMoney, effectiveNeeded);
       amounts[item.id] = roundMoney(toApply);
@@ -389,7 +389,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         return;
       }
     } else {
-      setFormError('No hay un periodo de trabajo activo configurado en el Calendario de Recaudo.');
+      setFormError('No hay un periodo de trabajo activo configurado en el Calendario de Recuudo.');
       return;
     }
 
