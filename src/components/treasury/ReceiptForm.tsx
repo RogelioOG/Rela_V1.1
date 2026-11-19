@@ -16,6 +16,8 @@ import {
 } from '@/components/treasury/receiptAllocation';
 import {
   DetailedAllocationInputs,
+  DetailedDiscountOverrides,
+  getEffectiveDiscount,
   ReceiptAllocationTable
 } from '@/components/treasury/ReceiptAllocationTable';
 import { PrintableReceipt, ReceiptPrintView } from '@/components/treasury/ReceiptPrintView';
@@ -95,6 +97,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
   });
 
   const [overrides, setOverrides] = useState<DetailedAllocationInputs | null>(null);
+  const [discountOverrides, setDiscountOverrides] = useState<DetailedDiscountOverrides>({});
   const [selectedAdvanceConceptId, setSelectedAdvanceConceptId] = useState<string>('');
   const [loadingReference, setLoadingReference] = useState(true);
   const [loadingDues, setLoadingDues] = useState(false);
@@ -189,25 +192,33 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
       if (allocs.length > 0) {
         const prefilledInputs: DetailedAllocationInputs = {};
+        const prefilledDiscounts: Record<string, number> = {};
         allocs.forEach((alc: any) => {
           const dueId = alc.due_id;
           const conceptId = alc.concept_id;
           const appliedVal = roundMoney(Number(alc.capital_applied || 0) + Number(alc.interest_applied || 0));
+          const discVal = roundMoney(Number(alc.discount_applied || 0));
           if (dueId && conceptId) {
             const compositeKey = `${dueId}_${conceptId}`;
             prefilledInputs[compositeKey] = String(
               roundMoney(parseAmount(prefilledInputs[compositeKey] || '0') + appliedVal)
+            );
+            prefilledDiscounts[compositeKey] = roundMoney(
+              (prefilledDiscounts[compositeKey] || 0) + discVal
             );
           } else if (dueId) {
             const dKey = String(dueId);
             prefilledInputs[dKey] = String(
               roundMoney(parseAmount(prefilledInputs[dKey] || '0') + appliedVal)
             );
+            prefilledDiscounts[dKey] = roundMoney((prefilledDiscounts[dKey] || 0) + discVal);
           }
         });
         setOverrides(prefilledInputs);
+        setDiscountOverrides(prefilledDiscounts);
       } else {
         setOverrides(null);
+        setDiscountOverrides({});
       }
 
       setFormError('');
@@ -333,16 +344,43 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     return buildDetailedDueItems(dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate, totalNumber);
   }, [dues, hierarchy, concepts, invoicesMap, discountTiers, header.paymentDate, totalNumber]);
 
+  const resolvedDiscountOverrides = useMemo(() => {
+    const mapped: DetailedDiscountOverrides = {};
+    detailedItems.forEach((item: any) => {
+      const compositeKey = `${item.dueId}_${item.conceptId}`;
+      if (discountOverrides[item.id] !== undefined) {
+        mapped[item.id] = discountOverrides[item.id];
+      } else if (discountOverrides[compositeKey] !== undefined) {
+        mapped[item.id] = discountOverrides[compositeKey];
+      } else if (discountOverrides[String(item.dueId)] !== undefined) {
+        mapped[item.id] = discountOverrides[String(item.dueId)];
+      }
+    });
+    return mapped;
+  }, [detailedItems, discountOverrides]);
+
+  const itemsWithEffectiveDiscounts = useMemo(() => {
+    return detailedItems.map(item => {
+      const effDisc = roundMoney(getEffectiveDiscount(item, resolvedDiscountOverrides));
+      const netBal = roundMoney(Math.max(item.balance - effDisc, 0));
+      return {
+        ...item,
+        discountAmount: effDisc,
+        netBalance: netBal,
+      };
+    });
+  }, [detailedItems, resolvedDiscountOverrides]);
+
   const autoAllocation = useMemo(() => {
-    return allocateReceipt(detailedItems, totalNumber);
-  }, [detailedItems, totalNumber]);
+    return allocateReceipt(itemsWithEffectiveDiscounts, totalNumber);
+  }, [itemsWithEffectiveDiscounts, totalNumber]);
 
   const currentInputs = useMemo(() => {
     if (overrides) {
       const resolved: DetailedAllocationInputs = {};
       const usedDueIds = new Set<string>();
 
-      detailedItems.forEach((item: any) => {
+      itemsWithEffectiveDiscounts.forEach((item: any) => {
         const compositeKey = `${item.dueId}_${item.conceptId}`;
         if (overrides[item.id] !== undefined) {
           resolved[item.id] = overrides[item.id];
@@ -360,17 +398,19 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     }
 
     const initial: DetailedAllocationInputs = {};
-    detailedItems.forEach(item => {
+    itemsWithEffectiveDiscounts.forEach(item => {
       initial[item.id] = String(autoAllocation.amounts[item.id]?.applied ?? 0);
     });
     return initial;
-  }, [overrides, detailedItems, autoAllocation]);
+  }, [overrides, itemsWithEffectiveDiscounts, autoAllocation]);
 
   const appliedTotal = roundMoney(
-    detailedItems.reduce((sum, item) => sum + parseAmount(currentInputs[item.id] ?? '0'), 0)
+    itemsWithEffectiveDiscounts.reduce((sum, item) => sum + parseAmount(currentInputs[item.id] ?? '0'), 0)
   );
   const advance = roundMoney(totalNumber - appliedTotal);
-  const hasOverflow = detailedItems.some(item => parseAmount(currentInputs[item.id] ?? '0') > item.balance);
+  const hasOverflow = itemsWithEffectiveDiscounts.some(
+    item => parseAmount(currentInputs[item.id] ?? '0') > item.netBalance
+  );
 
   const advanceEligibleConcepts = useMemo(() => {
     return concepts.filter(c => !c.is_late_interest && (c as any).advance_account_id);
@@ -388,11 +428,13 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
       paymentDate: value,
       accountingDate: prev.accountingDate === prev.paymentDate ? value : prev.accountingDate,
     }));
+    setDiscountOverrides({});
   }
 
   function handleTotalChange(value: string) {
     updateHeader('total', value);
     setOverrides(null);
+    setDiscountOverrides({});
   }
 
   function handleAllocationChange(itemId: string, value: string) {
@@ -404,8 +446,40 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     setFormError('');
   }
 
+  function handleDiscountChange(itemId: string, newDiscount: number) {
+    const cleanDisc = roundMoney(Math.max(newDiscount, 0));
+    setDiscountOverrides(prev => ({
+      ...prev,
+      [itemId]: cleanDisc,
+    }));
+
+    // Si el usuario no había forzado manualmente el valor a aplicar o el nuevo descuento reduce el neto,
+    // ajustamos automáticamente el valor sugerido en ese ítem para que no supere su nuevo saldo neto.
+    const targetItem = itemsWithEffectiveDiscounts.find(it => it.id === itemId);
+    if (targetItem) {
+      const nextNet = roundMoney(Math.max(targetItem.balance - cleanDisc, 0));
+      const currentApplied = parseAmount(currentInputs[itemId] ?? '0');
+      if (!overrides) {
+        const suggested = roundMoney(Math.min(Math.max(totalNumber, 0), nextNet));
+        setOverrides({
+          ...currentInputs,
+          [itemId]: String(suggested),
+        });
+      } else if (currentApplied > nextNet) {
+        setOverrides({
+          ...overrides,
+          [itemId]: String(nextNet),
+        });
+      }
+    }
+
+    setSuccessMessage('');
+    setFormError('');
+  }
+
   function resetAllocation() {
     setOverrides(null);
+    setDiscountOverrides({});
   }
 
   function cancelEdit() {
@@ -421,6 +495,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
       notes: '',
     });
     setOverrides(null);
+    setDiscountOverrides({});
   }
 
   async function handleSave(e: React.FormEvent) {
@@ -447,13 +522,13 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
     if (totalNumber <= 0) return setFormError('El valor recibido debe ser mayor a cero.');
     if (advance < 0) return setFormError(`Lo aplicado supera el valor recibido en ${formatCOP(Math.abs(advance))}.`);
-    if (hasOverflow) return setFormError('Hay un valor asignado que supera el saldo pendiente de un concepto.');
+    if (hasOverflow) return setFormError('Hay un valor asignado que supera el saldo neto de un concepto.');
     if (appliedTotal + (advance > 0 ? advance : 0) !== totalNumber) {
       setFormError('El valor recibido debe cuadrar exactamente con la suma del total aplicado y el anticipo.');
       return;
     }
 
-    const allocations = detailedItems
+    const allocations = itemsWithEffectiveDiscounts
       .map(item => ({
         due_id: item.dueId,
         concept_id: item.conceptId,
@@ -529,7 +604,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
       applied: appliedTotal,
       advance: Math.max(advance, 0),
       notes: header.notes,
-      lines: detailedItems.map(item => {
+      lines: itemsWithEffectiveDiscounts.map(item => {
         const appliedVal = parseAmount(currentInputs[item.id] ?? '0');
         const discountVal = item.discountAmount || 0;
         const balanceAfter = Math.max(item.balance - discountVal - appliedVal, 0);
@@ -552,6 +627,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     setEditingAllocations([]);
     setHeader(prev => ({ ...prev, total: '', notes: '' }));
     setOverrides(null);
+    setDiscountOverrides({});
     if (header.unitId) await loadPendingDues(header.unitId, []);
   }
 
@@ -606,7 +682,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
             <h2 className="text-base font-semibold text-gray-900">Gestión de Cobro y Aplicación</h2>
             <p className="text-sm text-gray-500">Obligaciones ordenadas por jerarquía de concepto y antigüedad de período.</p>
           </div>
-          {header.unitId && detailedItems.length > 0 && (
+          {header.unitId && itemsWithEffectiveDiscounts.length > 0 && (
             <Button type="button" variant="outline" size="sm" onClick={resetAllocation}>
               <RotateCcw className="w-4 h-4" /> Recalcular automáticamente
             </Button>
@@ -619,11 +695,17 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
           <div className="flex items-center justify-center py-12"><Loader2 className="w-6 h-6 text-blue-600 animate-spin" /></div>
         ) : duesError ? (
           <p className="text-center text-red-600 py-12">{duesError}</p>
-        ) : detailedItems.length === 0 ? (
+        ) : itemsWithEffectiveDiscounts.length === 0 ? (
           <p className="text-center text-gray-500 py-12">Esta unidad no tiene obligaciones pendientes</p>
         ) : (
           <div className="p-6">
-            <ReceiptAllocationTable items={detailedItems} inputs={currentInputs} onChange={handleAllocationChange} />
+            <ReceiptAllocationTable
+              items={itemsWithEffectiveDiscounts}
+              inputs={currentInputs}
+              discountOverrides={resolvedDiscountOverrides}
+              onChange={handleAllocationChange}
+              onDiscountChange={handleDiscountChange}
+            />
           </div>
         )}
       </Card>
@@ -696,7 +778,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         )}
 
         <div className="flex justify-end px-6 pb-6">
-          <Button type="submit" disabled={saving || !header.unitId || (detailedItems.length === 0 && advance <= 0) || advance < 0 || (advance > 0 && !selectedAdvanceConceptId)}>
+          <Button type="submit" disabled={saving || !header.unitId || (itemsWithEffectiveDiscounts.length === 0 && advance <= 0) || advance < 0 || (advance > 0 && !selectedAdvanceConceptId)}>
             {saving ? (
               <><Loader2 className="w-4 h-4 animate-spin" /> Guardando...</>
             ) : editingId ? (
