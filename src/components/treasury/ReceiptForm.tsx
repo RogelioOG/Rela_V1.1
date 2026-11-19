@@ -176,7 +176,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
   const loadPendingDues = useCallback(async (unitId: string) => {
     if (!activeOrg) return;
-    
+
     const [duesRes, invoicesRes] = await Promise.all([
       supabase
         .from('dues')
@@ -354,11 +354,12 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         p_advance_amount: advance > 0 ? advance : 0,
       });
 
-      if (error || !data?.success) {
+      if (error || (data && (data as any).success === false)) {
         setSaving(false);
-        setFormError(error?.message || 'No se pudo actualizar el recibo.');
+        setFormError(error?.message || (data as any)?.message || 'No se pudo actualizar el recibo.');
         return;
       }
+      receiptNumber = (data as any)?.receipt_number || receiptNumber;
     } else {
       const { data, error } = await supabase.rpc('save_receipt', {
         p_organization_id: activeOrg.id,
@@ -375,7 +376,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
       if (error || !(data as any)?.receipt_number) {
         setSaving(false);
-        setFormError(error?.message || 'No se pudo registrar el recibo.');
+        setFormError(error?.message || (data as any)?.message || 'No se pudo registrar el recibo.');
         return;
       }
       receiptNumber = (data as any).receipt_number;
@@ -385,6 +386,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     setSuccessMessage(`Recibo ${receiptNumber} ${editingId ? 'actualizado' : 'registrado'} correctamente.`);
     setPrintable({
       receiptNumber: receiptNumber || 'RC-0001',
+      status: 'contabilizado',
       organizationName: activeOrg.name,
       organizationNit: activeOrg.nit,
       unitLabel: unit ? unitLabel(unit) : '',
