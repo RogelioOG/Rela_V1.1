@@ -13,6 +13,7 @@ export interface ReceiptLine {
 
 export interface PrintableReceipt {
   receiptNumber: string;
+  status?: string;
   organizationName: string;
   organizationNit?: string | null;
   unitLabel: string;
@@ -32,13 +33,35 @@ interface ReceiptPrintViewProps {
 }
 
 export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
-  const totalInitial = receipt.lines.reduce((sum, l) => sum + l.initialBalance, 0);
-  const totalDiscount = receipt.lines.reduce((sum, l) => sum + l.discount, 0);
-  const totalAppliedLines = receipt.lines.reduce((sum, l) => sum + l.applied, 0);
-  const totalBalanceAfter = receipt.lines.reduce((sum, l) => sum + l.balanceAfter, 0);
+  const isVoided = receipt.status === 'anulado';
+
+  const displayTotal = isVoided ? 0 : receipt.total;
+  const displayApplied = isVoided ? 0 : receipt.applied;
+  const displayAdvance = isVoided ? 0 : receipt.advance;
+
+  const displayLines = receipt.lines.map(l => ({
+    ...l,
+    discount: isVoided ? 0 : l.discount,
+    applied: isVoided ? 0 : l.applied,
+    balanceAfter: isVoided ? l.initialBalance : l.balanceAfter,
+  }));
+
+  const totalInitial = displayLines.reduce((sum, l) => sum + l.initialBalance, 0);
+  const totalDiscount = displayLines.reduce((sum, l) => sum + l.discount, 0);
+  const totalAppliedLines = displayLines.reduce((sum, l) => sum + l.applied, 0);
+  const totalBalanceAfter = displayLines.reduce((sum, l) => sum + l.balanceAfter, 0);
 
   return (
     <div className="bg-white p-8 text-gray-900 max-w-3xl mx-auto space-y-6 text-sm">
+      {isVoided && (
+        <div className="rounded-lg border-2 border-red-300 bg-red-50 px-4 py-3 text-red-900">
+          <p className="text-sm font-bold uppercase tracking-wide">Documento Anulado</p>
+          <p className="text-xs text-red-800 mt-0.5">
+            Este recibo de caja fue anulado; sus valores aplicados y movimientos contables fueron reversados.
+          </p>
+        </div>
+      )}
+
       {/* Encabezado */}
       <div className="flex justify-between items-start border-b border-gray-300 pb-4">
         <div>
@@ -48,7 +71,14 @@ export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
         </div>
         <div className="text-right">
           <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">Recibo de Caja</p>
-          <p className="text-xl font-mono font-bold text-blue-700">{receipt.receiptNumber}</p>
+          <p className={`text-xl font-mono font-bold ${isVoided ? 'text-red-700 line-through' : 'text-blue-700'}`}>
+            {receipt.receiptNumber}
+          </p>
+          {isVoided && (
+            <span className="inline-block mt-1 px-2 py-0.5 text-xs font-bold rounded bg-red-100 text-red-800">
+              ANULADO
+            </span>
+          )}
         </div>
       </div>
 
@@ -62,7 +92,10 @@ export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
         <div className="space-y-1 text-right">
           <p><strong className="text-gray-600">Fecha de pago:</strong> {receipt.paymentDate}</p>
           <p><strong className="text-gray-600">Fecha contable:</strong> {receipt.accountingDate}</p>
-          <p><strong className="text-gray-600">Valor recibido:</strong> <span className="font-bold text-gray-900">{formatCOP(receipt.total)}</span></p>
+          <p>
+            <strong className="text-gray-600">Valor recibido:</strong>{' '}
+            <span className="font-bold text-gray-900">{formatCOP(displayTotal)}</span>
+          </p>
         </div>
       </div>
 
@@ -88,7 +121,7 @@ export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {receipt.lines.map((line, idx) => (
+              {displayLines.map((line, idx) => (
                 <tr key={idx} className="hover:bg-gray-50">
                   <td className="px-3 py-2 font-medium">{line.period}</td>
                   <td className="px-3 py-2">
@@ -122,15 +155,15 @@ export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
         <div className="w-72 space-y-1.5 bg-gray-50 p-4 rounded-lg border border-gray-200 text-xs">
           <div className="flex justify-between">
             <span className="text-gray-600">Total aplicado a deudas:</span>
-            <span className="font-semibold">{formatCOP(receipt.applied)}</span>
+            <span className="font-semibold">{formatCOP(displayApplied)}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-gray-600">Anticipo / Saldo a favor:</span>
-            <span className="font-semibold text-green-700">{formatCOP(receipt.advance)}</span>
+            <span className="font-semibold text-green-700">{formatCOP(displayAdvance)}</span>
           </div>
           <div className="flex justify-between border-t border-gray-300 pt-2 text-sm font-bold">
             <span>Total Recibido:</span>
-            <span>{formatCOP(receipt.total)}</span>
+            <span>{formatCOP(displayTotal)}</span>
           </div>
         </div>
       </div>
