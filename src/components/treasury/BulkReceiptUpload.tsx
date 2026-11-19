@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   CheckCircle2,
   Download,
   FileSpreadsheet,
@@ -12,7 +14,6 @@ import {
   supabase,
   Due,
   PaymentHierarchyConfig,
-  PaymentMethod,
   Unit,
   BillingConcept,
 } from '@/lib/supabase';
@@ -156,7 +157,12 @@ function parseNumberStrict(raw: string): number {
   return Number(cleaned.replace(',', '.'));
 }
 
-function unitDisplay(unit: Unit): string {
+function unitDisplay(unit: any): string {
+  if (unit.unique_identifier) {
+    return unit.tower
+      ? `${unit.unique_identifier} (Torre ${unit.tower} · ${unit.unit_label})`
+      : `${unit.unique_identifier} (${unit.unit_label})`;
+  }
   return unit.tower ? `Torre ${unit.tower} · ${unit.unit_label}` : unit.unit_label;
 }
 
@@ -170,10 +176,11 @@ export function BulkReceiptUpload() {
 
   const [loadingRef, setLoadingRef] = useState(true);
   const [refError, setRefError] = useState('');
-  const [units, setUnits] = useState<Unit[]>([]);
+  const [units, setUnits] = useState<any[]>([]);
   const [methods, setMethods] = useState<any[]>([]);
   const [hierarchy, setHierarchy] = useState<PaymentHierarchyConfig[]>([]);
   const [concepts, setConcepts] = useState<any[]>([]);
+  const [advancePriorityIds, setAdvancePriorityIds] = useState<string[]>([]);
   const [discountTiers, setDiscountTiers] = useState<any[]>([]);
   const [activePeriod, setActivePeriod] = useState<{ start_date: string; end_date: string; name: string } | null>(null);
   const [nextSeq, setNextSeq] = useState<number>(1);
@@ -240,10 +247,19 @@ export function BulkReceiptUpload() {
       return;
     }
 
-    setUnits((unitsRes.data || []) as Unit[]);
+    const loadedConcepts = conceptsRes.data || [];
+    const eligibleAdvance = loadedConcepts.filter((c: any) => !c.is_late_interest && c.advance_account_id);
+
+    setUnits(unitsRes.data || []);
     setMethods(methodsRes.data || []);
     setHierarchy((hierarchyRes.data || []) as PaymentHierarchyConfig[]);
-    setConcepts(conceptsRes.data || []);
+    setConcepts(loadedConcepts);
+    setAdvancePriorityIds(prev => {
+      const eligibleIds = eligibleAdvance.map((c: any) => String(c.id));
+      const kept = prev.filter(id => eligibleIds.includes(id));
+      const added = eligibleIds.filter(id => !kept.includes(id));
+      return [...kept, ...added];
+    });
     setDiscountTiers(discountsRes.data || []);
     setActivePeriod(periodRes.data || null);
     setNextSeq(Number(docRes.data?.next_consecutive || 1));
@@ -254,13 +270,42 @@ export function BulkReceiptUpload() {
     loadReference();
   }, [loadReference]);
 
+  const orderedAdvanceConcepts = useMemo(() => {
+    const eligibleMap = new Map<string, any>();
+    concepts
+      .filter((c: any) => !c.is_late_interest && c.advance_account_id)
+      .forEach((c: any) => eligibleMap.set(String(c.id), c));
+
+    const result: any[] = [];
+    advancePriorityIds.forEach(id => {
+      const found = eligibleMap.get(id);
+      if (found) {
+        result.push(found);
+        eligibleMap.delete(id);
+      }
+    });
+    eligibleMap.forEach(c => result.push(c));
+    return result;
+  }, [concepts, advancePriorityIds]);
+
+  function moveAdvancePriority(index: number, direction: 'up' | 'down') {
+    const list = orderedAdvanceConcepts.map(c => String(c.id));
+    const targetIdx = direction === 'up' ? index - 1 : index + 1;
+    if (targetIdx < 0 || targetIdx >= list.length) return;
+    const copy = [...list];
+    const temp = copy[index];
+    copy[index] = copy[targetIdx];
+    copy[targetIdx] = temp;
+    setAdvancePriorityIds(copy);
+  }
+
   function handleDownloadTemplate() {
-    const sampleUnit = units[0] ? unitDisplay(units[0]) : 'Torre 1 · 101';
+    const sampleUnit = units[0]?.unique_identifier || (units[0] ? unitDisplay(units[0]) : '1-101');
     const sampleMethod = methods[0]?.name || 'Consignación';
     const startDate = activePeriod?.start_date || '2026-11-01';
     const csvContent = [
-      'unidad,metodo_pago,valor_recibido,fecha_pago,fecha_contable,concepto_anticipo,notas',
-      `"${sampleUnit}","${sampleMethod}",150000,"${startDate}","${startDate}","","Cargue masivo inicial"`,
+      'unidad,metodo_pago,valor_recibido,fecha_pago,fecha_contable,notas',
+      `"${sampleUnit}","${sampleMethod}",150000,"${startDate}","${startDate}","Cargue masivo inicial"`,
     ].join('\n');
 
     const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -301,21 +346,51 @@ export function BulkReceiptUpload() {
     return parseCsvText(text);
   }
 
-  function findMatchingUnit(rawUnit: string): Unit | undefined {
-    const target = rawUnit.toLowerCase().trim();
+  function findMatchingUnit(rawUnit: string, rawTower: string = '', rawUnitLabel: string = ''): any | undefined {
+    const target = rawUnit.toLowerCase().trim().replace(/\s+/g, ' ');
+    const towerClean = rawTower.toLowerCase().trim().replace(/^torre\s*/i, '').replace(/\s+/g, '');
+    const labelClean = rawUnitLabel.toLowerCase().trim().replace(/\s+/g, '');
+
+    if (towerClean && labelClean) {
+      const byTowerAndLabel = units.find(u => {
+        const uTower = String(u.tower || '').toLowerCase().trim().replace(/^torre\s*/i, '').replace(/\s+/g, '');
+        const uLabel = String(u.unit_label || '').toLowerCase().trim().replace(/\s+/g, '');
+        return uTower === towerClean && uLabel === labelClean;
+      });
+      if (byTowerAndLabel) return byTowerAndLabel;
+    }
+
     if (!target) return undefined;
-    return units.find(u => {
-      const fullLabel = unitDisplay(u).toLowerCase().trim();
-      const plainLabel = String(u.unit_label || '').toLowerCase().trim();
-      const compactLabel = fullLabel.replace(/\s+/g, ' ');
-      const compactTarget = target.replace(/\s+/g, ' ');
+
+    // 1. Coincidencia por unique_identifier (ej. "1-101")
+    const byUniqueId = units.find(u =>
+      String(u.unique_identifier || '').toLowerCase().trim().replace(/\s+/g, ' ') === target
+    );
+    if (byUniqueId) return byUniqueId;
+
+    // 2. Respaldo por combinación de tower y unit_label (ej. "1-101", "1 101", "Torre 1 · 101", "Torre 1 - 101")
+    const compactTarget = target.replace(/[^a-z0-9]/g, '');
+    const byTowerAndUnitLabel = units.find(u => {
+      const uTower = String(u.tower || '').toLowerCase().trim().replace(/^torre\s*/i, '').replace(/[^a-z0-9]/g, '');
+      const uLabel = String(u.unit_label || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+      const combinedCompact = `${uTower}${uLabel}`;
+      const combinedDash = `${String(u.tower || '').toLowerCase().trim()}-${String(u.unit_label || '').toLowerCase().trim()}`;
+      const fullLabel = (u.tower ? `torre ${u.tower} · ${u.unit_label}` : String(u.unit_label || ''))
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, ' ');
+      const plainLabel = String(u.unit_label || '').toLowerCase().trim().replace(/\s+/g, ' ');
+
       return (
+        (combinedCompact && combinedCompact === compactTarget) ||
+        combinedDash === target ||
         fullLabel === target ||
-        compactLabel === compactTarget ||
         plainLabel === target ||
-        String(u.id).toLowerCase() === target
+        String(u.id || '').toLowerCase() === target
       );
     });
+
+    return byTowerAndUnitLabel;
   }
 
   function findMatchingMethod(rawMethod: string): any | undefined {
@@ -324,18 +399,6 @@ export function BulkReceiptUpload() {
     return methods.find(m =>
       String(m.name || '').toLowerCase().trim() === target ||
       String(m.id || '').toLowerCase() === target
-    );
-  }
-
-  function findMatchingConcept(rawConcept: string): any | undefined {
-    const target = rawConcept.toLowerCase().trim();
-    if (!target) return undefined;
-    return concepts.find(c =>
-      String(c.code || '').toLowerCase().trim() === target ||
-      String(c.name || '').toLowerCase().trim() === target ||
-      `${String(c.code || '').toLowerCase().trim()} — ${String(c.name || '').toLowerCase().trim()}` === target ||
-      `${String(c.code || '').toLowerCase().trim()} - ${String(c.name || '').toLowerCase().trim()}` === target ||
-      String(c.id || '').toLowerCase() === target
     );
   }
 
@@ -374,7 +437,13 @@ export function BulkReceiptUpload() {
       const unitIdsNeeded = Array.from(
         new Set(
           rows
-            .map(r => findMatchingUnit(pickField(r, ['unidad', 'unit', 'unidad_label', 'inmueble', 'apto'])))
+            .map(r =>
+              findMatchingUnit(
+                pickField(r, ['unidad', 'unique_identifier', 'unit', 'unidad_label', 'inmueble', 'apto']),
+                pickField(r, ['tower', 'torre']),
+                pickField(r, ['unit_label', 'numero_unidad', 'unidad_numero'])
+              )
+            )
             .filter(Boolean)
             .map(u => (u as Unit).id)
         )
@@ -416,23 +485,30 @@ export function BulkReceiptUpload() {
       const conceptById = new Map<string, any>();
       concepts.forEach(c => conceptById.set(String(c.id), c));
 
+      const primaryAdvanceConcept = orderedAdvanceConcepts[0] || null;
+
       let seqCursor = nextSeq;
 
       rows.forEach((row, idx) => {
         const rowNumber = idx + 2;
-        const rawUnit = pickField(row, ['unidad', 'unit', 'unidad_label', 'inmueble', 'apto']);
+        const rawUnit = pickField(row, ['unidad', 'unique_identifier', 'unit', 'unidad_label', 'inmueble', 'apto']);
+        const rawTower = pickField(row, ['tower', 'torre']);
+        const rawUnitLabel = pickField(row, ['unit_label', 'numero_unidad', 'unidad_numero']);
         const rawMethod = pickField(row, ['metodo_pago', 'metodo', 'payment_method', 'forma_pago']);
         const rawTotal = pickField(row, ['valor_recibido', 'valor', 'total', 'total_amount', 'monto']);
         const rawPayDate = pickField(row, ['fecha_pago', 'payment_date', 'fecha']);
         const rawAccDate = pickField(row, ['fecha_contable', 'accounting_date', 'fecha_contabilizacion']);
-        const rawAdvConcept = pickField(row, ['concepto_anticipo', 'anticipo_concepto', 'advance_concept']);
         const rawNotes = pickField(row, ['notas', 'notes', 'observacion', 'observaciones', 'detalle']);
 
-        const matchedUnit = findMatchingUnit(rawUnit);
-        if (!rawUnit) {
+        const matchedUnit = findMatchingUnit(rawUnit, rawTower, rawUnitLabel);
+        if (!rawUnit && !rawTower && !rawUnitLabel) {
           errors.push({ rowNumber, field: 'unidad', message: 'La unidad es obligatoria.' });
         } else if (!matchedUnit) {
-          errors.push({ rowNumber, field: 'unidad', message: `La unidad "${rawUnit}" no existe o está inactiva en la organización.` });
+          errors.push({
+            rowNumber,
+            field: 'unidad',
+            message: `La unidad "${rawUnit || `${rawTower}-${rawUnitLabel}`}" no coincide con ningún inmueble activo (unique_identifier / tower + unit_label).`,
+          });
         }
 
         const matchedMethod = findMatchingMethod(rawMethod);
@@ -555,25 +631,21 @@ export function BulkReceiptUpload() {
         let advanceConceptLabel = '—';
 
         if (advanceAmount > 0) {
-          const matchedAdvConcept = rawAdvConcept
-            ? findMatchingConcept(rawAdvConcept)
-            : concepts.find(c => !c.is_late_interest && c.advance_account_id);
-
-          if (!matchedAdvConcept) {
+          if (!primaryAdvanceConcept) {
             errors.push({
               rowNumber,
-              field: 'concepto_anticipo',
-              message: `El pago genera un anticipo de ${formatCOP(advanceAmount)} y requiere un concepto destino válido con advance_account_id.`,
+              field: 'prelacion_anticipos',
+              message: `El pago genera un anticipo de ${formatCOP(advanceAmount)} pero no hay ningún concepto en la Prelación de Anticipos con advance_account_id configurado.`,
             });
-          } else if (!matchedAdvConcept.advance_account_id) {
+          } else if (!primaryAdvanceConcept.advance_account_id) {
             errors.push({
               rowNumber,
-              field: 'concepto_anticipo',
-              message: `El concepto de anticipo "${matchedAdvConcept.name}" no tiene advance_account_id parametrizado.`,
+              field: 'prelacion_anticipos',
+              message: `El concepto prioritario de anticipo "${primaryAdvanceConcept.name}" no tiene advance_account_id parametrizado.`,
             });
           } else {
-            advanceConceptId = matchedAdvConcept.id;
-            advanceConceptLabel = `${matchedAdvConcept.code} — ${matchedAdvConcept.name}`;
+            advanceConceptId = primaryAdvanceConcept.id;
+            advanceConceptLabel = `${primaryAdvanceConcept.code} — ${primaryAdvanceConcept.name}`;
           }
         }
 
@@ -706,7 +778,7 @@ export function BulkReceiptUpload() {
           <div>
             <h2 className="text-base font-semibold text-gray-900">Cargue Masivo de Recibos de Caja</h2>
             <p className="text-sm text-gray-500">
-              Valida fechas del período activo, cuentas parametrizadas, consecutivos y prelación de pagos antes de contabilizar.
+              Identifica unidades por <span className="font-mono text-gray-700">unique_identifier</span> (con respaldo en <span className="font-mono text-gray-700">tower</span> y <span className="font-mono text-gray-700">unit_label</span>) y valida período, cuentas, consecutivos y prelación de pagos.
             </p>
             {activePeriod ? (
               <p className="text-xs text-blue-700 font-medium mt-1">
@@ -737,17 +809,84 @@ export function BulkReceiptUpload() {
           </div>
         </div>
 
-        <div className="p-6 bg-gray-50/60 text-xs text-gray-600 space-y-1">
+        <div className="p-6 bg-gray-50/60 text-xs text-gray-600 space-y-1.5">
           <p className="font-semibold text-gray-800 flex items-center gap-1.5">
             <FileSpreadsheet className="w-4 h-4 text-blue-600" /> Columnas esperadas en la plantilla:
           </p>
           <p className="font-mono bg-white border border-gray-200 rounded px-3 py-2 text-gray-800">
-            unidad, metodo_pago, valor_recibido, fecha_pago, fecha_contable, concepto_anticipo, notas
+            unidad, metodo_pago, valor_recibido, fecha_pago, fecha_contable, notas
+          </p>
+          <p className="text-gray-600">
+            <strong>unidad:</strong> coloque el <span className="font-mono">unique_identifier</span> (ej. <span className="font-mono">1-101</span>). Si no coincide directamente, también valida por <span className="font-mono">tower</span> y <span className="font-mono">unit_label</span>.
           </p>
           {fileName && (
             <p className="text-gray-700 pt-1">
               Archivo seleccionado: <strong>{fileName}</strong>
             </p>
+          )}
+        </div>
+      </Card>
+
+      {/* Prelación para Anticipos */}
+      <Card>
+        <div className="p-6 space-y-4">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">Prelación de Conceptos para Anticipos / Saldos a Favor</h3>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Si alguna fila del cargue genera un saldo a favor superior a las deudas pendientes, se aplicará según este orden de prioridad (conceptos con <span className="font-mono">advance_account_id</span> configurado).
+            </p>
+          </div>
+
+          {orderedAdvanceConcepts.length === 0 ? (
+            <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-xs text-amber-800">
+              No hay conceptos activos con <span className="font-mono">advance_account_id</span> configurado. Si algún recibo del archivo genera anticipo, la validación alertará antes de guardar.
+            </div>
+          ) : (
+            <div className="divide-y divide-gray-100 border border-gray-200 rounded-lg bg-white">
+              {orderedAdvanceConcepts.map((concept: any, idx: number) => (
+                <div key={concept.id} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
+                  <div className="flex items-center gap-3">
+                    <span className="w-6 h-6 rounded-full bg-blue-50 text-blue-700 font-mono text-xs font-bold flex items-center justify-center">
+                      {idx + 1}
+                    </span>
+                    <div>
+                      <span className="font-mono text-xs bg-gray-100 px-1.5 py-0.5 rounded mr-2 text-gray-700">
+                        {concept.code}
+                      </span>
+                      <span className="font-medium text-gray-900">{concept.name}</span>
+                      {idx === 0 && (
+                        <span className="ml-2 text-[11px] font-semibold text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded">
+                          Prioritario
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={idx === 0 || validating || saving}
+                      onClick={() => moveAdvancePriority(idx, 'up')}
+                      title="Subir prioridad"
+                    >
+                      <ArrowUp className="w-3.5 h-3.5" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={idx === orderedAdvanceConcepts.length - 1 || validating || saving}
+                      onClick={() => moveAdvancePriority(idx, 'down')}
+                      title="Bajar prioridad"
+                    >
+                      <ArrowDown className="w-3.5 h-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       </Card>
