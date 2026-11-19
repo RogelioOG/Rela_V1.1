@@ -18,6 +18,7 @@ interface ReceiptsListProps {
 export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
   const { activeOrg } = useOrg();
   const [receipts, setReceipts] = useState<any[]>([]);
+  const [snapshotBalanceMap, setSnapshotBalanceMap] = useState>(new Map());
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -31,33 +32,52 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     setLoading(true);
     setError('');
 
-    const { data, error } = await supabase
-      .from('receipts')
-      .select(`
-        *,
-        unit:units(tower, unit_label, owner_name),
-        method:payment_methods(name),
-        allocations:receipt_allocations(
-          id,
-          due_id,
-          concept_id,
-          capital_applied,
-          interest_applied,
-          discount_applied,
-          concept:billing_concepts(name, code),
-          due:dues(period, due_date, balance, amount)
-        )
-      `)
-      .eq('organization_id', activeOrg.id)
-      .order('created_at', { ascending: false });
+    const [receiptsRes, invoicesRes] = await Promise.all([
+      supabase
+        .from('receipts')
+        .select(`
+          *,
+          unit:units(tower, unit_label, owner_name),
+          method:payment_methods(name),
+          allocations:receipt_allocations(
+            id,
+            due_id,
+            concept_id,
+            capital_applied,
+            interest_applied,
+            discount_applied,
+            concept:billing_concepts(name, code),
+            due:dues(id, unit_id, period, due_date, balance, amount)
+          )
+        `)
+        .eq('organization_id', activeOrg.id)
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('invoices')
+        .select('id, unit_id, period, items_snapshot')
+        .eq('organization_id', activeOrg.id),
+    ]);
 
-    if (error) {
+    if (receiptsRes.error) {
       setError('No se pudieron cargar los recibos de caja registrados.');
       setLoading(false);
       return;
     }
 
-    setReceipts(data || []);
+    const snapMap = new Map<string, number>();
+    (invoicesRes.data || []).forEach((inv: any) => {
+      if (Array.isArray(inv.items_snapshot)) {
+        inv.items_snapshot.forEach((snap: any) => {
+          const cid = String(snap.conceptId || snap.concept_id || '');
+          if (cid && inv.unit_id && inv.period) {
+            snapMap.set(`${inv.unit_id}__${inv.period}__${cid}`, roundMoney(Number(snap.amount || 0)));
+          }
+        });
+      }
+    });
+
+    setSnapshotBalanceMap(snapMap);
+    setReceipts(receiptsRes.data || []);
     setLoading(false);
   }, [activeOrg]);
 
@@ -74,10 +94,8 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
   function handleOpenPrint(rec: any) {
     setCurrentRawReceipt(rec);
     const isVoided = rec.status === 'anulado';
-
     const rawAllocs = Array.isArray(rec.allocations) ? rec.allocations : [];
 
-    // Agrupar por due_id + concept_id para no duplicar líneas del mismo concepto en el mismo recibo
     const groupedMap = new Map<string, any>();
     rawAllocs.forEach((alc: any) => {
       const key = `${String(alc.due_id || '')}__${String(alc.concept_id || '')}`;
@@ -86,6 +104,12 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
       const disc = Number(alc.discount_applied || 0);
 
       if (!groupedMap.has(key)) {
+        const snapKey = `${alc.due?.unit_id || rec.unit_id}__${alc.due?.period || ''}__${String(alc.concept_id || '')}`;
+        const hasSnapshotEntry = snapshotBalanceMap.has(snapKey);
+        const currentConceptBalance = hasSnapshotEntry
+          ? roundMoney(Number(snapshotBalanceMap.get(snapKey) || 0))
+          : null;
+
         groupedMap.set(key, {
           period: alc.due?.period || 'N/A',
           dueDate: alc.due?.due_date || '',
@@ -93,7 +117,7 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
           conceptCode: alc.concept?.code || 'CON',
           rawApplied: roundMoney(cap + intr),
           rawDiscount: roundMoney(disc),
-          dueCurrentBalance: Number(alc.due?.balance ?? 0),
+          currentConceptBalance,
         });
       } else {
         const existing = groupedMap.get(key);
@@ -107,14 +131,12 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
         const applied = isVoided ? 0 : entry.rawApplied;
         const discount = isVoided ? 0 : entry.rawDiscount;
 
-        // Si el recibo está activo, el saldo actual en dues ya tiene descontado lo aplicado/descontado de este recibo.
-        // Por tanto, el saldo base antes de este recibo es: saldo_actual + aplicado + descuento.
-        // Y el saldo restante después de este recibo es: saldo_actual.
         const balanceAfter = isVoided
-          ? roundMoney(Math.max(entry.dueCurrentBalance, 0))
-          : roundMoney(Math.max(entry.dueCurrentBalance, 0));
+          ? roundMoney(Math.max((entry.currentConceptBalance ?? 0) + entry.rawApplied + entry.rawDiscount, 0))
+          : roundMoney(Math.max(entry.currentConceptBalance ?? 0, 0));
+
         const initialBalance = isVoided
-          ? roundMoney(Math.max(entry.dueCurrentBalance, 0))
+          ? balanceAfter
           : roundMoney(balanceAfter + applied + discount);
 
         return {
