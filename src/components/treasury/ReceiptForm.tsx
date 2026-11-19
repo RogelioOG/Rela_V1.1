@@ -54,7 +54,7 @@ function restoreSnapshotForAllocations(snapshot: any, dueAllocations: any[]): an
     const cId = alc.concept_id;
     const restored = Number(alc.capital_applied || 0) + Number(alc.discount_applied || 0);
     if (cId && restored > 0) {
-      restoreByConcept[String(cId)] = (restoreByConcept[String(cId)] || 0) + restored;
+      restoreByConcept[String(cId)] = roundMoney((restoreByConcept[String(cId)] || 0) + restored);
     }
   });
 
@@ -192,14 +192,17 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         allocs.forEach((alc: any) => {
           const dueId = alc.due_id;
           const conceptId = alc.concept_id;
-          const appliedVal = Number(alc.capital_applied || 0) + Number(alc.interest_applied || 0);
-          if (dueId) {
-            prefilledInputs[String(dueId)] = String(
-              roundMoney(parseAmount(prefilledInputs[String(dueId)] || '0') + appliedVal)
+          const appliedVal = roundMoney(Number(alc.capital_applied || 0) + Number(alc.interest_applied || 0));
+          if (dueId && conceptId) {
+            const compositeKey = `${dueId}_${conceptId}`;
+            prefilledInputs[compositeKey] = String(
+              roundMoney(parseAmount(prefilledInputs[compositeKey] || '0') + appliedVal)
             );
-            if (conceptId) {
-              prefilledInputs[`${dueId}_${conceptId}`] = String(appliedVal);
-            }
+          } else if (dueId) {
+            const dKey = String(dueId);
+            prefilledInputs[dKey] = String(
+              roundMoney(parseAmount(prefilledInputs[dKey] || '0') + appliedVal)
+            );
           }
         });
         setOverrides(prefilledInputs);
@@ -266,7 +269,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     (activeEditingAllocs || []).forEach((alc: any) => {
       if (!alc?.due_id) return;
       const dId = String(alc.due_id);
-      const restoreAmt = Number(alc.capital_applied || 0) + Number(alc.discount_applied || 0);
+      const restoreAmt = roundMoney(Number(alc.capital_applied || 0) + Number(alc.discount_applied || 0));
       restoreByDue[dId] = roundMoney((restoreByDue[dId] || 0) + restoreAmt);
       if (!allocsByDue[dId]) allocsByDue[dId] = [];
       allocsByDue[dId].push(alc);
@@ -345,6 +348,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
           resolved[item.id] = overrides[item.id];
         } else if (overrides[compositeKey] !== undefined) {
           resolved[item.id] = overrides[compositeKey];
+          usedDueIds.add(String(item.dueId));
         } else if (overrides[String(item.dueId)] !== undefined && !usedDueIds.has(String(item.dueId))) {
           resolved[item.id] = overrides[String(item.dueId)];
           usedDueIds.add(String(item.dueId));
