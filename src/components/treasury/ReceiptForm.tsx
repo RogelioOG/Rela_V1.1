@@ -44,6 +44,32 @@ function unitLabel(unit: Unit): string {
   return unit.tower ? `Torre ${unit.tower} · ${unit.unit_label}` : unit.unit_label;
 }
 
+function restoreSnapshotForAllocations(snapshot: any, dueAllocations: any[]): any {
+  if (!Array.isArray(snapshot) || !Array.isArray(dueAllocations) || dueAllocations.length === 0) {
+    return snapshot;
+  }
+
+  const restoreByConcept: Record<string, number> = {};
+  dueAllocations.forEach((alc: any) => {
+    const cId = alc.concept_id;
+    const restored = Number(alc.capital_applied || 0) + Number(alc.discount_applied || 0);
+    if (cId && restored > 0) {
+      restoreByConcept[String(cId)] = (restoreByConcept[String(cId)] || 0) + restored;
+    }
+  });
+
+  return snapshot.map((elem: any) => {
+    const cId = String(elem?.conceptId || elem?.concept_id || '');
+    const addAmt = restoreByConcept[cId] || 0;
+    if (addAmt <= 0) return elem;
+    const currentAmt = Number(elem?.amount || 0);
+    return {
+      ...elem,
+      amount: roundMoney(currentAmt + addAmt),
+    };
+  });
+}
+
 export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProps) {
   const { activeOrg } = useOrg();
   const today = todayISO();
@@ -56,6 +82,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
   const [invoicesMap, setInvoicesMap] = useState<Record<string, any>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingReceiptNumber, setEditingReceiptNumber] = useState<string | null>(null);
+  const [editingAllocations, setEditingAllocations] = useState<any[]>([]);
   const [activeRevenuePeriod, setActiveRevenuePeriod] = useState<{ start_date: string; end_date: string; name: string } | null>(null);
 
   const [header, setHeader] = useState<HeaderState>({
@@ -147,8 +174,10 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
   useEffect(() => {
     if (initialData) {
+      const allocs = Array.isArray(initialData.allocations) ? initialData.allocations : [];
       setEditingId(initialData.id || null);
       setEditingReceiptNumber(initialData.receipt_number || null);
+      setEditingAllocations(allocs);
       setHeader({
         unitId: initialData.unit_id || '',
         paymentDate: initialData.payment_date || todayISO(),
@@ -158,26 +187,44 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         notes: initialData.notes || '',
       });
 
-      if (initialData.allocations && initialData.allocations.length > 0) {
+      if (allocs.length > 0) {
         const prefilledInputs: DetailedAllocationInputs = {};
-        initialData.allocations.forEach((alc: any) => {
+        allocs.forEach((alc: any) => {
           const dueId = alc.due_id;
+          const conceptId = alc.concept_id;
           const appliedVal = Number(alc.capital_applied || 0) + Number(alc.interest_applied || 0);
           if (dueId) {
-            prefilledInputs[dueId] = String(appliedVal);
+            prefilledInputs[String(dueId)] = String(
+              roundMoney(parseAmount(prefilledInputs[String(dueId)] || '0') + appliedVal)
+            );
+            if (conceptId) {
+              prefilledInputs[`${dueId}_${conceptId}`] = String(appliedVal);
+            }
           }
         });
         setOverrides(prefilledInputs);
+      } else {
+        setOverrides(null);
       }
 
+      setFormError('');
+      setSuccessMessage('');
       if (onClearInitialData) onClearInitialData();
     }
   }, [initialData, onClearInitialData]);
 
-  const loadPendingDues = useCallback(async (unitId: string) => {
+  const loadPendingDues = useCallback(async (unitId: string, activeEditingAllocs: any[] = []) => {
     if (!activeOrg) return;
 
-    const [duesRes, invoicesRes] = await Promise.all([
+    const editedDueIds = Array.from(
+      new Set(
+        (activeEditingAllocs || [])
+          .map((a: any) => a?.due_id)
+          .filter(Boolean)
+      )
+    );
+
+    const queries: Promise<any>[] = [
       supabase
         .from('dues')
         .select('*')
@@ -190,7 +237,23 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
         .select('*')
         .eq('organization_id', activeOrg.id)
         .eq('unit_id', unitId)
-    ]);
+    ];
+
+    if (editedDueIds.length > 0) {
+      queries.push(
+        supabase
+          .from('dues')
+          .select('*')
+          .eq('organization_id', activeOrg.id)
+          .eq('unit_id', unitId)
+          .in('id', editedDueIds)
+      );
+    }
+
+    const results = await Promise.all(queries);
+    const duesRes = results[0];
+    const invoicesRes = results[1];
+    const editedDuesRes = results[2];
 
     if (duesRes.error) {
       setDuesError('No se pudieron cargar las obligaciones de la unidad.');
@@ -198,15 +261,59 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
       return;
     }
 
+    const restoreByDue: Record<string, number> = {};
+    const allocsByDue: Record<string, any[]> = {};
+    (activeEditingAllocs || []).forEach((alc: any) => {
+      if (!alc?.due_id) return;
+      const dId = String(alc.due_id);
+      const restoreAmt = Number(alc.capital_applied || 0) + Number(alc.discount_applied || 0);
+      restoreByDue[dId] = roundMoney((restoreByDue[dId] || 0) + restoreAmt);
+      if (!allocsByDue[dId]) allocsByDue[dId] = [];
+      allocsByDue[dId].push(alc);
+    });
+
+    const mergedRawDuesMap = new Map<string, any>();
+    (duesRes.data || []).forEach((d: any) => mergedRawDuesMap.set(String(d.id), d));
+    if (editedDuesRes?.data) {
+      editedDuesRes.data.forEach((d: any) => mergedRawDuesMap.set(String(d.id), d));
+    }
+
+    const adjustedDues: Due[] = Array.from(mergedRawDuesMap.values())
+      .map((d: any) => {
+        const dId = String(d.id);
+        const restoredBalance = roundMoney(Number(d.balance || 0) + (restoreByDue[dId] || 0));
+        return {
+          ...d,
+          balance: restoredBalance,
+          status: restoredBalance > 0 && d.status === 'pagada' ? 'pendiente' : d.status,
+        };
+      })
+      .filter((d: any) => Number(d.balance || 0) > 0)
+      .sort((a: any, b: any) => String(a.due_date || '').localeCompare(String(b.due_date || '')));
+
+    const dueById = new Map<string, any>();
+    adjustedDues.forEach((d: any) => dueById.set(String(d.id), d));
+
     const invMap: Record<string, any> = {};
     (invoicesRes.data || []).forEach((inv: any) => {
-      invMap[inv.unit_id + '_' + inv.period] = inv;
-      invMap[inv.id] = inv;
+      const matchingDue = Array.from(dueById.values()).find(
+        (d: any) => d.unit_id === inv.unit_id && d.period === inv.period
+      );
+      const restoredSnapshot = matchingDue && allocsByDue[String(matchingDue.id)]
+        ? restoreSnapshotForAllocations(inv.items_snapshot, allocsByDue[String(matchingDue.id)])
+        : inv.items_snapshot;
+
+      const updatedInv = {
+        ...inv,
+        items_snapshot: restoredSnapshot,
+      };
+      invMap[inv.unit_id + '_' + inv.period] = updatedInv;
+      invMap[inv.id] = updatedInv;
     });
 
     setInvoicesMap(invMap);
     setDuesError('');
-    setDues((duesRes.data || []) as Due[]);
+    setDues(adjustedDues);
   }, [activeOrg]);
 
   useEffect(() => {
@@ -214,8 +321,8 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
     setInvoicesMap({});
     if (!header.unitId) return;
     setLoadingDues(true);
-    loadPendingDues(header.unitId).finally(() => setLoadingDues(false));
-  }, [header.unitId, loadPendingDues]);
+    loadPendingDues(header.unitId, editingAllocations).finally(() => setLoadingDues(false));
+  }, [header.unitId, editingAllocations, loadPendingDues]);
 
   const totalNumber = parseAmount(header.total);
 
@@ -228,7 +335,26 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
   }, [detailedItems, totalNumber]);
 
   const currentInputs = useMemo(() => {
-    if (overrides) return overrides;
+    if (overrides) {
+      const resolved: DetailedAllocationInputs = {};
+      const usedDueIds = new Set<string>();
+
+      detailedItems.forEach((item: any) => {
+        const compositeKey = `${item.dueId}_${item.conceptId}`;
+        if (overrides[item.id] !== undefined) {
+          resolved[item.id] = overrides[item.id];
+        } else if (overrides[compositeKey] !== undefined) {
+          resolved[item.id] = overrides[compositeKey];
+        } else if (overrides[String(item.dueId)] !== undefined && !usedDueIds.has(String(item.dueId))) {
+          resolved[item.id] = overrides[String(item.dueId)];
+          usedDueIds.add(String(item.dueId));
+        } else {
+          resolved[item.id] = '0';
+        }
+      });
+      return resolved;
+    }
+
     const initial: DetailedAllocationInputs = {};
     detailedItems.forEach(item => {
       initial[item.id] = String(autoAllocation.amounts[item.id]?.applied ?? 0);
@@ -281,6 +407,7 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
   function cancelEdit() {
     setEditingId(null);
     setEditingReceiptNumber(null);
+    setEditingAllocations([]);
     setHeader({
       unitId: '',
       paymentDate: today,
@@ -418,9 +545,10 @@ export function ReceiptForm({ initialData, onClearInitialData }: ReceiptFormProp
 
     setEditingId(null);
     setEditingReceiptNumber(null);
+    setEditingAllocations([]);
     setHeader(prev => ({ ...prev, total: '', notes: '' }));
     setOverrides(null);
-    if (header.unitId) await loadPendingDues(header.unitId);
+    if (header.unitId) await loadPendingDues(header.unitId, []);
   }
 
   if (!activeOrg) return <NoOrgSelected />;
