@@ -777,9 +777,6 @@ export function BulkReceiptUpload() {
         <div className="p-6 flex flex-wrap items-center justify-between gap-4 border-b border-gray-200">
           <div>
             <h2 className="text-base font-semibold text-gray-900">Cargue Masivo de Recibos de Caja</h2>
-            <p className="text-sm text-gray-500">
-              Identifica unidades por <span className="font-mono text-gray-700">unique_identifier</span> (con respaldo en <span className="font-mono text-gray-700">tower</span> y <span className="font-mono text-gray-700">unit_label</span>) y valida período, cuentas, consecutivos y prelación de pagos.
-            </p>
             {activePeriod ? (
               <p className="text-xs text-blue-700 font-medium mt-1">
                 Período activo: {activePeriod.name} ({activePeriod.start_date} a {activePeriod.end_date}) · Próximo consecutivo estimado: RC-{String(nextSeq).padStart(4, '0')}
@@ -817,7 +814,7 @@ export function BulkReceiptUpload() {
             unidad, metodo_pago, valor_recibido, fecha_pago, fecha_contable, notas
           </p>
           <p className="text-gray-600">
-            <strong>unidad:</strong> coloque el <span className="font-mono">unique_identifier</span> (ej. <span className="font-mono">1-101</span>). Si no coincide directamente, también valida por <span className="font-mono">tower</span> y <span className="font-mono">unit_label</span>.
+            <strong>Si tiene torre y unidad:</strong> coloque (ej. <span className="font-mono">1-101</span>).
           </p>
           {fileName && (
             <p className="text-gray-700 pt-1">
@@ -833,8 +830,7 @@ export function BulkReceiptUpload() {
           <div>
             <h3 className="text-sm font-semibold text-gray-900">Prelación de Conceptos para Anticipos / Saldos a Favor</h3>
             <p className="text-xs text-gray-500 mt-0.5">
-              Si alguna fila del cargue genera un saldo a favor superior a las deudas pendientes, se aplicará según este orden de prioridad (conceptos con <span className="font-mono">advance_account_id</span> configurado).
-            </p>
+              Si alguna fila del cargue genera un saldo a favor superior a las deudas pendientes, se aplicará según este orden de prioridad</p>
           </div>
 
           {orderedAdvanceConcepts.length === 0 ? (
