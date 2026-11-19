@@ -842,9 +842,6 @@ export function BulkReceiptUpload() {
         <div className="p-6 flex flex-wrap items-center justify-between gap-4 border-b border-gray-200">
           <div>
             <h2 className="text-base font-semibold text-gray-900">Cargue Masivo de Recibos de Caja</h2>
-            <p className="text-sm text-gray-500">
-              Consulta los inmuebles por <span className="font-mono text-gray-700">payment_reference</span> y acumula saldos fila a fila respetando la prelación parametrizada.
-            </p>
             {activePeriod ? (
               <p className="text-xs text-blue-700 font-medium mt-1">
                 Período activo: {activePeriod.name} ({activePeriod.start_date} a {activePeriod.end_date}) · Próximo consecutivo estimado: RC-{String(nextSeq).padStart(4, '0')}
@@ -882,7 +879,7 @@ export function BulkReceiptUpload() {
             referencia_pago, metodo_pago, valor_recibido, fecha_pago, fecha_contable, notas
           </p>
           <p className="text-gray-600">
-            <strong>referencia_pago:</strong> coloque el <span className="font-mono">payment_reference</span> asignado al inmueble en la base de datos.
+            <strong>Referencia de pago:</strong> coloque la <span className="font-mono">referencia de pago</span> asignada al inmueble en la base de datos.
           </p>
           {fileName && (
             <p className="text-gray-700 pt-1">
