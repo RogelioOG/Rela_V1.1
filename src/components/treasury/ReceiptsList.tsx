@@ -25,60 +25,74 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
   const [selectedReceipt, setSelectedReceipt] = useState<PrintableReceipt | null>(null);
   const [currentRawReceipt, setCurrentRawReceipt] = useState<any>(null);
   const [printOpen, setPrintOpen] = useState(false);
-  const [error, setError] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
 
   const loadReceipts = useCallback(async () => {
-    if (!activeOrg) return;
-    setLoading(true);
-    setError('');
-
-    const [receiptsRes, invoicesRes] = await Promise.all([
-      supabase
-        .from('receipts')
-        .select(`
-          *,
-          unit:units(tower, unit_label, owner_name),
-          method:payment_methods(name),
-          allocations:receipt_allocations(
-            id,
-            due_id,
-            concept_id,
-            capital_applied,
-            interest_applied,
-            discount_applied,
-            concept:billing_concepts(name, code),
-            due:dues(id, unit_id, period, due_date, balance, amount)
-          )
-        `)
-        .eq('organization_id', activeOrg.id)
-        .order('created_at', { ascending: false }),
-      supabase
-        .from('invoices')
-        .select('id, unit_id, period, items_snapshot')
-        .eq('organization_id', activeOrg.id),
-    ]);
-
-    if (receiptsRes.error) {
-      setError('No se pudieron cargar los recibos de caja registrados.');
+    if (!activeOrg) {
       setLoading(false);
       return;
     }
+    setLoading(true);
+    setErrorMsg('');
 
-    const snapMap = new Map<string, number>();
-    (invoicesRes.data || []).forEach((inv: any) => {
-      if (Array.isArray(inv.items_snapshot)) {
-        inv.items_snapshot.forEach((snap: any) => {
-          const cid = String(snap.conceptId || snap.concept_id || '');
-          if (cid && inv.unit_id && inv.period) {
-            snapMap.set(`${inv.unit_id}__${inv.period}__${cid}`, roundMoney(Number(snap.amount || 0)));
-          }
-        });
+    try {
+      const [receiptsRes, invoicesRes] = await Promise.all([
+        supabase
+          .from('receipts')
+          .select(`
+            *,
+            unit:units(tower, unit_label, owner_name),
+            method:payment_methods(name),
+            allocations:receipt_allocations(
+              id,
+              due_id,
+              concept_id,
+              capital_applied,
+              interest_applied,
+              discount_applied,
+              concept:billing_concepts(name, code),
+              due:dues(id, unit_id, period, due_date, balance, amount)
+            )
+          `)
+          .eq('organization_id', activeOrg.id)
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('invoices')
+          .select('id, unit_id, period, items_snapshot')
+          .eq('organization_id', activeOrg.id),
+      ]);
+
+      if (receiptsRes.error) {
+        setErrorMsg('No se pudieron cargar los recibos de caja registrados.');
+        setLoading(false);
+        return;
       }
-    });
 
-    setSnapshotBalanceMap(snapMap);
-    setReceipts(receiptsRes.data || []);
-    setLoading(false);
+      const snapMap = new Map<string, number>();
+      const invRows = Array.isArray(invoicesRes?.data) ? invoicesRes.data : [];
+
+      for (let i = 0; i < invRows.length; i++) {
+        const inv: any = invRows[i];
+        const snapList = Array.isArray(inv?.items_snapshot) ? inv.items_snapshot : [];
+        for (let j = 0; j < snapList.length; j++) {
+          const snap: any = snapList[j];
+          const cid = String(snap?.conceptId || snap?.concept_id || '');
+          if (cid && inv?.unit_id && inv?.period) {
+            snapMap.set(
+              `${String(inv.unit_id)}__${String(inv.period)}__${cid}`,
+              roundMoney(Number(snap?.amount || 0))
+            );
+          }
+        }
+      }
+
+      setSnapshotBalanceMap(snapMap);
+      setReceipts(Array.isArray(receiptsRes?.data) ? receiptsRes.data : []);
+    } catch {
+      setErrorMsg('Ocurrió un error al consultar el historial de recibos.');
+    } finally {
+      setLoading(false);
+    }
   }, [activeOrg]);
 
   useEffect(() => {
@@ -97,24 +111,25 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     const rawAllocs = Array.isArray(rec.allocations) ? rec.allocations : [];
 
     const groupedMap = new Map<string, any>();
-    rawAllocs.forEach((alc: any) => {
-      const key = `${String(alc.due_id || '')}__${String(alc.concept_id || '')}`;
-      const cap = Number(alc.capital_applied || 0);
-      const intr = Number(alc.interest_applied || 0);
-      const disc = Number(alc.discount_applied || 0);
+    for (let i = 0; i < rawAllocs.length; i++) {
+      const alc: any = rawAllocs[i];
+      const key = `${String(alc?.due_id || '')}__${String(alc?.concept_id || '')}`;
+      const cap = Number(alc?.capital_applied || 0);
+      const intr = Number(alc?.interest_applied || 0);
+      const disc = Number(alc?.discount_applied || 0);
 
       if (!groupedMap.has(key)) {
-        const snapKey = `${alc.due?.unit_id || rec.unit_id}__${alc.due?.period || ''}__${String(alc.concept_id || '')}`;
+        const snapKey = `${String(alc?.due?.unit_id || rec?.unit_id || '')}__${String(alc?.due?.period || '')}__${String(alc?.concept_id || '')}`;
         const hasSnapshotEntry = snapshotBalanceMap.has(snapKey);
         const currentConceptBalance = hasSnapshotEntry
           ? roundMoney(Number(snapshotBalanceMap.get(snapKey) || 0))
           : null;
 
         groupedMap.set(key, {
-          period: alc.due?.period || 'N/A',
-          dueDate: alc.due?.due_date || '',
-          conceptName: alc.concept?.name || 'Concepto',
-          conceptCode: alc.concept?.code || 'CON',
+          period: alc?.due?.period || 'N/A',
+          dueDate: alc?.due?.due_date || '',
+          conceptName: alc?.concept?.name || 'Concepto',
+          conceptCode: alc?.concept?.code || 'CON',
           rawApplied: roundMoney(cap + intr),
           rawDiscount: roundMoney(disc),
           currentConceptBalance,
@@ -124,7 +139,7 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
         existing.rawApplied = roundMoney(existing.rawApplied + cap + intr);
         existing.rawDiscount = roundMoney(existing.rawDiscount + disc);
       }
-    });
+    }
 
     const lines = Array.from(groupedMap.values())
       .map(entry => {
@@ -182,14 +197,14 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     if (!window.confirm('¿Está seguro de anular este recibo? Se revertirá la cartera, quedará en $ 0 y se actualizará el asiento contable.')) return;
 
     setActionLoading(receiptId);
-    const { data, error } = await supabase.rpc('void_receipt', {
+    const { data, error: rpcError } = await supabase.rpc('void_receipt', {
       p_receipt_id: receiptId,
       p_organization_id: activeOrg.id,
     });
     setActionLoading(null);
 
-    if (error || (data && data.success === false)) {
-      alert(error?.message || data?.message || 'Error al anular el recibo.');
+    if (rpcError || (data && data.success === false)) {
+      alert(rpcError?.message || data?.message || 'Error al anular el recibo.');
       return;
     }
 
@@ -204,15 +219,15 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     setActionLoading(receiptId);
 
     try {
-      const { data, error } = await supabase.rpc('delete_receipt', {
+      const { data, error: rpcError } = await supabase.rpc('delete_receipt', {
         p_receipt_id: receiptId,
         p_organization_id: activeOrg.id,
       });
 
       setActionLoading(null);
 
-      if (error) {
-        alert('Error de base de datos: ' + error.message);
+      if (rpcError) {
+        alert('Error de base de datos: ' + rpcError.message);
         return;
       }
 
@@ -262,11 +277,11 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
           <div className="flex items-center justify-center py-16">
             <Loader2 className="w-6 h-6 text-blue-600 animate-spin" />
           </div>
-        ) : error ? (
+        ) : errorMsg ? (
           <div className="p-6">
             <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-red-600" />
-              <p className="text-sm text-red-700">{error}</p>
+              <p className="text-sm text-red-700">{errorMsg}</p>
             </div>
           </div>
         ) : filteredReceipts.length === 0 ? (
