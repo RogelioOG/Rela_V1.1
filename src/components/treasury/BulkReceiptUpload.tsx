@@ -45,6 +45,13 @@ interface PreviewAllocationRow {
   discount_applied: number;
 }
 
+interface AdvanceBreakdownItem {
+  concept_id: string;
+  concept_code: string;
+  concept_name: string;
+  amount: number;
+}
+
 interface PreviewReceiptItem {
   rowNumber: number;
   projectedReceiptNumber: string;
@@ -61,6 +68,7 @@ interface PreviewReceiptItem {
   advanceAmount: number;
   advanceConceptId: string | null;
   advanceConceptLabel: string;
+  advanceBreakdown: AdvanceBreakdownItem[];
   notes: string;
   allocations: PreviewAllocationRow[];
 }
@@ -168,11 +176,6 @@ function isOrderClass(accountClass?: string | null): boolean {
   return val === 'orden' || val === 'cuentas_de_orden' || val === 'order';
 }
 
-/**
- * Descuenta el capital, interés y descuento aplicados en un recibo
- * sobre las cuotas (dues) e invoices.items_snapshot en memoria para que
- * las siguientes filas de la misma unidad en el lote vean el saldo real restante.
- */
 function applyReceiptToWorkingState(
   workingDues: Due[],
   workingInvMap: Record<string, any>,
@@ -194,9 +197,11 @@ function applyReceiptToWorkingState(
     entry.interest = roundMoney(entry.interest + (a.interest_applied || 0));
     entry.discount = roundMoney(entry.discount + (a.discount_applied || 0));
 
-    const totalLineApplied = roundMoney((a.capital_applied || 0) + (a.interest_applied || 0));
+    const totalLineDeduction = roundMoney(
+      (a.capital_applied || 0) + (a.interest_applied || 0) + (a.discount_applied || 0)
+    );
     const prevConceptApplied = entry.byConcept.get(String(a.concept_id)) || 0;
-    entry.byConcept.set(String(a.concept_id), roundMoney(prevConceptApplied + totalLineApplied));
+    entry.byConcept.set(String(a.concept_id), roundMoney(prevConceptApplied + totalLineDeduction));
 
     appliedByDue.set(a.due_id, entry);
   });
@@ -209,7 +214,7 @@ function applyReceiptToWorkingState(
       if (dueEntry) {
         const conceptRemaining = new Map<string, number>(dueEntry.byConcept);
         const updatedSnapshot = inv.items_snapshot.map((snap: any) => {
-          const cid = String(snap.conceptId || '');
+          const cid = String(snap.conceptId || snap.concept_id || '');
           const rem = conceptRemaining.get(cid) || 0;
           const snapAmt = roundMoney(Number(snap.amount || 0));
           const take = roundMoney(Math.min(rem, snapAmt));
@@ -237,8 +242,9 @@ function applyReceiptToWorkingState(
 
       const currentBalance = roundMoney(Number(due.balance || 0));
       const currentInterest = roundMoney(Number((due as any).interest_balance || 0));
+      const totalDueDeduction = roundMoney(entry.capital + entry.discount);
 
-      const nextBalance = roundMoney(Math.max(currentBalance - entry.capital, 0));
+      const nextBalance = roundMoney(Math.max(currentBalance - totalDueDeduction, 0));
       const nextInterest = roundMoney(Math.max(currentInterest - entry.interest, 0));
 
       return {
@@ -531,7 +537,6 @@ export function BulkReceiptUpload() {
       concepts.forEach(c => conceptById.set(String(c.id), c));
 
       const primaryAdvanceConcept = orderedAdvanceConcepts[0] || null;
-
       let seqCursor = nextSeq;
 
       rows.forEach((row, idx) => {
@@ -610,7 +615,6 @@ export function BulkReceiptUpload() {
         const currentUnitDues = workingDuesByUnit.get(matchedUnit.id) || [];
         const currentUnitInvMap = workingInvoicesByUnit.get(matchedUnit.id) || {};
 
-        // Construye los ítems respetando la prelación parametrizada (payment_hierarchy_configs) y antigüedad
         const detailedItems = buildDetailedDueItems(
           currentUnitDues,
           hierarchy,
@@ -681,7 +685,6 @@ export function BulkReceiptUpload() {
           }
         });
 
-        // Acumular/descontar los saldos aplicados en memoria para las siguientes filas de esta misma unidad
         const { nextDues, nextInvMap } = applyReceiptToWorkingState(
           currentUnitDues,
           currentUnitInvMap,
@@ -693,23 +696,27 @@ export function BulkReceiptUpload() {
         const advanceAmount = roundMoney(Math.max(totalAmount - appliedSum, 0));
         let advanceConceptId: string | null = null;
         let advanceConceptLabel = '—';
+        const advanceBreakdown: AdvanceBreakdownItem[] = [];
 
         if (advanceAmount > 0) {
-          if (!primaryAdvanceConcept) {
+          if (orderedAdvanceConcepts.length === 0) {
             errors.push({
               rowNumber,
               field: 'prelacion_anticipos',
               message: `El pago genera un anticipo de ${formatCOP(advanceAmount)} pero no hay ningún concepto en la Prelación de Anticipos con advance_account_id configurado.`,
             });
-          } else if (!primaryAdvanceConcept.advance_account_id) {
-            errors.push({
-              rowNumber,
-              field: 'prelacion_anticipos',
-              message: `El concepto prioritario de anticipo "${primaryAdvanceConcept.name}" no tiene advance_account_id parametrizado.`,
-            });
           } else {
             advanceConceptId = primaryAdvanceConcept.id;
-            advanceConceptLabel = `${primaryAdvanceConcept.code} — ${primaryAdvanceConcept.name}`;
+            advanceBreakdown.push({
+              concept_id: primaryAdvanceConcept.id,
+              concept_code: primaryAdvanceConcept.code,
+              concept_name: primaryAdvanceConcept.name,
+              amount: advanceAmount,
+            });
+            advanceConceptLabel = orderedAdvanceConcepts
+              .slice(0, 1)
+              .map(c => `${c.code} — ${c.name}`)
+              .join(', ');
           }
         }
 
@@ -732,6 +739,7 @@ export function BulkReceiptUpload() {
           advanceAmount,
           advanceConceptId,
           advanceConceptLabel,
+          advanceBreakdown,
           notes: rawNotes,
           allocations,
         });
@@ -889,7 +897,6 @@ export function BulkReceiptUpload() {
         </div>
       </Card>
 
-      {/* Prelación para Anticipos */}
       <Card>
         <div className="p-6 space-y-4">
           <div>
