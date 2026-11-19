@@ -3,11 +3,13 @@ import { PaymentMethodsConfig } from '@/components/treasury/PaymentMethodsConfig
 import { PaymentHierarchyConfig } from '@/components/treasury/PaymentHierarchyConfig';
 import { ReceiptForm } from '@/components/treasury/ReceiptForm';
 import { ReceiptsList } from '@/components/treasury/ReceiptsList';
+import { BulkReceiptUpload } from '@/components/treasury/BulkReceiptUpload';
 
-type TreasuryTab = 'recibos' | 'historial' | 'metodos' | 'prelacion';
+type TreasuryTab = 'recibos' | 'cargue_masivo' | 'historial' | 'metodos' | 'prelacion';
 
 const tabs: { id: TreasuryTab; label: string }[] = [
   { id: 'recibos', label: 'Nuevo Recibo' },
+  { id: 'cargue_masivo', label: 'Cargue Masivo' },
   { id: 'historial', label: 'Historial de Recaudos' },
   { id: 'metodos', label: 'Métodos de Pago' },
   { id: 'prelacion', label: 'Prelación de Pagos' },
@@ -46,11 +48,12 @@ export default function TesoreriaPage() {
       </div>
 
       {activeTab === 'recibos' && (
-        <ReceiptForm 
-          initialData={editingReceiptData} 
-          onClearInitialData={() => setEditingReceiptData(null)} 
+        <ReceiptForm
+          initialData={editingReceiptData}
+          onClearInitialData={() => setEditingReceiptData(null)}
         />
       )}
+      {activeTab === 'cargue_masivo' && <BulkReceiptUpload />}
       {activeTab === 'historial' && (
         <ReceiptsList onEditReceipt={handleEditReceipt} />
       )}
