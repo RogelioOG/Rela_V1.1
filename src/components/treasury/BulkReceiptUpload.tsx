@@ -45,13 +45,6 @@ interface PreviewAllocationRow {
   discount_applied: number;
 }
 
-interface AdvanceBreakdownItem {
-  concept_id: string;
-  concept_code: string;
-  concept_name: string;
-  amount: number;
-}
-
 interface PreviewReceiptItem {
   rowNumber: number;
   projectedReceiptNumber: string;
@@ -68,7 +61,6 @@ interface PreviewReceiptItem {
   advanceAmount: number;
   advanceConceptId: string | null;
   advanceConceptLabel: string;
-  advanceBreakdown: AdvanceBreakdownItem[];
   notes: string;
   allocations: PreviewAllocationRow[];
 }
@@ -125,7 +117,8 @@ function parseCsvText(text: string): Record<string, string>[] {
   if (lines.length < 2) return [];
 
   const firstLine = lines[0];
-  const delimiter = (firstLine.match(/;/g) || []).length > (firstLine.match(/,/g) || []).length ? ';' : ',';
+  const delimiter =
+    (firstLine.match(/;/g) || []).length > (firstLine.match(/,/g) || []).length ? ';' : ',';
   const headers = parseCsvLine(firstLine, delimiter).map(normalizeKey);
 
   const rows: Record<string, string>[] = [];
@@ -137,8 +130,7 @@ function parseCsvText(text: string): Record<string, string>[] {
         rowObj[h] = (values[idx] ?? '').trim();
       }
     });
-    const hasAnyValue = Object.values(rowObj).some(v => v !== '');
-    if (hasAnyValue) {
+    if (Object.values(rowObj).some(v => v !== '')) {
       rows.push(rowObj);
     }
   }
@@ -244,13 +236,10 @@ function applyReceiptToWorkingState(
       const currentInterest = roundMoney(Number((due as any).interest_balance || 0));
       const totalDueDeduction = roundMoney(entry.capital + entry.discount);
 
-      const nextBalance = roundMoney(Math.max(currentBalance - totalDueDeduction, 0));
-      const nextInterest = roundMoney(Math.max(currentInterest - entry.interest, 0));
-
       return {
         ...due,
-        balance: nextBalance,
-        interest_balance: nextInterest,
+        balance: roundMoney(Math.max(currentBalance - totalDueDeduction, 0)),
+        interest_balance: roundMoney(Math.max(currentInterest - entry.interest, 0)),
       } as Due;
     })
     .filter(due => {
@@ -273,7 +262,11 @@ export function BulkReceiptUpload() {
   const [concepts, setConcepts] = useState<any[]>([]);
   const [advancePriorityIds, setAdvancePriorityIds] = useState<string[]>([]);
   const [discountTiers, setDiscountTiers] = useState<any[]>([]);
-  const [activePeriod, setActivePeriod] = useState<{ start_date: string; end_date: string; name: string } | null>(null);
+  const [activePeriod, setActivePeriod] = useState<{
+    start_date: string;
+    end_date: string;
+    name: string;
+  } | null>(null);
   const [nextSeq, setNextSeq] = useState<number>(1);
 
   const [fileName, setFileName] = useState<string>('');
@@ -289,48 +282,46 @@ export function BulkReceiptUpload() {
     setLoadingRef(true);
     setRefError('');
 
-    const [unitsRes, methodsRes, hierarchyRes, conceptsRes, discountsRes, periodRes, docRes] = await Promise.all([
-      supabase
-        .from('units')
-        .select('*')
-        .eq('organization_id', activeOrg.id)
-        .eq('is_active', true)
-        .order('tower', { ascending: true })
-        .order('unit_label', { ascending: true }),
-      supabase
-        .from('payment_methods')
-        .select('*')
-        .eq('organization_id', activeOrg.id)
-        .eq('is_active', true)
-        .order('name', { ascending: true }),
-      supabase
-        .from('payment_hierarchy_configs')
-        .select('*')
-        .eq('organization_id', activeOrg.id)
-        .order('priority_order', { ascending: true }),
-      supabase
-        .from('billing_concepts')
-        .select('*')
-        .eq('organization_id', activeOrg.id)
-        .eq('is_active', true)
-        .order('name', { ascending: true }),
-      supabase
-        .from('discount_tiers')
-        .select('*')
-        .eq('organization_id', activeOrg.id),
-      supabase
-        .from('revenue_periods')
-        .select('start_date, end_date, name')
-        .eq('organization_id', activeOrg.id)
-        .eq('is_work_period_active', true)
-        .maybeSingle(),
-      supabase
-        .from('accounting_documents')
-        .select('next_consecutive')
-        .eq('organization_id', activeOrg.id)
-        .eq('prefix', 'RC')
-        .maybeSingle(),
-    ]);
+    const [unitsRes, methodsRes, hierarchyRes, conceptsRes, discountsRes, periodRes, docRes] =
+      await Promise.all([
+        supabase
+          .from('units')
+          .select('*')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_active', true)
+          .order('tower', { ascending: true })
+          .order('unit_label', { ascending: true }),
+        supabase
+          .from('payment_methods')
+          .select('*')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_active', true)
+          .order('name', { ascending: true }),
+        supabase
+          .from('payment_hierarchy_configs')
+          .select('*')
+          .eq('organization_id', activeOrg.id)
+          .order('priority_order', { ascending: true }),
+        supabase
+          .from('billing_concepts')
+          .select('*')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_active', true)
+          .order('name', { ascending: true }),
+        supabase.from('discount_tiers').select('*').eq('organization_id', activeOrg.id),
+        supabase
+          .from('revenue_periods')
+          .select('start_date, end_date, name')
+          .eq('organization_id', activeOrg.id)
+          .eq('is_work_period_active', true)
+          .maybeSingle(),
+        supabase
+          .from('accounting_documents')
+          .select('next_consecutive')
+          .eq('organization_id', activeOrg.id)
+          .eq('prefix', 'RC')
+          .maybeSingle(),
+      ]);
 
     if (unitsRes.error || methodsRes.error || hierarchyRes.error || conceptsRes.error) {
       setRefError('No se pudieron cargar los datos de referencia para el cargue masivo.');
@@ -339,7 +330,9 @@ export function BulkReceiptUpload() {
     }
 
     const loadedConcepts = conceptsRes.data || [];
-    const eligibleAdvance = loadedConcepts.filter((c: any) => !c.is_late_interest && c.advance_account_id);
+    const eligibleAdvance = loadedConcepts.filter(
+      (c: any) => !c.is_late_interest && c.advance_account_id
+    );
 
     setUnits(unitsRes.data || []);
     setMethods(methodsRes.data || []);
@@ -440,18 +433,18 @@ export function BulkReceiptUpload() {
   function findMatchingUnitByPaymentReference(rawRef: string): any | undefined {
     const target = rawRef.toLowerCase().trim().replace(/\s+/g, ' ');
     if (!target) return undefined;
-
-    return units.find(u =>
-      String(u.payment_reference || '').toLowerCase().trim().replace(/\s+/g, ' ') === target
+    return units.find(
+      u => String(u.payment_reference || '').toLowerCase().trim().replace(/\s+/g, ' ') === target
     );
   }
 
   function findMatchingMethod(rawMethod: string): any | undefined {
     const target = rawMethod.toLowerCase().trim();
     if (!target) return undefined;
-    return methods.find(m =>
-      String(m.name || '').toLowerCase().trim() === target ||
-      String(m.id || '').toLowerCase() === target
+    return methods.find(
+      m =>
+        String(m.name || '').toLowerCase().trim() === target ||
+        String(m.id || '').toLowerCase() === target
     );
   }
 
@@ -492,7 +485,14 @@ export function BulkReceiptUpload() {
           rows
             .map(r =>
               findMatchingUnitByPaymentReference(
-                pickField(r, ['referencia_pago', 'payment_reference', 'referencia', 'ref_pago', 'unidad', 'unit'])
+                pickField(r, [
+                  'referencia_pago',
+                  'payment_reference',
+                  'referencia',
+                  'ref_pago',
+                  'unidad',
+                  'unit',
+                ])
               )
             )
             .filter(Boolean)
@@ -549,11 +549,32 @@ export function BulkReceiptUpload() {
           'unidad',
           'unit',
         ]);
-        const rawMethod = pickField(row, ['metodo_pago', 'metodo', 'payment_method', 'forma_pago']);
-        const rawTotal = pickField(row, ['valor_recibido', 'valor', 'total', 'total_amount', 'monto']);
+        const rawMethod = pickField(row, [
+          'metodo_pago',
+          'metodo',
+          'payment_method',
+          'forma_pago',
+        ]);
+        const rawTotal = pickField(row, [
+          'valor_recibido',
+          'valor',
+          'total',
+          'total_amount',
+          'monto',
+        ]);
         const rawPayDate = pickField(row, ['fecha_pago', 'payment_date', 'fecha']);
-        const rawAccDate = pickField(row, ['fecha_contable', 'accounting_date', 'fecha_contabilizacion']);
-        const rawNotes = pickField(row, ['notas', 'notes', 'observacion', 'observaciones', 'detalle']);
+        const rawAccDate = pickField(row, [
+          'fecha_contable',
+          'accounting_date',
+          'fecha_contabilizacion',
+        ]);
+        const rawNotes = pickField(row, [
+          'notas',
+          'notes',
+          'observacion',
+          'observaciones',
+          'detalle',
+        ]);
 
         const matchedUnit = findMatchingUnitByPaymentReference(rawRef);
         if (!rawRef) {
@@ -566,22 +587,38 @@ export function BulkReceiptUpload() {
           errors.push({
             rowNumber,
             field: 'referencia_pago',
-            message: `La referencia de pago "${rawRef}" no coincide con ningún inmueble activo (payment_reference).`,
+            message: `La referencia de pago "${rawRef}" no coincide con ningún inmueble activo.`,
           });
         }
 
         const matchedMethod = findMatchingMethod(rawMethod);
         if (!rawMethod) {
-          errors.push({ rowNumber, field: 'metodo_pago', message: 'El método de pago es obligatorio.' });
+          errors.push({
+            rowNumber,
+            field: 'metodo_pago',
+            message: 'El método de pago es obligatorio.',
+          });
         } else if (!matchedMethod) {
-          errors.push({ rowNumber, field: 'metodo_pago', message: `El método de pago "${rawMethod}" no existe o está inactivo.` });
+          errors.push({
+            rowNumber,
+            field: 'metodo_pago',
+            message: `El método de pago "${rawMethod}" no existe o está inactivo.`,
+          });
         } else if (!matchedMethod.account_id) {
-          errors.push({ rowNumber, field: 'metodo_pago', message: `El método de pago "${matchedMethod.name}" no tiene cuenta contable asociada.` });
+          errors.push({
+            rowNumber,
+            field: 'metodo_pago',
+            message: `El método de pago "${matchedMethod.name}" no tiene cuenta contable asociada.`,
+          });
         }
 
         const totalAmount = parseNumberStrict(rawTotal);
         if (!rawTotal || !Number.isFinite(totalAmount) || totalAmount <= 0) {
-          errors.push({ rowNumber, field: 'valor_recibido', message: 'El valor recibido debe ser un número mayor a cero.' });
+          errors.push({
+            rowNumber,
+            field: 'valor_recibido',
+            message: 'El valor recibido debe ser un número mayor a cero.',
+          });
         }
 
         const paymentDate = rawPayDate || activePeriod?.start_date || '';
@@ -589,8 +626,15 @@ export function BulkReceiptUpload() {
 
         const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
         if (!isoDateRegex.test(paymentDate)) {
-          errors.push({ rowNumber, field: 'fecha_pago', message: `Fecha de pago inválida ("${rawPayDate}"). Use formato YYYY-MM-DD.` });
-        } else if (activePeriod && (paymentDate < activePeriod.start_date || paymentDate > activePeriod.end_date)) {
+          errors.push({
+            rowNumber,
+            field: 'fecha_pago',
+            message: `Fecha de pago inválida ("${rawPayDate}"). Use formato YYYY-MM-DD.`,
+          });
+        } else if (
+          activePeriod &&
+          (paymentDate < activePeriod.start_date || paymentDate > activePeriod.end_date)
+        ) {
           errors.push({
             rowNumber,
             field: 'fecha_pago',
@@ -599,8 +643,15 @@ export function BulkReceiptUpload() {
         }
 
         if (!isoDateRegex.test(accountingDate)) {
-          errors.push({ rowNumber, field: 'fecha_contable', message: `Fecha contable inválida ("${rawAccDate}"). Use formato YYYY-MM-DD.` });
-        } else if (activePeriod && (accountingDate < activePeriod.start_date || accountingDate > activePeriod.end_date)) {
+          errors.push({
+            rowNumber,
+            field: 'fecha_contable',
+            message: `Fecha contable inválida ("${rawAccDate}"). Use formato YYYY-MM-DD.`,
+          });
+        } else if (
+          activePeriod &&
+          (accountingDate < activePeriod.start_date || accountingDate > activePeriod.end_date)
+        ) {
           errors.push({
             rowNumber,
             field: 'fecha_contable',
@@ -608,7 +659,14 @@ export function BulkReceiptUpload() {
           });
         }
 
-        if (!matchedUnit || !matchedMethod || !Number.isFinite(totalAmount) || totalAmount <= 0 || !isoDateRegex.test(paymentDate) || !isoDateRegex.test(accountingDate)) {
+        if (
+          !matchedUnit ||
+          !matchedMethod ||
+          !Number.isFinite(totalAmount) ||
+          totalAmount <= 0 ||
+          !isoDateRegex.test(paymentDate) ||
+          !isoDateRegex.test(accountingDate)
+        ) {
           return;
         }
 
@@ -696,10 +754,9 @@ export function BulkReceiptUpload() {
         const advanceAmount = roundMoney(Math.max(totalAmount - appliedSum, 0));
         let advanceConceptId: string | null = null;
         let advanceConceptLabel = '—';
-        const advanceBreakdown: AdvanceBreakdownItem[] = [];
 
         if (advanceAmount > 0) {
-          if (orderedAdvanceConcepts.length === 0) {
+          if (!primaryAdvanceConcept) {
             errors.push({
               rowNumber,
               field: 'prelacion_anticipos',
@@ -707,16 +764,7 @@ export function BulkReceiptUpload() {
             });
           } else {
             advanceConceptId = primaryAdvanceConcept.id;
-            advanceBreakdown.push({
-              concept_id: primaryAdvanceConcept.id,
-              concept_code: primaryAdvanceConcept.code,
-              concept_name: primaryAdvanceConcept.name,
-              amount: advanceAmount,
-            });
-            advanceConceptLabel = orderedAdvanceConcepts
-              .slice(0, 1)
-              .map(c => `${c.code} — ${c.name}`)
-              .join(', ');
+            advanceConceptLabel = `${primaryAdvanceConcept.code} — ${primaryAdvanceConcept.name}`;
           }
         }
 
@@ -739,7 +787,6 @@ export function BulkReceiptUpload() {
           advanceAmount,
           advanceConceptId,
           advanceConceptLabel,
-          advanceBreakdown,
           notes: rawNotes,
           allocations,
         });
@@ -798,7 +845,9 @@ export function BulkReceiptUpload() {
 
         if (error || !(data as any)?.receipt_number) {
           throw new Error(
-            `Fila ${item.rowNumber} (${item.unitLabel}): ${error?.message || (data as any)?.message || 'No se pudo guardar el recibo.'}`
+            `Fila ${item.rowNumber} (${item.unitLabel}): ${
+              error?.message || (data as any)?.message || 'No se pudo guardar el recibo.'
+            }`
           );
         }
 
@@ -852,7 +901,9 @@ export function BulkReceiptUpload() {
             <h2 className="text-base font-semibold text-gray-900">Cargue Masivo de Recibos de Caja</h2>
             {activePeriod ? (
               <p className="text-xs text-blue-700 font-medium mt-1">
-                Período activo: {activePeriod.name} ({activePeriod.start_date} a {activePeriod.end_date}) · Próximo consecutivo estimado: RC-{String(nextSeq).padStart(4, '0')}
+                Período activo: {activePeriod.name} ({activePeriod.start_date} a{' '}
+                {activePeriod.end_date}) · Próximo consecutivo estimado: RC-
+                {String(nextSeq).padStart(4, '0')}
               </p>
             ) : (
               <p className="text-xs text-red-700 font-medium mt-1">
@@ -886,9 +937,6 @@ export function BulkReceiptUpload() {
           <p className="font-mono bg-white border border-gray-200 rounded px-3 py-2 text-gray-800">
             referencia_pago, metodo_pago, valor_recibido, fecha_pago, fecha_contable, notas
           </p>
-          <p className="text-gray-600">
-            <strong>Referencia de pago:</strong> coloque la <span className="font-mono">referencia de pago</span> asignada al inmueble en la base de datos.
-          </p>
           {fileName && (
             <p className="text-gray-700 pt-1">
               Archivo seleccionado: <strong>{fileName}</strong>
@@ -900,20 +948,28 @@ export function BulkReceiptUpload() {
       <Card>
         <div className="p-6 space-y-4">
           <div>
-            <h3 className="text-sm font-semibold text-gray-900">Prelación de Conceptos para Anticipos / Saldos a Favor</h3>
+            <h3 className="text-sm font-semibold text-gray-900">
+              Prelación de Conceptos para Anticipos / Saldos a Favor
+            </h3>
             <p className="text-xs text-gray-500 mt-0.5">
-              Si alguna fila del cargue genera un saldo a favor superior a las deudas pendientes, se aplicará según este orden de prioridad (conceptos con <span className="font-mono">advance_account_id</span> configurado).
+              Orden de prioridad para conceptos con{' '}
+              <span className="font-mono">advance_account_id</span> cuando un recibo genere saldo a
+              favor.
             </p>
           </div>
 
           {orderedAdvanceConcepts.length === 0 ? (
             <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-xs text-amber-800">
-              No hay conceptos activos con <span className="font-mono">advance_account_id</span> configurado. Si algún recibo del archivo genera anticipo, la validación alertará antes de guardar.
+              No hay conceptos activos con <span className="font-mono">advance_account_id</span>{' '}
+              configurado.
             </div>
           ) : (
             <div className="divide-y divide-gray-100 border border-gray-200 rounded-lg bg-white">
               {orderedAdvanceConcepts.map((concept: any, idx: number) => (
-                <div key={concept.id} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
+                <div
+                  key={concept.id}
+                  className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm"
+                >
                   <div className="flex items-center gap-3">
                     <span className="w-6 h-6 rounded-full bg-blue-50 text-blue-700 font-mono text-xs font-bold flex items-center justify-center">
                       {idx + 1}
@@ -970,7 +1026,7 @@ export function BulkReceiptUpload() {
                   Se encontraron {validationErrors.length} error(es) de validación
                 </h3>
                 <p className="text-xs text-red-700 mt-0.5">
-                  No se guardó ningún recibo. Corrija la plantilla y vuelva a cargarla para continuar.
+                  No se guardó ningún recibo. Corrija la plantilla y vuelva a cargarla.
                 </p>
               </div>
             </div>
@@ -1009,7 +1065,7 @@ export function BulkReceiptUpload() {
                 Previsualización de Recibos a Crear ({previewItems.length})
               </h3>
               <p className="text-sm text-gray-500">
-                Revise la aplicación por prelación de pagos y confirme para generar los recibos y asientos contables.
+                Aplicación acumulada por fila respetando la prelación de conceptos y anticipos.
               </p>
             </div>
             <Button type="button" onClick={handleConfirmBulkSave} disabled={saving}>
@@ -1026,15 +1082,25 @@ export function BulkReceiptUpload() {
           <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-4 border-b border-gray-100 bg-gray-50/40">
             <div className="rounded-lg bg-white border border-gray-200 px-4 py-3">
               <p className="text-xs font-semibold text-gray-500 uppercase">Total a Recibir</p>
-              <p className="text-lg font-bold text-gray-900 mt-1">{formatCOP(totalPreviewAmount)}</p>
+              <p className="text-lg font-bold text-gray-900 mt-1">
+                {formatCOP(totalPreviewAmount)}
+              </p>
             </div>
             <div className="rounded-lg bg-white border border-gray-200 px-4 py-3">
-              <p className="text-xs font-semibold text-gray-500 uppercase">Total Aplicado a Cartera</p>
-              <p className="text-lg font-bold text-blue-700 mt-1">{formatCOP(totalPreviewApplied)}</p>
+              <p className="text-xs font-semibold text-gray-500 uppercase">
+                Total Aplicado a Cartera
+              </p>
+              <p className="text-lg font-bold text-blue-700 mt-1">
+                {formatCOP(totalPreviewApplied)}
+              </p>
             </div>
             <div className="rounded-lg bg-white border border-gray-200 px-4 py-3">
-              <p className="text-xs font-semibold text-gray-500 uppercase">Total Anticipos / Saldos a Favor</p>
-              <p className="text-lg font-bold text-green-700 mt-1">{formatCOP(totalPreviewAdvance)}</p>
+              <p className="text-xs font-semibold text-gray-500 uppercase">
+                Total Anticipos / Saldos a Favor
+              </p>
+              <p className="text-lg font-bold text-green-700 mt-1">
+                {formatCOP(totalPreviewAdvance)}
+              </p>
             </div>
           </div>
 
@@ -1059,7 +1125,9 @@ export function BulkReceiptUpload() {
                     </td>
                     <td className="px-4 py-3 font-medium text-gray-900">
                       <div>{item.unitLabel}</div>
-                      <div className="text-xs font-mono text-gray-500">Ref: {item.paymentReference}</div>
+                      <div className="text-xs font-mono text-gray-500">
+                        Ref: {item.paymentReference}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-gray-700">{item.paymentMethodName}</td>
                     <td className="px-4 py-3 text-xs text-gray-600">
@@ -1070,10 +1138,15 @@ export function BulkReceiptUpload() {
                       {item.allocations.length > 0 ? (
                         item.allocations.map((a, idx) => (
                           <div key={idx} className="text-gray-700">
-                            <span className="font-mono bg-gray-100 px-1 rounded mr-1">{a.period}</span>
-                            <strong>{a.concept_code}</strong>: {formatCOP(a.capital_applied + a.interest_applied)}
+                            <span className="font-mono bg-gray-100 px-1 rounded mr-1">
+                              {a.period}
+                            </span>
+                            <strong>{a.concept_code}</strong>:{' '}
+                            {formatCOP(a.capital_applied + a.interest_applied)}
                             {a.discount_applied > 0 && (
-                              <span className="text-green-700 ml-1">(Desc: {formatCOP(a.discount_applied)})</span>
+                              <span className="text-green-700 ml-1">
+                                (Desc: {formatCOP(a.discount_applied)})
+                              </span>
                             )}
                           </div>
                         ))
@@ -1110,7 +1183,8 @@ export function BulkReceiptUpload() {
             <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-3 flex items-center gap-2">
               <CheckCircle2 className="w-5 h-5 text-green-600 shrink-0" />
               <p className="text-sm font-medium text-green-800">
-                Se crearon y contabilizaron {createdSummary.length} recibo(s) de caja correctamente.
+                Se crearon y contabilizaron {createdSummary.length} recibo(s) de caja
+                correctamente.
               </p>
             </div>
 
@@ -1128,9 +1202,13 @@ export function BulkReceiptUpload() {
                   {createdSummary.map(c => (
                     <tr key={c.receiptNumber}>
                       <td className="px-4 py-2.5 text-gray-500">Fila {c.rowNumber}</td>
-                      <td className="px-4 py-2.5 font-mono font-bold text-blue-700">{c.receiptNumber}</td>
+                      <td className="px-4 py-2.5 font-mono font-bold text-blue-700">
+                        {c.receiptNumber}
+                      </td>
                       <td className="px-4 py-2.5 font-medium text-gray-900">{c.unitLabel}</td>
-                      <td className="px-4 py-2.5 text-right font-semibold">{formatCOP(c.totalAmount)}</td>
+                      <td className="px-4 py-2.5 text-right font-semibold">
+                        {formatCOP(c.totalAmount)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
