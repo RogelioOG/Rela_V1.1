@@ -168,6 +168,94 @@ function isOrderClass(accountClass?: string | null): boolean {
   return val === 'orden' || val === 'cuentas_de_orden' || val === 'order';
 }
 
+/**
+ * Descuenta el capital, interés y descuento aplicados en un recibo
+ * sobre las cuotas (dues) e invoices.items_snapshot en memoria para que
+ * las siguientes filas de la misma unidad en el lote vean el saldo real restante.
+ */
+function applyReceiptToWorkingState(
+  workingDues: Due[],
+  workingInvMap: Record<string, any>,
+  allocations: PreviewAllocationRow[]
+): { nextDues: Due[]; nextInvMap: Record<string, any> } {
+  const appliedByDue = new Map<
+    string,
+    { capital: number; interest: number; discount: number; byConcept: Map<string, number> }
+  >();
+
+  allocations.forEach(a => {
+    const entry = appliedByDue.get(a.due_id) || {
+      capital: 0,
+      interest: 0,
+      discount: 0,
+      byConcept: new Map<string, number>(),
+    };
+    entry.capital = roundMoney(entry.capital + (a.capital_applied || 0));
+    entry.interest = roundMoney(entry.interest + (a.interest_applied || 0));
+    entry.discount = roundMoney(entry.discount + (a.discount_applied || 0));
+
+    const totalLineApplied = roundMoney((a.capital_applied || 0) + (a.interest_applied || 0));
+    const prevConceptApplied = entry.byConcept.get(String(a.concept_id)) || 0;
+    entry.byConcept.set(String(a.concept_id), roundMoney(prevConceptApplied + totalLineApplied));
+
+    appliedByDue.set(a.due_id, entry);
+  });
+
+  const nextInvMap: Record<string, any> = { ...workingInvMap };
+  Object.keys(nextInvMap).forEach(key => {
+    const inv = nextInvMap[key];
+    if (inv && Array.isArray(inv.items_snapshot)) {
+      const dueEntry = appliedByDue.get(inv.due_id) || appliedByDue.get(inv.id);
+      if (dueEntry) {
+        const conceptRemaining = new Map<string, number>(dueEntry.byConcept);
+        const updatedSnapshot = inv.items_snapshot.map((snap: any) => {
+          const cid = String(snap.conceptId || '');
+          const rem = conceptRemaining.get(cid) || 0;
+          const snapAmt = roundMoney(Number(snap.amount || 0));
+          const take = roundMoney(Math.min(rem, snapAmt));
+          conceptRemaining.set(cid, roundMoney(rem - take));
+          return {
+            ...snap,
+            amount: roundMoney(Math.max(snapAmt - take, 0)),
+          };
+        });
+        nextInvMap[key] = {
+          ...inv,
+          items_snapshot: updatedSnapshot,
+          interest_amount: roundMoney(
+            Math.max(Number(inv.interest_amount || 0) - dueEntry.interest, 0)
+          ),
+        };
+      }
+    }
+  });
+
+  const nextDues: Due[] = workingDues
+    .map(due => {
+      const entry = appliedByDue.get(due.id);
+      if (!entry) return { ...due };
+
+      const currentBalance = roundMoney(Number(due.balance || 0));
+      const currentInterest = roundMoney(Number((due as any).interest_balance || 0));
+
+      const nextBalance = roundMoney(Math.max(currentBalance - entry.capital, 0));
+      const nextInterest = roundMoney(Math.max(currentInterest - entry.interest, 0));
+
+      return {
+        ...due,
+        balance: nextBalance,
+        interest_balance: nextInterest,
+      } as Due;
+    })
+    .filter(due => {
+      const b = roundMoney(Number(due.balance || 0));
+      const ib = roundMoney(Number((due as any).interest_balance || 0));
+      return b > 0 || ib > 0;
+    });
+
+  return { nextDues, nextInvMap };
+}
+
 export function BulkReceiptUpload() {
   const { activeOrg } = useOrg();
 
@@ -406,8 +494,8 @@ export function BulkReceiptUpload() {
         )
       );
 
-      const duesByUnit = new Map<string, Due[]>();
-      const invoicesByUnit = new Map<string, Record<string, any>>();
+      const workingDuesByUnit = new Map<string, Due[]>();
+      const workingInvoicesByUnit = new Map<string, Record<string, any>>();
 
       if (unitIdsNeeded.length > 0) {
         const [duesRes, invRes] = await Promise.all([
@@ -426,16 +514,16 @@ export function BulkReceiptUpload() {
         ]);
 
         (duesRes.data || []).forEach((d: any) => {
-          const list = duesByUnit.get(d.unit_id) || [];
+          const list = workingDuesByUnit.get(d.unit_id) || [];
           list.push(d as Due);
-          duesByUnit.set(d.unit_id, list);
+          workingDuesByUnit.set(d.unit_id, list);
         });
 
         (invRes.data || []).forEach((inv: any) => {
-          const map = invoicesByUnit.get(inv.unit_id) || {};
+          const map = workingInvoicesByUnit.get(inv.unit_id) || {};
           map[inv.unit_id + '_' + inv.period] = inv;
           map[inv.id] = inv;
-          invoicesByUnit.set(inv.unit_id, map);
+          workingInvoicesByUnit.set(inv.unit_id, map);
         });
       }
 
@@ -519,14 +607,15 @@ export function BulkReceiptUpload() {
           return;
         }
 
-        const unitDues = duesByUnit.get(matchedUnit.id) || [];
-        const unitInvMap = invoicesByUnit.get(matchedUnit.id) || {};
+        const currentUnitDues = workingDuesByUnit.get(matchedUnit.id) || [];
+        const currentUnitInvMap = workingInvoicesByUnit.get(matchedUnit.id) || {};
 
+        // Construye los ítems respetando la prelación parametrizada (payment_hierarchy_configs) y antigüedad
         const detailedItems = buildDetailedDueItems(
-          unitDues,
+          currentUnitDues,
           hierarchy,
           concepts as BillingConcept[],
-          unitInvMap,
+          currentUnitInvMap,
           discountTiers,
           paymentDate,
           totalAmount
@@ -591,6 +680,15 @@ export function BulkReceiptUpload() {
             discountSum = roundMoney(discountSum + discountVal);
           }
         });
+
+        // Acumular/descontar los saldos aplicados en memoria para las siguientes filas de esta misma unidad
+        const { nextDues, nextInvMap } = applyReceiptToWorkingState(
+          currentUnitDues,
+          currentUnitInvMap,
+          allocations
+        );
+        workingDuesByUnit.set(matchedUnit.id, nextDues);
+        workingInvoicesByUnit.set(matchedUnit.id, nextInvMap);
 
         const advanceAmount = roundMoney(Math.max(totalAmount - appliedSum, 0));
         let advanceConceptId: string | null = null;
@@ -744,6 +842,9 @@ export function BulkReceiptUpload() {
         <div className="p-6 flex flex-wrap items-center justify-between gap-4 border-b border-gray-200">
           <div>
             <h2 className="text-base font-semibold text-gray-900">Cargue Masivo de Recibos de Caja</h2>
+            <p className="text-sm text-gray-500">
+              Consulta los inmuebles por <span className="font-mono text-gray-700">payment_reference</span> y acumula saldos fila a fila respetando la prelación parametrizada.
+            </p>
             {activePeriod ? (
               <p className="text-xs text-blue-700 font-medium mt-1">
                 Período activo: {activePeriod.name} ({activePeriod.start_date} a {activePeriod.end_date}) · Próximo consecutivo estimado: RC-{String(nextSeq).padStart(4, '0')}
@@ -781,7 +882,7 @@ export function BulkReceiptUpload() {
             referencia_pago, metodo_pago, valor_recibido, fecha_pago, fecha_contable, notas
           </p>
           <p className="text-gray-600">
-            <strong>Referencia de pago:</strong> coloque la <span className="font-mono">referencia de pago</span> asignada al inmueble en la base de datos.
+            <strong>referencia_pago:</strong> coloque el <span className="font-mono">payment_reference</span> asignado al inmueble en la base de datos.
           </p>
           {fileName && (
             <p className="text-gray-700 pt-1">
@@ -797,7 +898,7 @@ export function BulkReceiptUpload() {
           <div>
             <h3 className="text-sm font-semibold text-gray-900">Prelación de Conceptos para Anticipos / Saldos a Favor</h3>
             <p className="text-xs text-gray-500 mt-0.5">
-              Si alguna fila del cargue genera un saldo a favor superior a las deudas pendientes, se aplicará según este orden de prioridad
+              Si alguna fila del cargue genera un saldo a favor superior a las deudas pendientes, se aplicará según este orden de prioridad (conceptos con <span className="font-mono">advance_account_id</span> configurado).
             </p>
           </div>
 
