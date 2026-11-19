@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
 import { PrintableReceipt, ReceiptPrintView } from './ReceiptPrintView';
+import { roundMoney } from '@/components/treasury/receiptAllocation';
 
 interface ReceiptsListProps {
   onEditReceipt?: (receipt: any) => void;
@@ -37,13 +38,14 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
         unit:units(tower, unit_label, owner_name),
         method:payment_methods(name),
         allocations:receipt_allocations(
+          id,
           due_id,
           concept_id,
           capital_applied,
           interest_applied,
           discount_applied,
           concept:billing_concepts(name, code),
-          due:dues(period, due_date, balance)
+          due:dues(period, due_date, balance, amount)
         )
       `)
       .eq('organization_id', activeOrg.id)
@@ -73,34 +75,64 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     setCurrentRawReceipt(rec);
     const isVoided = rec.status === 'anulado';
 
-    const lines = (rec.allocations || []).map((alc: any) => {
-      const applied = isVoided ? 0 : Number(alc.capital_applied || 0) + Number(alc.interest_applied || 0);
-      const discount = isVoided ? 0 : Number(alc.discount_applied || 0);
-      const currentBalance = Number(alc.due?.balance || 0);
-      const rawApplied = Number(alc.capital_applied || 0) + Number(alc.interest_applied || 0);
-      const rawDiscount = Number(alc.discount_applied || 0);
-      const initialBalance = isVoided
-        ? currentBalance
-        : rawApplied + rawDiscount + currentBalance;
-      const balanceAfter = isVoided
-        ? currentBalance
-        : Math.max(initialBalance - discount - applied, 0);
+    const rawAllocs = Array.isArray(rec.allocations) ? rec.allocations : [];
 
-      return {
-        period: alc.due?.period || 'N/A',
-        dueDate: alc.due?.due_date || '',
-        conceptName: alc.concept?.name || 'Concepto',
-        conceptCode: alc.concept?.code || 'CON',
-        initialBalance,
-        discount,
-        applied,
-        balanceAfter,
-      };
+    // Agrupar por due_id + concept_id para no duplicar líneas del mismo concepto en el mismo recibo
+    const groupedMap = new Map<string, any>();
+    rawAllocs.forEach((alc: any) => {
+      const key = `${String(alc.due_id || '')}__${String(alc.concept_id || '')}`;
+      const cap = Number(alc.capital_applied || 0);
+      const intr = Number(alc.interest_applied || 0);
+      const disc = Number(alc.discount_applied || 0);
+
+      if (!groupedMap.has(key)) {
+        groupedMap.set(key, {
+          period: alc.due?.period || 'N/A',
+          dueDate: alc.due?.due_date || '',
+          conceptName: alc.concept?.name || 'Concepto',
+          conceptCode: alc.concept?.code || 'CON',
+          rawApplied: roundMoney(cap + intr),
+          rawDiscount: roundMoney(disc),
+          dueCurrentBalance: Number(alc.due?.balance ?? 0),
+        });
+      } else {
+        const existing = groupedMap.get(key);
+        existing.rawApplied = roundMoney(existing.rawApplied + cap + intr);
+        existing.rawDiscount = roundMoney(existing.rawDiscount + disc);
+      }
     });
 
-    const totalVal = isVoided ? 0 : Number(rec.total_amount || 0);
-    const advanceVal = isVoided ? 0 : Number(rec.advance_amount || 0);
-    const appliedVal = isVoided ? 0 : Math.max(totalVal - advanceVal, 0);
+    const lines = Array.from(groupedMap.values())
+      .map(entry => {
+        const applied = isVoided ? 0 : entry.rawApplied;
+        const discount = isVoided ? 0 : entry.rawDiscount;
+
+        // Si el recibo está activo, el saldo actual en dues ya tiene descontado lo aplicado/descontado de este recibo.
+        // Por tanto, el saldo base antes de este recibo es: saldo_actual + aplicado + descuento.
+        // Y el saldo restante después de este recibo es: saldo_actual.
+        const balanceAfter = isVoided
+          ? roundMoney(Math.max(entry.dueCurrentBalance, 0))
+          : roundMoney(Math.max(entry.dueCurrentBalance, 0));
+        const initialBalance = isVoided
+          ? roundMoney(Math.max(entry.dueCurrentBalance, 0))
+          : roundMoney(balanceAfter + applied + discount);
+
+        return {
+          period: entry.period,
+          dueDate: entry.dueDate,
+          conceptName: entry.conceptName,
+          conceptCode: entry.conceptCode,
+          initialBalance,
+          discount,
+          applied,
+          balanceAfter,
+        };
+      })
+      .filter(l => l.applied > 0 || l.discount > 0);
+
+    const totalVal = isVoided ? 0 : roundMoney(Number(rec.total_amount || 0));
+    const advanceVal = isVoided ? 0 : roundMoney(Number(rec.advance_amount || 0));
+    const appliedVal = isVoided ? 0 : roundMoney(lines.reduce((acc, l) => acc + l.applied, 0));
 
     setSelectedReceipt({
       receiptNumber: rec.receipt_number,
