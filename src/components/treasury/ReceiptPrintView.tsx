@@ -35,18 +35,27 @@ interface ReceiptPrintViewProps {
 export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
   const isVoided = receipt.status === 'anulado';
 
-  const displayTotal = isVoided ? 0 : receipt.total;
-  const displayApplied = isVoided ? 0 : receipt.applied;
-  const displayAdvance = isVoided ? 0 : receipt.advance;
+  const displayTotal = isVoided ? 0 : Number(receipt.total || 0);
+  const displayApplied = isVoided ? 0 : Number(receipt.applied || 0);
+  const displayAdvance = isVoided ? 0 : Number(receipt.advance || 0);
 
-  const displayLines = receipt.lines
-    .filter(l => l.applied > 0 || l.discount > 0)
-    .map(l => ({
-      ...l,
-      discount: isVoided ? 0 : l.discount,
-      applied: isVoided ? 0 : l.applied,
-      balanceAfter: isVoided ? l.initialBalance : l.balanceAfter,
-    }));
+  const rawLines = Array.isArray(receipt.lines) ? receipt.lines : [];
+
+  const displayLines = rawLines
+    .filter(l => Number(l.applied || 0) > 0 || Number(l.discount || 0) > 0)
+    .map(l => {
+      const initBal = Number(l.initialBalance || 0);
+      const disc = isVoided ? 0 : Number(l.discount || 0);
+      const app = isVoided ? 0 : Number(l.applied || 0);
+      const balAfter = isVoided ? initBal : Number(l.balanceAfter || 0);
+      return {
+        ...l,
+        initialBalance: initBal,
+        discount: disc,
+        applied: app,
+        balanceAfter: balAfter,
+      };
+    });
 
   const totalInitial = displayLines.reduce((sum, l) => sum + l.initialBalance, 0);
   const totalDiscount = displayLines.reduce((sum, l) => sum + l.discount, 0);
@@ -64,6 +73,7 @@ export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
         </div>
       )}
 
+      {/* Encabezado */}
       <div className="flex justify-between items-start border-b border-gray-300 pb-4">
         <div>
           <h1 className="text-xl font-bold text-gray-900">{receipt.organizationName}</h1>
@@ -83,6 +93,7 @@ export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
         </div>
       </div>
 
+      {/* Datos Generales */}
       <div className="grid grid-cols-2 gap-4 bg-gray-50 p-4 rounded-lg border border-gray-200">
         <div className="space-y-1">
           <p><strong className="text-gray-600">Unidad:</strong> {receipt.unitLabel}</p>
@@ -105,6 +116,7 @@ export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
         </div>
       )}
 
+      {/* Tabla de Detalle de Aplicación */}
       <div>
         <h3 className="text-xs font-semibold uppercase text-gray-600 mb-2">Detalle de Aplicación del Recibo</h3>
         <div className="overflow-x-auto border border-gray-200 rounded-lg">
@@ -149,6 +161,7 @@ export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
         </div>
       </div>
 
+      {/* Resumen Financiero Final */}
       <div className="flex justify-end pt-2">
         <div className="w-72 space-y-1.5 bg-gray-50 p-4 rounded-lg border border-gray-200 text-xs">
           <div className="flex justify-between">
