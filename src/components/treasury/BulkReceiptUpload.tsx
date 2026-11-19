@@ -50,6 +50,7 @@ interface PreviewReceiptItem {
   projectedReceiptNumber: string;
   unitId: string;
   unitLabel: string;
+  paymentReference: string;
   paymentMethodId: string;
   paymentMethodName: string;
   paymentDate: string;
@@ -158,12 +159,8 @@ function parseNumberStrict(raw: string): number {
 }
 
 function unitDisplay(unit: any): string {
-  if (unit.unique_identifier) {
-    return unit.tower
-      ? `${unit.unique_identifier} (Torre ${unit.tower} · ${unit.unit_label})`
-      : `${unit.unique_identifier} (${unit.unit_label})`;
-  }
-  return unit.tower ? `Torre ${unit.tower} · ${unit.unit_label}` : unit.unit_label;
+  const baseLabel = unit.tower ? `Torre ${unit.tower} · ${unit.unit_label}` : unit.unit_label;
+  return unit.payment_reference ? `${baseLabel} (Ref: ${unit.payment_reference})` : baseLabel;
 }
 
 function isOrderClass(accountClass?: string | null): boolean {
@@ -300,12 +297,12 @@ export function BulkReceiptUpload() {
   }
 
   function handleDownloadTemplate() {
-    const sampleUnit = units[0]?.unique_identifier || (units[0] ? unitDisplay(units[0]) : '1-101');
+    const sampleRef = units[0]?.payment_reference || 'REF-101';
     const sampleMethod = methods[0]?.name || 'Consignación';
     const startDate = activePeriod?.start_date || '2026-11-01';
     const csvContent = [
-      'unidad,metodo_pago,valor_recibido,fecha_pago,fecha_contable,notas',
-      `"${sampleUnit}","${sampleMethod}",150000,"${startDate}","${startDate}","Cargue masivo inicial"`,
+      'referencia_pago,metodo_pago,valor_recibido,fecha_pago,fecha_contable,notas',
+      `"${sampleRef}","${sampleMethod}",150000,"${startDate}","${startDate}","Cargue masivo inicial"`,
     ].join('\n');
 
     const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -346,51 +343,13 @@ export function BulkReceiptUpload() {
     return parseCsvText(text);
   }
 
-  function findMatchingUnit(rawUnit: string, rawTower: string = '', rawUnitLabel: string = ''): any | undefined {
-    const target = rawUnit.toLowerCase().trim().replace(/\s+/g, ' ');
-    const towerClean = rawTower.toLowerCase().trim().replace(/^torre\s*/i, '').replace(/\s+/g, '');
-    const labelClean = rawUnitLabel.toLowerCase().trim().replace(/\s+/g, '');
-
-    if (towerClean && labelClean) {
-      const byTowerAndLabel = units.find(u => {
-        const uTower = String(u.tower || '').toLowerCase().trim().replace(/^torre\s*/i, '').replace(/\s+/g, '');
-        const uLabel = String(u.unit_label || '').toLowerCase().trim().replace(/\s+/g, '');
-        return uTower === towerClean && uLabel === labelClean;
-      });
-      if (byTowerAndLabel) return byTowerAndLabel;
-    }
-
+  function findMatchingUnitByPaymentReference(rawRef: string): any | undefined {
+    const target = rawRef.toLowerCase().trim().replace(/\s+/g, ' ');
     if (!target) return undefined;
 
-    // 1. Coincidencia por unique_identifier (ej. "1-101")
-    const byUniqueId = units.find(u =>
-      String(u.unique_identifier || '').toLowerCase().trim().replace(/\s+/g, ' ') === target
+    return units.find(u =>
+      String(u.payment_reference || '').toLowerCase().trim().replace(/\s+/g, ' ') === target
     );
-    if (byUniqueId) return byUniqueId;
-
-    // 2. Respaldo por combinación de tower y unit_label (ej. "1-101", "1 101", "Torre 1 · 101", "Torre 1 - 101")
-    const compactTarget = target.replace(/[^a-z0-9]/g, '');
-    const byTowerAndUnitLabel = units.find(u => {
-      const uTower = String(u.tower || '').toLowerCase().trim().replace(/^torre\s*/i, '').replace(/[^a-z0-9]/g, '');
-      const uLabel = String(u.unit_label || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '');
-      const combinedCompact = `${uTower}${uLabel}`;
-      const combinedDash = `${String(u.tower || '').toLowerCase().trim()}-${String(u.unit_label || '').toLowerCase().trim()}`;
-      const fullLabel = (u.tower ? `torre ${u.tower} · ${u.unit_label}` : String(u.unit_label || ''))
-        .toLowerCase()
-        .trim()
-        .replace(/\s+/g, ' ');
-      const plainLabel = String(u.unit_label || '').toLowerCase().trim().replace(/\s+/g, ' ');
-
-      return (
-        (combinedCompact && combinedCompact === compactTarget) ||
-        combinedDash === target ||
-        fullLabel === target ||
-        plainLabel === target ||
-        String(u.id || '').toLowerCase() === target
-      );
-    });
-
-    return byTowerAndUnitLabel;
   }
 
   function findMatchingMethod(rawMethod: string): any | undefined {
@@ -438,10 +397,8 @@ export function BulkReceiptUpload() {
         new Set(
           rows
             .map(r =>
-              findMatchingUnit(
-                pickField(r, ['unidad', 'unique_identifier', 'unit', 'unidad_label', 'inmueble', 'apto']),
-                pickField(r, ['tower', 'torre']),
-                pickField(r, ['unit_label', 'numero_unidad', 'unidad_numero'])
+              findMatchingUnitByPaymentReference(
+                pickField(r, ['referencia_pago', 'payment_reference', 'referencia', 'ref_pago', 'unidad', 'unit'])
               )
             )
             .filter(Boolean)
@@ -491,23 +448,32 @@ export function BulkReceiptUpload() {
 
       rows.forEach((row, idx) => {
         const rowNumber = idx + 2;
-        const rawUnit = pickField(row, ['unidad', 'unique_identifier', 'unit', 'unidad_label', 'inmueble', 'apto']);
-        const rawTower = pickField(row, ['tower', 'torre']);
-        const rawUnitLabel = pickField(row, ['unit_label', 'numero_unidad', 'unidad_numero']);
+        const rawRef = pickField(row, [
+          'referencia_pago',
+          'payment_reference',
+          'referencia',
+          'ref_pago',
+          'unidad',
+          'unit',
+        ]);
         const rawMethod = pickField(row, ['metodo_pago', 'metodo', 'payment_method', 'forma_pago']);
         const rawTotal = pickField(row, ['valor_recibido', 'valor', 'total', 'total_amount', 'monto']);
         const rawPayDate = pickField(row, ['fecha_pago', 'payment_date', 'fecha']);
         const rawAccDate = pickField(row, ['fecha_contable', 'accounting_date', 'fecha_contabilizacion']);
         const rawNotes = pickField(row, ['notas', 'notes', 'observacion', 'observaciones', 'detalle']);
 
-        const matchedUnit = findMatchingUnit(rawUnit, rawTower, rawUnitLabel);
-        if (!rawUnit && !rawTower && !rawUnitLabel) {
-          errors.push({ rowNumber, field: 'unidad', message: 'La unidad es obligatoria.' });
+        const matchedUnit = findMatchingUnitByPaymentReference(rawRef);
+        if (!rawRef) {
+          errors.push({
+            rowNumber,
+            field: 'referencia_pago',
+            message: 'La referencia de pago (payment_reference) es obligatoria.',
+          });
         } else if (!matchedUnit) {
           errors.push({
             rowNumber,
-            field: 'unidad',
-            message: `La unidad "${rawUnit || `${rawTower}-${rawUnitLabel}`}" no coincide con ningún inmueble activo (unique_identifier / tower + unit_label).`,
+            field: 'referencia_pago',
+            message: `La referencia de pago "${rawRef}" no coincide con ningún inmueble activo (payment_reference).`,
           });
         }
 
@@ -657,6 +623,7 @@ export function BulkReceiptUpload() {
           projectedReceiptNumber,
           unitId: matchedUnit.id,
           unitLabel: unitDisplay(matchedUnit),
+          paymentReference: String(matchedUnit.payment_reference || rawRef),
           paymentMethodId: matchedMethod.id,
           paymentMethodName: matchedMethod.name,
           paymentDate,
@@ -811,10 +778,10 @@ export function BulkReceiptUpload() {
             <FileSpreadsheet className="w-4 h-4 text-blue-600" /> Columnas esperadas en la plantilla:
           </p>
           <p className="font-mono bg-white border border-gray-200 rounded px-3 py-2 text-gray-800">
-            unidad, metodo_pago, valor_recibido, fecha_pago, fecha_contable, notas
+            referencia_pago, metodo_pago, valor_recibido, fecha_pago, fecha_contable, notas
           </p>
           <p className="text-gray-600">
-            <strong>Si tiene torre y unidad:</strong> coloque (ej. <span className="font-mono">1-101</span>).
+            <strong>Referencia de pago:</strong> coloque la <span className="font-mono">referencia de pago</span> asignada al inmueble en la base de datos.
           </p>
           {fileName && (
             <p className="text-gray-700 pt-1">
@@ -830,7 +797,8 @@ export function BulkReceiptUpload() {
           <div>
             <h3 className="text-sm font-semibold text-gray-900">Prelación de Conceptos para Anticipos / Saldos a Favor</h3>
             <p className="text-xs text-gray-500 mt-0.5">
-              Si alguna fila del cargue genera un saldo a favor superior a las deudas pendientes, se aplicará según este orden de prioridad</p>
+              Si alguna fila del cargue genera un saldo a favor superior a las deudas pendientes, se aplicará según este orden de prioridad
+            </p>
           </div>
 
           {orderedAdvanceConcepts.length === 0 ? (
@@ -970,7 +938,7 @@ export function BulkReceiptUpload() {
               <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase text-xs">
                 <tr>
                   <th className="px-4 py-3">Fila / Consecutivo</th>
-                  <th className="px-4 py-3">Unidad</th>
+                  <th className="px-4 py-3">Unidad / Ref. Pago</th>
                   <th className="px-4 py-3">Método</th>
                   <th className="px-4 py-3">Fechas (Pago / Cont.)</th>
                   <th className="px-4 py-3">Aplicación por Prelación</th>
@@ -984,7 +952,10 @@ export function BulkReceiptUpload() {
                       <div className="font-bold text-blue-700">{item.projectedReceiptNumber}</div>
                       <div className="text-gray-500">Fila {item.rowNumber}</div>
                     </td>
-                    <td className="px-4 py-3 font-medium text-gray-900">{item.unitLabel}</td>
+                    <td className="px-4 py-3 font-medium text-gray-900">
+                      <div>{item.unitLabel}</div>
+                      <div className="text-xs font-mono text-gray-500">Ref: {item.paymentReference}</div>
+                    </td>
                     <td className="px-4 py-3 text-gray-700">{item.paymentMethodName}</td>
                     <td className="px-4 py-3 text-xs text-gray-600">
                       <div>Pago: {item.paymentDate}</div>
