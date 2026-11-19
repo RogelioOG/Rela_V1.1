@@ -16,84 +16,75 @@ interface ReceiptsListProps {
 }
 
 export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
-  const { activeOrg } = useOrg();
+  const orgContext = useOrg();
+  const activeOrg = orgContext?.activeOrg;
+
   const [receipts, setReceipts] = useState<any[]>([]);
-  const [snapshotBalanceMap, setSnapshotBalanceMap] = useState>(new Map());
+  const [snapshotBalanceMap, setSnapshotBalanceMap] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedReceipt, setSelectedReceipt] = useState<PrintableReceipt | null>(null);
   const [currentRawReceipt, setCurrentRawReceipt] = useState<any>(null);
   const [printOpen, setPrintOpen] = useState(false);
-  const [errorMsg, setErrorMsg] = useState('');
+  const [error, setError] = useState('');
 
   const loadReceipts = useCallback(async () => {
-    if (!activeOrg) {
+    if (!activeOrg?.id) {
       setLoading(false);
       return;
     }
     setLoading(true);
-    setErrorMsg('');
+    setError('');
 
-    try {
-      const [receiptsRes, invoicesRes] = await Promise.all([
-        supabase
-          .from('receipts')
-          .select(`
-            *,
-            unit:units(tower, unit_label, owner_name),
-            method:payment_methods(name),
-            allocations:receipt_allocations(
-              id,
-              due_id,
-              concept_id,
-              capital_applied,
-              interest_applied,
-              discount_applied,
-              concept:billing_concepts(name, code),
-              due:dues(id, unit_id, period, due_date, balance, amount)
-            )
-          `)
-          .eq('organization_id', activeOrg.id)
-          .order('created_at', { ascending: false }),
-        supabase
-          .from('invoices')
-          .select('id, unit_id, period, items_snapshot')
-          .eq('organization_id', activeOrg.id),
-      ]);
+    const { data: receiptsData, error: receiptsErr } = await supabase
+      .from('receipts')
+      .select(`
+        *,
+        unit:units(tower, unit_label, owner_name),
+        method:payment_methods(name),
+        allocations:receipt_allocations(
+          id,
+          due_id,
+          concept_id,
+          capital_applied,
+          interest_applied,
+          discount_applied,
+          concept:billing_concepts(name, code),
+          due:dues(id, unit_id, period, due_date, balance, amount)
+        )
+      `)
+      .eq('organization_id', activeOrg.id)
+      .order('created_at', { ascending: false });
 
-      if (receiptsRes.error) {
-        setErrorMsg('No se pudieron cargar los recibos de caja registrados.');
-        setLoading(false);
-        return;
-      }
+    if (receiptsErr) {
+      setError('No se pudieron cargar los recibos de caja registrados.');
+      setLoading(false);
+      return;
+    }
 
-      const snapMap = new Map<string, number>();
-      const invRows = Array.isArray(invoicesRes?.data) ? invoicesRes.data : [];
+    const { data: invoicesData } = await supabase
+      .from('invoices')
+      .select('id, unit_id, period, items_snapshot')
+      .eq('organization_id', activeOrg.id);
 
-      for (let i = 0; i < invRows.length; i++) {
-        const inv: any = invRows[i];
-        const snapList = Array.isArray(inv?.items_snapshot) ? inv.items_snapshot : [];
-        for (let j = 0; j < snapList.length; j++) {
-          const snap: any = snapList[j];
+    const nextSnapMap: Record<string, number> = {};
+    if (Array.isArray(invoicesData)) {
+      invoicesData.forEach((inv: any) => {
+        const snapArray = Array.isArray(inv?.items_snapshot) ? inv.items_snapshot : [];
+        snapArray.forEach((snap: any) => {
           const cid = String(snap?.conceptId || snap?.concept_id || '');
           if (cid && inv?.unit_id && inv?.period) {
-            snapMap.set(
-              `${String(inv.unit_id)}__${String(inv.period)}__${cid}`,
-              roundMoney(Number(snap?.amount || 0))
-            );
+            nextSnapMap[`${inv.unit_id}__${inv.period}__${cid}`] = roundMoney(Number(snap?.amount || 0));
           }
-        }
-      }
-
-      setSnapshotBalanceMap(snapMap);
-      setReceipts(Array.isArray(receiptsRes?.data) ? receiptsRes.data : []);
-    } catch {
-      setErrorMsg('Ocurrió un error al consultar el historial de recibos.');
-    } finally {
-      setLoading(false);
+        });
+      });
     }
-  }, [activeOrg]);
+
+    setSnapshotBalanceMap(nextSnapMap);
+    setReceipts(Array.isArray(receiptsData) ? receiptsData : []);
+    setLoading(false);
+  }, [activeOrg?.id]);
 
   useEffect(() => {
     loadReceipts();
@@ -108,47 +99,55 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
   function handleOpenPrint(rec: any) {
     setCurrentRawReceipt(rec);
     const isVoided = rec.status === 'anulado';
+
     const rawAllocs = Array.isArray(rec.allocations) ? rec.allocations : [];
 
-    const groupedMap = new Map<string, any>();
-    for (let i = 0; i < rawAllocs.length; i++) {
-      const alc: any = rawAllocs[i];
+    // Agrupar por due_id + concept_id para no duplicar líneas del mismo concepto en el mismo recibo
+    const groupedMap: Record<string, any> = {};
+
+    rawAllocs.forEach((alc: any) => {
       const key = `${String(alc?.due_id || '')}__${String(alc?.concept_id || '')}`;
       const cap = Number(alc?.capital_applied || 0);
       const intr = Number(alc?.interest_applied || 0);
       const disc = Number(alc?.discount_applied || 0);
 
-      if (!groupedMap.has(key)) {
-        const snapKey = `${String(alc?.due?.unit_id || rec?.unit_id || '')}__${String(alc?.due?.period || '')}__${String(alc?.concept_id || '')}`;
-        const hasSnapshotEntry = snapshotBalanceMap.has(snapKey);
-        const currentConceptBalance = hasSnapshotEntry
-          ? roundMoney(Number(snapshotBalanceMap.get(snapKey) || 0))
-          : null;
+      if (!groupedMap[key]) {
+        const unitIdForSnap = alc?.due?.unit_id || rec?.unit_id || '';
+        const periodForSnap = alc?.due?.period || '';
+        const conceptIdStr = String(alc?.concept_id || '');
+        const snapKey = `${unitIdForSnap}__${periodForSnap}__${conceptIdStr}`;
 
-        groupedMap.set(key, {
+        const hasSnap = Object.prototype.hasOwnProperty.call(snapshotBalanceMap, snapKey);
+        const snapCurrentBalance = hasSnap ? roundMoney(Number(snapshotBalanceMap[snapKey] || 0)) : null;
+
+        groupedMap[key] = {
           period: alc?.due?.period || 'N/A',
           dueDate: alc?.due?.due_date || '',
           conceptName: alc?.concept?.name || 'Concepto',
           conceptCode: alc?.concept?.code || 'CON',
           rawApplied: roundMoney(cap + intr),
           rawDiscount: roundMoney(disc),
-          currentConceptBalance,
-        });
+          snapCurrentBalance,
+        };
       } else {
-        const existing = groupedMap.get(key);
-        existing.rawApplied = roundMoney(existing.rawApplied + cap + intr);
-        existing.rawDiscount = roundMoney(existing.rawDiscount + disc);
+        groupedMap[key].rawApplied = roundMoney(groupedMap[key].rawApplied + cap + intr);
+        groupedMap[key].rawDiscount = roundMoney(groupedMap[key].rawDiscount + disc);
       }
-    }
+    });
 
-    const lines = Array.from(groupedMap.values())
-      .map(entry => {
+    const lines = Object.values(groupedMap)
+      .map((entry: any) => {
         const applied = isVoided ? 0 : entry.rawApplied;
         const discount = isVoided ? 0 : entry.rawDiscount;
 
-        const balanceAfter = isVoided
-          ? roundMoney(Math.max((entry.currentConceptBalance ?? 0) + entry.rawApplied + entry.rawDiscount, 0))
-          : roundMoney(Math.max(entry.currentConceptBalance ?? 0, 0));
+        // Si tenemos el saldo del concepto en items_snapshot, usamos ese saldo específico;
+        // si no, usamos lo aplicado/descontado del concepto sin inflar con el saldo total de toda la cuota.
+        const balanceAfter =
+          entry.snapCurrentBalance !== null
+            ? isVoided
+              ? roundMoney(Math.max(entry.snapCurrentBalance + entry.rawApplied + entry.rawDiscount, 0))
+              : roundMoney(Math.max(entry.snapCurrentBalance, 0))
+            : 0;
 
         const initialBalance = isVoided
           ? balanceAfter
@@ -197,14 +196,14 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     if (!window.confirm('¿Está seguro de anular este recibo? Se revertirá la cartera, quedará en $ 0 y se actualizará el asiento contable.')) return;
 
     setActionLoading(receiptId);
-    const { data, error: rpcError } = await supabase.rpc('void_receipt', {
+    const { data, error: rpcErr } = await supabase.rpc('void_receipt', {
       p_receipt_id: receiptId,
       p_organization_id: activeOrg.id,
     });
     setActionLoading(null);
 
-    if (rpcError || (data && data.success === false)) {
-      alert(rpcError?.message || data?.message || 'Error al anular el recibo.');
+    if (rpcErr || (data && data.success === false)) {
+      alert(rpcErr?.message || data?.message || 'Error al anular el recibo.');
       return;
     }
 
@@ -219,15 +218,15 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     setActionLoading(receiptId);
 
     try {
-      const { data, error: rpcError } = await supabase.rpc('delete_receipt', {
+      const { data, error: rpcErr } = await supabase.rpc('delete_receipt', {
         p_receipt_id: receiptId,
         p_organization_id: activeOrg.id,
       });
 
       setActionLoading(null);
 
-      if (rpcError) {
-        alert('Error de base de datos: ' + rpcError.message);
+      if (rpcErr) {
+        alert('Error de base de datos: ' + rpcErr.message);
         return;
       }
 
@@ -277,11 +276,11 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
           <div className="flex items-center justify-center py-16">
             <Loader2 className="w-6 h-6 text-blue-600 animate-spin" />
           </div>
-        ) : errorMsg ? (
+        ) : error ? (
           <div className="p-6">
             <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-red-600" />
-              <p className="text-sm text-red-700">{errorMsg}</p>
+              <p className="text-sm text-red-700">{error}</p>
             </div>
           </div>
         ) : filteredReceipts.length === 0 ? (
