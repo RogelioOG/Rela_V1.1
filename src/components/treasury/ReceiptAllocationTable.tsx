@@ -21,7 +21,6 @@ export function ReceiptAllocationTable({ items, inputs, onChange }: ReceiptAlloc
 
   return (
     <div className="space-y-6">
-      {/* TABLA 1: OBLIGACIONES PENDIENTES DISCRIMINADAS POR CONCEPTO */}
       <div>
         <div className="mb-2">
           <h3 className="text-sm font-semibold text-gray-800">1. Detalle de obligaciones pendientes por concepto</h3>
@@ -79,7 +78,6 @@ export function ReceiptAllocationTable({ items, inputs, onChange }: ReceiptAlloc
         </div>
       </div>
 
-      {/* TABLA 2: APLICACIÓN REAL DEL PAGO (Campos Editables por Concepto) */}
       <div>
         <div className="mb-2">
           <h3 className="text-sm font-semibold text-gray-800">2. Aplicación real del pago por concepto (Campos editables)</h3>
@@ -101,11 +99,8 @@ export function ReceiptAllocationTable({ items, inputs, onChange }: ReceiptAlloc
               {items.map(item => {
                 const appliedVal = parseAmount(inputs[item.id] ?? '0');
                 const discount = item.discountAmount || 0;
-                
-                const effectiveDiscount = discount > 0 ? discount : 0;
-                const coveredVal = appliedVal + effectiveDiscount;
+                const coveredVal = appliedVal + discount;
                 const isOverflow = appliedVal > (item.netBalance > 0 ? item.netBalance : item.balance);
-                
                 const remaining = Math.max(item.balance - coveredVal, 0);
 
                 return (
