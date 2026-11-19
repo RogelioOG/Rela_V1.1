@@ -126,9 +126,7 @@ function parseCsvText(text: string): Record<string, string>[] {
     const values = parseCsvLine(lines[i], delimiter);
     const rowObj: Record<string, string> = {};
     headers.forEach((h, idx) => {
-      if (h) {
-        rowObj[h] = (values[idx] ?? '').trim();
-      }
+      if (h) rowObj[h] = (values[idx] ?? '').trim();
     });
     if (Object.values(rowObj).some(v => v !== '')) {
       rows.push(rowObj);
@@ -139,9 +137,7 @@ function parseCsvText(text: string): Record<string, string>[] {
 
 function pickField(row: Record<string, string>, keys: string[]): string {
   for (const k of keys) {
-    if (row[k] !== undefined && row[k] !== '') {
-      return row[k];
-    }
+    if (row[k] !== undefined && row[k] !== '') return row[k];
   }
   return '';
 }
@@ -163,90 +159,77 @@ function unitDisplay(unit: any): string {
   return unit.payment_reference ? `${baseLabel} (Ref: ${unit.payment_reference})` : baseLabel;
 }
 
-function isOrderClass(accountClass?: string | null): boolean {
-  const val = String(accountClass || '').toLowerCase().trim();
-  return val === 'orden' || val === 'cuentas_de_orden' || val === 'order';
-}
-
-function applyReceiptToWorkingState(
+function subtractAppliedFromWorkingState(
   workingDues: Due[],
   workingInvMap: Record<string, any>,
   allocations: PreviewAllocationRow[]
 ): { nextDues: Due[]; nextInvMap: Record<string, any> } {
-  const appliedByDue = new Map<
-    string,
-    { capital: number; interest: number; discount: number; byConcept: Map<string, number> }
-  >();
+  const byDue = new Map<string, { totalReduction: number; byConcept: Map<string, number> }>();
 
   allocations.forEach(a => {
-    const entry = appliedByDue.get(a.due_id) || {
-      capital: 0,
-      interest: 0,
-      discount: 0,
+    const entry = byDue.get(a.due_id) || {
+      totalReduction: 0,
       byConcept: new Map<string, number>(),
     };
-    entry.capital = roundMoney(entry.capital + (a.capital_applied || 0));
-    entry.interest = roundMoney(entry.interest + (a.interest_applied || 0));
-    entry.discount = roundMoney(entry.discount + (a.discount_applied || 0));
-
-    const totalLineDeduction = roundMoney(
+    const lineReduction = roundMoney(
       (a.capital_applied || 0) + (a.interest_applied || 0) + (a.discount_applied || 0)
     );
-    const prevConceptApplied = entry.byConcept.get(String(a.concept_id)) || 0;
-    entry.byConcept.set(String(a.concept_id), roundMoney(prevConceptApplied + totalLineDeduction));
+    entry.totalReduction = roundMoney(entry.totalReduction + lineReduction);
 
-    appliedByDue.set(a.due_id, entry);
+    const cid = String(a.concept_id || '');
+    entry.byConcept.set(cid, roundMoney((entry.byConcept.get(cid) || 0) + lineReduction));
+    byDue.set(a.due_id, entry);
   });
+
+  const dueById = new Map<string, Due>();
+  workingDues.forEach(d => dueById.set(d.id, d));
 
   const nextInvMap: Record<string, any> = { ...workingInvMap };
   Object.keys(nextInvMap).forEach(key => {
     const inv = nextInvMap[key];
     if (inv && Array.isArray(inv.items_snapshot)) {
-      const dueEntry = appliedByDue.get(inv.due_id) || appliedByDue.get(inv.id);
+      const matchingDue = Array.from(dueById.values()).find(
+        d => d.unit_id === inv.unit_id && d.period === inv.period
+      );
+      const dueEntry =
+        (matchingDue && byDue.get(matchingDue.id)) ||
+        byDue.get(inv.due_id) ||
+        byDue.get(inv.id);
+
       if (dueEntry) {
-        const conceptRemaining = new Map<string, number>(dueEntry.byConcept);
-        const updatedSnapshot = inv.items_snapshot.map((snap: any) => {
-          const cid = String(snap.conceptId || snap.concept_id || '');
-          const rem = conceptRemaining.get(cid) || 0;
-          const snapAmt = roundMoney(Number(snap.amount || 0));
-          const take = roundMoney(Math.min(rem, snapAmt));
-          conceptRemaining.set(cid, roundMoney(rem - take));
-          return {
-            ...snap,
-            amount: roundMoney(Math.max(snapAmt - take, 0)),
-          };
-        });
+        const conceptRem = new Map<string, number>(dueEntry.byConcept);
+        const updatedSnapshot = inv.items_snapshot
+          .map((snap: any) => {
+            const cid = String(snap.conceptId || snap.concept_id || '');
+            const rem = conceptRem.get(cid) || 0;
+            const snapAmt = roundMoney(Number(snap.amount || 0));
+            const take = roundMoney(Math.min(rem, snapAmt));
+            conceptRem.set(cid, roundMoney(rem - take));
+            return {
+              ...snap,
+              amount: roundMoney(Math.max(snapAmt - take, 0)),
+            };
+          })
+          .filter((snap: any) => roundMoney(Number(snap.amount || 0)) > 0);
+
         nextInvMap[key] = {
           ...inv,
           items_snapshot: updatedSnapshot,
-          interest_amount: roundMoney(
-            Math.max(Number(inv.interest_amount || 0) - dueEntry.interest, 0)
-          ),
         };
       }
     }
   });
 
-  const nextDues: Due[] = workingDues
-    .map(due => {
-      const entry = appliedByDue.get(due.id);
-      if (!entry) return { ...due };
-
-      const currentBalance = roundMoney(Number(due.balance || 0));
-      const currentInterest = roundMoney(Number((due as any).interest_balance || 0));
-      const totalDueDeduction = roundMoney(entry.capital + entry.discount);
-
+  const nextDues = workingDues
+    .map(d => {
+      const entry = byDue.get(d.id);
+      if (!entry) return { ...d };
       return {
-        ...due,
-        balance: roundMoney(Math.max(currentBalance - totalDueDeduction, 0)),
-        interest_balance: roundMoney(Math.max(currentInterest - entry.interest, 0)),
+        ...d,
+        balance: roundMoney(Math.max(roundMoney(Number(d.balance || 0)) - entry.totalReduction, 0)),
       } as Due;
     })
-    .filter(due => {
-      const b = roundMoney(Number(due.balance || 0));
-      const ib = roundMoney(Number((due as any).interest_balance || 0));
-      return b > 0 || ib > 0;
-    });
+    .filter(d => roundMoney(Number(d.balance || 0)) > 0);
 
   return { nextDues, nextInvMap };
 }
@@ -533,9 +516,6 @@ export function BulkReceiptUpload() {
         });
       }
 
-      const conceptById = new Map<string, any>();
-      concepts.forEach(c => conceptById.set(String(c.id), c));
-
       const primaryAdvanceConcept = orderedAdvanceConcepts[0] || null;
       let seqCursor = nextSeq;
 
@@ -603,12 +583,6 @@ export function BulkReceiptUpload() {
             rowNumber,
             field: 'metodo_pago',
             message: `El método de pago "${rawMethod}" no existe o está inactivo.`,
-          });
-        } else if (!matchedMethod.account_id) {
-          errors.push({
-            rowNumber,
-            field: 'metodo_pago',
-            message: `El método de pago "${matchedMethod.name}" no tiene cuenta contable asociada.`,
           });
         }
 
@@ -693,40 +667,6 @@ export function BulkReceiptUpload() {
           const appliedVal = roundMoney(allocRes.amounts[item.id]?.applied || 0);
           const discountVal = roundMoney(item.discountAmount || 0);
           if (appliedVal > 0 || discountVal > 0) {
-            const conceptObj = conceptById.get(String(item.conceptId));
-            if (!conceptObj) {
-              errors.push({
-                rowNumber,
-                field: 'concepto',
-                message: `No se encontró el concepto "${item.conceptName}" en la parametrización activa.`,
-              });
-              return;
-            }
-
-            if (!conceptObj.income_account_id || !conceptObj.counterpart_account_id) {
-              errors.push({
-                rowNumber,
-                field: 'cuentas_concepto',
-                message: `El concepto "${conceptObj.name}" debe tener income_account_id y counterpart_account_id configurados.`,
-              });
-            }
-
-            if (discountVal > 0 && !conceptObj.discount_income_account_id) {
-              errors.push({
-                rowNumber,
-                field: 'cuenta_descuento',
-                message: `El concepto "${conceptObj.name}" aplica descuento pero no tiene discount_income_account_id configurado.`,
-              });
-            }
-
-            if (isOrderClass(conceptObj.account_class) && !conceptObj.third_account_id) {
-              errors.push({
-                rowNumber,
-                field: 'cuenta_orden',
-                message: `El concepto "${conceptObj.name}" es de clase orden y requiere third_account_id configurado.`,
-              });
-            }
-
             allocations.push({
               due_id: item.dueId,
               concept_id: item.conceptId,
@@ -737,13 +677,12 @@ export function BulkReceiptUpload() {
               interest_applied: item.isInterest ? appliedVal : 0,
               discount_applied: discountVal,
             });
-
             appliedSum = roundMoney(appliedSum + appliedVal);
             discountSum = roundMoney(discountSum + discountVal);
           }
         });
 
-        const { nextDues, nextInvMap } = applyReceiptToWorkingState(
+        const { nextDues, nextInvMap } = subtractAppliedFromWorkingState(
           currentUnitDues,
           currentUnitInvMap,
           allocations
@@ -760,7 +699,7 @@ export function BulkReceiptUpload() {
             errors.push({
               rowNumber,
               field: 'prelacion_anticipos',
-              message: `El pago genera un anticipo de ${formatCOP(advanceAmount)} pero no hay ningún concepto en la Prelación de Anticipos con advance_account_id configurado.`,
+              message: `El pago genera un anticipo de ${formatCOP(advanceAmount)} pero no hay ningún concepto con advance_account_id configurado.`,
             });
           } else {
             advanceConceptId = primaryAdvanceConcept.id;
