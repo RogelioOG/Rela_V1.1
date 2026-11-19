@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, Printer, Search, FileText, AlertTriangle, Ban, Trash2, Edit3 } from 'lucide-react';
+import { Loader2, Printer, FileText, AlertTriangle, Ban, Trash2, Edit3 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { formatCOP } from '@/lib/format';
 import { useOrg } from '@/contexts/OrganizationContext';
@@ -38,6 +38,7 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
         method:payment_methods(name),
         allocations:receipt_allocations(
           due_id,
+          concept_id,
           capital_applied,
           interest_applied,
           discount_applied,
@@ -62,7 +63,7 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     loadReceipts();
   }, [loadReceipts]);
 
-  const filteredReceipts = receipts.filter(r => 
+  const filteredReceipts = receipts.filter(r =>
     r.receipt_number?.toLowerCase().includes(searchTerm.toLowerCase()) ||
     r.unit?.unit_label?.toLowerCase().includes(searchTerm.toLowerCase()) ||
     r.unit?.owner_name?.toLowerCase().includes(searchTerm.toLowerCase())
@@ -70,27 +71,40 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
 
   function handleOpenPrint(rec: any) {
     setCurrentRawReceipt(rec);
+    const isVoided = rec.status === 'anulado';
+
     const lines = (rec.allocations || []).map((alc: any) => {
-      const applied = Number(alc.capital_applied || 0) + Number(alc.interest_applied || 0);
-      const discount = Number(alc.discount_applied || 0);
+      const applied = isVoided ? 0 : Number(alc.capital_applied || 0) + Number(alc.interest_applied || 0);
+      const discount = isVoided ? 0 : Number(alc.discount_applied || 0);
       const currentBalance = Number(alc.due?.balance || 0);
-      const initialBalance = applied + discount + currentBalance;
-      const balanceAfter = Math.max(initialBalance - discount - applied, 0);
+      const rawApplied = Number(alc.capital_applied || 0) + Number(alc.interest_applied || 0);
+      const rawDiscount = Number(alc.discount_applied || 0);
+      const initialBalance = isVoided
+        ? currentBalance
+        : rawApplied + rawDiscount + currentBalance;
+      const balanceAfter = isVoided
+        ? currentBalance
+        : Math.max(initialBalance - discount - applied, 0);
 
       return {
         period: alc.due?.period || 'N/A',
         dueDate: alc.due?.due_date || '',
         conceptName: alc.concept?.name || 'Concepto',
         conceptCode: alc.concept?.code || 'CON',
-        initialBalance: initialBalance,
-        discount: discount,
-        applied: applied,
-        balanceAfter: balanceAfter,
+        initialBalance,
+        discount,
+        applied,
+        balanceAfter,
       };
     });
 
+    const totalVal = isVoided ? 0 : Number(rec.total_amount || 0);
+    const advanceVal = isVoided ? 0 : Number(rec.advance_amount || 0);
+    const appliedVal = isVoided ? 0 : Math.max(totalVal - advanceVal, 0);
+
     setSelectedReceipt({
       receiptNumber: rec.receipt_number,
+      status: rec.status,
       organizationName: activeOrg?.name || '',
       organizationNit: activeOrg?.nit || '',
       unitLabel: rec.unit?.tower ? `Torre ${rec.unit.tower} · ${rec.unit.unit_label}` : (rec.unit?.unit_label || ''),
@@ -98,10 +112,12 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
       paymentDate: rec.payment_date,
       accountingDate: rec.accounting_date,
       methodName: rec.method?.name || 'Efectivo / Consignación',
-      total: Number(rec.total_amount || 0),
-      applied: Number(rec.total_amount || 0) - Number(rec.advance_amount || 0),
-      advance: Number(rec.advance_amount || 0),
-      notes: rec.notes,
+      total: totalVal,
+      applied: appliedVal,
+      advance: advanceVal,
+      notes: isVoided
+        ? `DOCUMENTO ANULADO${rec.notes ? ` — ${rec.notes}` : ''}`
+        : rec.notes,
       lines,
     });
     setPrintOpen(true);
@@ -109,7 +125,7 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
 
   async function handleVoidReceipt(receiptId: string) {
     if (!activeOrg) return;
-    if (!window.confirm('¿Está seguro de anular este recibo? Se revertirá la cartera y la afectación contable.')) return;
+    if (!window.confirm('¿Está seguro de anular este recibo? Se revertirá la cartera, quedará en $ 0 y se actualizará el asiento contable.')) return;
 
     setActionLoading(receiptId);
     const { data, error } = await supabase.rpc('void_receipt', {
@@ -118,7 +134,7 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     });
     setActionLoading(null);
 
-    if (error || !data?.success) {
+    if (error || (data && data.success === false)) {
       alert(error?.message || data?.message || 'Error al anular el recibo.');
       return;
     }
@@ -129,16 +145,16 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
 
   async function handleDeleteReceipt(receiptId: string) {
     if (!activeOrg) return;
-    if (!window.confirm('¿Está seguro de ELIMINAR definitivamente este recibo de la base de datos? Se revertirá la cartera y se eliminará el comprobante.')) return;
+    if (!window.confirm('¿Está seguro de ELIMINAR definitivamente este recibo de la base de datos? Se revertirá la cartera y el asiento contable.')) return;
 
     setActionLoading(receiptId);
-    
+
     try {
       const { data, error } = await supabase.rpc('delete_receipt', {
         p_receipt_id: receiptId,
         p_organization_id: activeOrg.id,
       });
-      
+
       setActionLoading(null);
 
       if (error) {
@@ -146,8 +162,8 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
         return;
       }
 
-      if (!data?.success) {
-        alert('No se pudo completar la eliminación del recibo.');
+      if (data && data.success === false) {
+        alert(data?.message || 'No se pudo completar la eliminación del recibo.');
         return;
       }
 
@@ -159,13 +175,9 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
     }
   }
 
-  async function handleEdit(rec: any) {
+  function handleEdit(rec: any) {
     if (!activeOrg) return;
     if (!window.confirm(`¿Desea editar el recibo ${rec.receipt_number}? Se cargarán los datos en el formulario para su modificación.`)) return;
-
-    setActionLoading(rec.id);
-    await supabase.rpc('void_receipt', { p_receipt_id: rec.id, p_organization_id: activeOrg.id });
-    setActionLoading(null);
 
     setPrintOpen(false);
     if (onEditReceipt) {
@@ -225,10 +237,18 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
                 {filteredReceipts.map(rec => {
                   const isVoided = rec.status === 'anulado';
                   const isProcessing = actionLoading === rec.id;
+                  const displayAmount = isVoided ? 0 : Number(rec.total_amount || 0);
 
                   return (
-                    <tr key={rec.id} className={`hover:bg-gray-50 ${isVoided ? 'bg-red-50/40 opacity-75' : ''}`}>
-                      <td className="px-4 py-4 font-mono font-bold text-blue-700">{rec.receipt_number}</td>
+                    <tr key={rec.id} className={`hover:bg-gray-50 ${isVoided ? 'bg-red-50/40' : ''}`}>
+                      <td className="px-4 py-4 font-mono font-bold text-blue-700">
+                        <div className="flex items-center gap-2">
+                          <span>{rec.receipt_number}</span>
+                          {isVoided && (
+                            <span className="text-[11px] font-sans font-normal text-red-700">(Documento anulado)</span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-4 py-4 text-gray-600">{rec.payment_date}</td>
                       <td className="px-4 py-4 font-medium text-gray-900">
                         {rec.unit?.tower ? `Torre ${rec.unit.tower} · ${rec.unit.unit_label}` : rec.unit?.unit_label}
@@ -240,7 +260,9 @@ export function ReceiptsList({ onEditReceipt }: ReceiptsListProps) {
                           <span className="px-2 py-0.5 text-xs font-semibold rounded bg-green-100 text-green-800">ACTIVO</span>
                         )}
                       </td>
-                      <td className="px-4 py-4 text-right font-semibold text-gray-900">{formatCOP(rec.total_amount)}</td>
+                      <td className={`px-4 py-4 text-right font-semibold ${isVoided ? 'text-red-700' : 'text-gray-900'}`}>
+                        {formatCOP(displayAmount)}
+                      </td>
                       <td className="px-4 py-4 text-center">
                         <div className="flex items-center justify-center gap-1.5">
                           <Button type="button" variant="outline" size="sm" onClick={() => handleOpenPrint(rec)}>
