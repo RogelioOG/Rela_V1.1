@@ -39,12 +39,14 @@ export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
   const displayApplied = isVoided ? 0 : receipt.applied;
   const displayAdvance = isVoided ? 0 : receipt.advance;
 
-  const displayLines = receipt.lines.map(l => ({
-    ...l,
-    discount: isVoided ? 0 : l.discount,
-    applied: isVoided ? 0 : l.applied,
-    balanceAfter: isVoided ? l.initialBalance : l.balanceAfter,
-  }));
+  const displayLines = receipt.lines
+    .filter(l => l.applied > 0 || l.discount > 0)
+    .map(l => ({
+      ...l,
+      discount: isVoided ? 0 : l.discount,
+      applied: isVoided ? 0 : l.applied,
+      balanceAfter: isVoided ? l.initialBalance : l.balanceAfter,
+    }));
 
   const totalInitial = displayLines.reduce((sum, l) => sum + l.initialBalance, 0);
   const totalDiscount = displayLines.reduce((sum, l) => sum + l.discount, 0);
@@ -62,7 +64,6 @@ export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
         </div>
       )}
 
-      {/* Encabezado */}
       <div className="flex justify-between items-start border-b border-gray-300 pb-4">
         <div>
           <h1 className="text-xl font-bold text-gray-900">{receipt.organizationName}</h1>
@@ -82,7 +83,6 @@ export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
         </div>
       </div>
 
-      {/* Datos Generales */}
       <div className="grid grid-cols-2 gap-4 bg-gray-50 p-4 rounded-lg border border-gray-200">
         <div className="space-y-1">
           <p><strong className="text-gray-600">Unidad:</strong> {receipt.unitLabel}</p>
@@ -105,7 +105,6 @@ export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
         </div>
       )}
 
-      {/* Tabla de Detalle de Aplicación */}
       <div>
         <h3 className="text-xs font-semibold uppercase text-gray-600 mb-2">Detalle de Aplicación del Recibo</h3>
         <div className="overflow-x-auto border border-gray-200 rounded-lg">
@@ -150,7 +149,6 @@ export function ReceiptPrintView({ receipt }: ReceiptPrintViewProps) {
         </div>
       </div>
 
-      {/* Resumen Financiero Final */}
       <div className="flex justify-end pt-2">
         <div className="w-72 space-y-1.5 bg-gray-50 p-4 rounded-lg border border-gray-200 text-xs">
           <div className="flex justify-between">
