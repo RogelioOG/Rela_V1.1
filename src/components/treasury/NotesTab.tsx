@@ -343,7 +343,6 @@ export function NotesTab() {
         if (r.rowKey !== rowKey) return r;
         const updated = { ...r, [field]: value };
 
-        // Al cambiar concepto, tomar por defecto counterpart_account_id del concepto
         if (field === 'conceptId') {
           const cObj = concepts.find(c => String(c.id) === String(value));
           if (cObj) {
@@ -357,7 +356,6 @@ export function NotesTab() {
           }
         }
 
-        // Al cambiar cuota pendiente seleccionada, sincronizar período, vencimiento y saldo pendiente
         if (field === 'dueId') {
           const targetUnit =
             section === 'abono' ? beneficiaryUnitId : section === 'cargo' ? chargedUnitId : unitId;
@@ -370,7 +368,6 @@ export function NotesTab() {
           }
         }
 
-        // Si es abono y el monto + descuento supera el saldo pendiente, calcular excedente como anticipo
         if (section === 'abono' && (field === 'amount' || field === 'discountAmount' || field === 'dueId')) {
           const amt = parseAmount(updated.amount || '0');
           const disc = parseAmount(updated.discountAmount || '0');
@@ -755,9 +752,9 @@ export function NotesTab() {
           return (
             <div
               key={row.rowKey}
-              className="grid grid-cols-1 md:grid-cols-12 gap-3 p-3.5 rounded-lg border border-gray-200 bg-gray-50/60 items-end"
+              className="grid grid-cols-1 md:grid-cols-12 gap-4 p-4 rounded-lg border border-gray-200 bg-gray-50/70 items-end"
             >
-              <div className="md:col-span-3">
+              <div className={showAbonoExtras ? 'md:col-span-3' : 'md:col-span-4'}>
                 <Select
                   label="Concepto *"
                   value={row.conceptId}
@@ -795,7 +792,7 @@ export function NotesTab() {
                 </div>
               )}
 
-              <div className={unitDues.length > 0 ? 'md:col-span-2' : 'md:col-span-2'}>
+              <div className={showAbonoExtras ? 'md:col-span-2' : 'md:col-span-2'}>
                 <Input
                   label="Valor a aplicar *"
                   type="number"
@@ -836,7 +833,17 @@ export function NotesTab() {
                 </>
               )}
 
-              <div className={showAbonoExtras ? 'md:col-span-2' : 'md:col-span-4'}>
+              <div
+                className={
+                  showAbonoExtras
+                    ? unitDues.length > 0
+                      ? 'md:col-span-2'
+                      : 'md:col-span-2'
+                    : unitDues.length > 0
+                    ? 'md:col-span-2'
+                    : 'md:col-span-3'
+                }
+              >
                 <Select
                   label="Cuenta contable cruce *"
                   value={row.offsetAccountId}
@@ -853,7 +860,7 @@ export function NotesTab() {
                 </Select>
               </div>
 
-              <div className="md:col-span-1 flex justify-end">
+              <div className="md:col-span-1 flex justify-end pb-0.5">
                 <Button
                   type="button"
                   variant="outline"
@@ -867,7 +874,7 @@ export function NotesTab() {
               </div>
 
               {cObj && (
-                <div className="md:col-span-12 flex flex-wrap items-center justify-between gap-2 text-[11px] text-gray-500 pt-1 border-t border-gray-200/70">
+                <div className="md:col-span-12 flex flex-wrap items-center justify-between gap-2 text-[11px] text-gray-500 pt-2 border-t border-gray-200/70">
                   <span>
                     Período: <strong>{row.period || accountingDate.slice(0, 7)}</strong>
                     {row.pendingBalance > 0 && ` · Saldo cuota: ${formatCOP(row.pendingBalance)}`}
@@ -879,7 +886,7 @@ export function NotesTab() {
                       updateRowField(section, row.rowKey, 'lineNotes', e.target.value)
                     }
                     placeholder="Detalle o nota del concepto (opcional)"
-                    className="w-full sm:w-80 rounded border border-gray-300 bg-white px-2.5 py-1 text-xs text-gray-800"
+                    className="w-full sm:w-96 rounded border border-gray-300 bg-white px-2.5 py-1 text-xs text-gray-800"
                   />
                 </div>
               )}
@@ -1087,7 +1094,7 @@ export function NotesTab() {
             </div>
           </Card>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 gap-6">
             <Card>
               <div className="p-6 space-y-4">
                 <div className="flex items-center justify-between border-b border-gray-100 pb-3">
@@ -1097,22 +1104,24 @@ export function NotesTab() {
                       Se acredita/abona al inmueble beneficiado aplicando a conceptos pendientes.
                     </p>
                   </div>
-                  <span className="text-sm font-bold text-green-700">{formatCOP(totalAbono)}</span>
+                  <span className="text-base font-bold text-green-700">{formatCOP(totalAbono)}</span>
                 </div>
 
-                <Select
-                  label="Inmueble beneficiado (Abono) *"
-                  value={beneficiaryUnitId}
-                  onChange={e => setBeneficiaryUnitId(e.target.value)}
-                  required
-                >
-                  <option value="">— Seleccionar inmueble beneficiado —</option>
-                  {units.map(u => (
-                    <option key={u.id} value={u.id}>
-                      {unitDisplay(u)}
-                    </option>
-                  ))}
-                </Select>
+                <div className="max-w-md">
+                  <Select
+                    label="Inmueble beneficiado (Abono) *"
+                    value={beneficiaryUnitId}
+                    onChange={e => setBeneficiaryUnitId(e.target.value)}
+                    required
+                  >
+                    <option value="">— Seleccionar inmueble beneficiado —</option>
+                    {units.map(u => (
+                      <option key={u.id} value={u.id}>
+                        {unitDisplay(u)}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
 
                 {renderConceptRows(abonoRows, 'abono', beneficiaryUnitId, true)}
               </div>
@@ -1127,22 +1136,24 @@ export function NotesTab() {
                       Se carga/debita al inmueble afectado usando por defecto la cuenta del concepto.
                     </p>
                   </div>
-                  <span className="text-sm font-bold text-amber-800">{formatCOP(totalCargo)}</span>
+                  <span className="text-base font-bold text-amber-800">{formatCOP(totalCargo)}</span>
                 </div>
 
-                <Select
-                  label="Inmueble a debitar (Cargo) *"
-                  value={chargedUnitId}
-                  onChange={e => setChargedUnitId(e.target.value)}
-                  required
-                >
-                  <option value="">— Seleccionar inmueble debitado —</option>
-                  {units.map(u => (
-                    <option key={u.id} value={u.id}>
-                      {unitDisplay(u)}
-                    </option>
-                  ))}
-                </Select>
+                <div className="max-w-md">
+                  <Select
+                    label="Inmueble a debitar (Cargo) *"
+                    value={chargedUnitId}
+                    onChange={e => setChargedUnitId(e.target.value)}
+                    required
+                  >
+                    <option value="">— Seleccionar inmueble debitado —</option>
+                    {units.map(u => (
+                      <option key={u.id} value={u.id}>
+                        {unitDisplay(u)}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
 
                 {renderConceptRows(cargoRows, 'cargo', chargedUnitId, false)}
               </div>
