@@ -11,7 +11,13 @@ import {
   Trash2,
   XCircle,
 } from 'lucide-react';
-import { supabase, Due, Unit, BillingConcept } from '@/lib/supabase';
+import {
+  supabase,
+  Due,
+  Unit,
+  BillingConcept,
+  PaymentHierarchyConfig,
+} from '@/lib/supabase';
 import { formatCOP } from '@/lib/format';
 import { useOrg } from '@/contexts/OrganizationContext';
 import { Card } from '@/components/ui/Card';
@@ -19,7 +25,12 @@ import { Button } from '@/components/ui/Button';
 import { Input, Select, TextArea } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
-import { parseAmount, roundMoney } from '@/components/treasury/receiptAllocation';
+import {
+  buildDetailedDueItems,
+  DetailedDueItem,
+  parseAmount,
+  roundMoney,
+} from '@/components/treasury/receiptAllocation';
 
 type NoteType = 'NC' | 'ND' | 'NT';
 
@@ -29,11 +40,15 @@ interface AccountOption {
   name: string;
 }
 
-interface DueAllocationItem {
+interface ItemAllocationRow {
+  itemId: string;
   dueId: string;
+  conceptId: string;
   period: string;
   dueDate: string;
-  pendingBalance: number;
+  conceptCode: string;
+  conceptName: string;
+  balance: number;
   appliedAmount: string;
 }
 
@@ -44,7 +59,13 @@ interface ConceptRowForm {
   amount: string;
   counterpartAccountId: string;
   offsetAccountId: string;
-  dueAllocations: DueAllocationItem[];
+  itemAllocations: ItemAllocationRow[];
+}
+
+interface UnitPortfolioData {
+  dues: Due[];
+  invoicesMap: Record<string, any>;
+  detailedItems: DetailedDueItem[];
 }
 
 function todayISO(): string {
@@ -62,44 +83,47 @@ function makeRowKey(): string {
   return `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function sortDuesOldestFirst(dues: Due[]): Due[] {
-  return [...dues].sort((a, b) => {
+function sortOldestFirst(items: DetailedDueItem[]): DetailedDueItem[] {
+  return [...items].sort((a, b) => {
+    const dA = String(a.dueDate || '');
+    const dB = String(b.dueDate || '');
+    if (dA !== dB) return dA.localeCompare(dB);
     const pA = String(a.period || '');
     const pB = String(b.period || '');
     if (pA !== pB) return pA.localeCompare(pB);
-    const dA = String(a.due_date || '');
-    const dB = String(b.due_date || '');
-    return dA.localeCompare(dB);
+    return (a.priorityOrder ?? 999) - (b.priorityOrder ?? 999);
   });
 }
 
-function buildAllocationsForConcept(
-  dues: Due[],
+function buildAllocationsFromDetailedItems(
+  detailedItems: DetailedDueItem[],
   conceptId: string,
   totalAmountStr: string
-): DueAllocationItem[] {
+): ItemAllocationRow[] {
   if (!conceptId) return [];
 
-  const targetAmount = roundMoney(parseAmount(totalAmountStr || '0'));
-  const matchingDues = sortDuesOldestFirst(
-    dues.filter(
-      d =>
-        Number(d.balance || 0) > 0 &&
-        d.concept_id &&
-        String(d.concept_id) === String(conceptId)
+  const matching = sortOldestFirst(
+    detailedItems.filter(
+      it => Number(it.balance || 0) > 0 && String(it.conceptId) === String(conceptId)
     )
   );
 
-  let remaining = targetAmount;
-  return matchingDues.map(d => {
-    const bal = roundMoney(Number(d.balance || 0));
-    const apply = roundMoney(Math.min(bal, Math.max(remaining, 0)));
+  let remaining = roundMoney(Math.max(parseAmount(totalAmountStr || '0'), 0));
+
+  return matching.map(it => {
+    const bal = roundMoney(Number(it.balance || 0));
+    const apply = roundMoney(Math.min(remaining, bal));
     remaining = roundMoney(Math.max(remaining - apply, 0));
+
     return {
-      dueId: d.id,
-      period: d.period || '',
-      dueDate: d.due_date || '',
-      pendingBalance: bal,
+      itemId: it.id,
+      dueId: it.dueId,
+      conceptId: it.conceptId,
+      period: it.period || '',
+      dueDate: it.dueDate || '',
+      conceptCode: it.conceptCode,
+      conceptName: it.conceptName,
+      balance: bal,
       appliedAmount: apply > 0 ? String(apply) : '',
     };
   });
@@ -112,7 +136,8 @@ export function NotesTab() {
   const [loadingRef, setLoadingRef] = useState(true);
   const [refError, setRefError] = useState('');
   const [units, setUnits] = useState<Unit[]>([]);
-  const [concepts, setConcepts] = useState<any[]>([]);
+  const [concepts, setConcepts] = useState<BillingConcept[]>([]);
+  const [hierarchy, setHierarchy] = useState<PaymentHierarchyConfig[]>([]);
   const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [activePeriod, setActivePeriod] = useState<{
     start_date: string;
@@ -141,12 +166,12 @@ export function NotesTab() {
   const [chargedUnitId, setChargedUnitId] = useState<string>('');
   const [description, setDescription] = useState<string>('');
 
-  // Cuentas contables para anticipo (cuando no hay saldo pendiente o el valor supera el saldo)
+  // Cuentas contables para anticipo
   const [advanceAccountId, setAdvanceAccountId] = useState<string>('');
   const [advanceCounterpartAccountId, setAdvanceCounterpartAccountId] = useState<string>('');
 
-  // Saldos pendientes por unidad
-  const [unitDuesMap, setUnitDuesMap] = useState<Record<string, Due[]>>({});
+  // Cartera detallada por unidad
+  const [unitPortfolioMap, setUnitPortfolioMap] = useState<Record<string, UnitPortfolioData>>({});
 
   // Filas para NC / ND
   const [standardRows, setStandardRows] = useState<ConceptRowForm[]>([]);
@@ -172,7 +197,15 @@ export function NotesTab() {
     setLoadingNotes(true);
     setRefError('');
 
-    const [unitsRes, conceptsRes, accountsRes, periodRes, notesRes, linesRes] = await Promise.all([
+    const [
+      unitsRes,
+      conceptsRes,
+      hierarchyRes,
+      accountsRes,
+      periodRes,
+      notesRes,
+      linesRes,
+    ] = await Promise.all([
       supabase
         .from('units')
         .select('*')
@@ -186,6 +219,11 @@ export function NotesTab() {
         .eq('organization_id', activeOrg.id)
         .eq('is_active', true)
         .order('name', { ascending: true }),
+      supabase
+        .from('payment_hierarchy_configs')
+        .select('*, billing_concept:billing_concepts!concept_id(*)')
+        .eq('organization_id', activeOrg.id)
+        .order('priority_order', { ascending: true }),
       supabase
         .from('accounts')
         .select('id, code, name')
@@ -215,11 +253,13 @@ export function NotesTab() {
       return;
     }
 
-    const loadedConcepts = conceptsRes.data || [];
+    const loadedConcepts = (conceptsRes.data || []) as BillingConcept[];
+    const loadedHierarchy = (hierarchyRes.data || []) as PaymentHierarchyConfig[];
     const loadedAccounts = (accountsRes.data || []) as AccountOption[];
 
     setUnits((unitsRes.data || []) as Unit[]);
     setConcepts(loadedConcepts);
+    setHierarchy(loadedHierarchy);
     setAccounts(loadedAccounts);
     setActivePeriod(periodRes.data || null);
     setNotesList(notesRes.data || []);
@@ -246,20 +286,51 @@ export function NotesTab() {
 
   const ensureUnitPortfolioLoaded = useCallback(
     async (targetUnitId: string) => {
-      if (!activeOrg || !targetUnitId || unitDuesMap[targetUnitId]) return;
+      if (!activeOrg || !targetUnitId || unitPortfolioMap[targetUnitId]) return;
 
-      const { data } = await supabase
-        .from('dues')
-        .select('*')
-        .eq('organization_id', activeOrg.id)
-        .eq('unit_id', targetUnitId)
-        .gt('balance', 0)
-        .order('due_date', { ascending: true });
+      const [duesRes, invRes] = await Promise.all([
+        supabase
+          .from('dues')
+          .select('*')
+          .eq('organization_id', activeOrg.id)
+          .eq('unit_id', targetUnitId)
+          .gt('balance', 0)
+          .order('due_date', { ascending: true }),
+        supabase
+          .from('invoices')
+          .select('*')
+          .eq('organization_id', activeOrg.id)
+          .eq('unit_id', targetUnitId),
+      ]);
 
-      const sorted = sortDuesOldestFirst((data || []) as Due[]);
-      setUnitDuesMap(prev => ({ ...prev, [targetUnitId]: sorted }));
+      const duesArr = (duesRes.data || []) as Due[];
+      const invMap: Record<string, any> = {};
+      (invRes.data || []).forEach((inv: any) => {
+        invMap[`${inv.unit_id}_${inv.period}`] = inv;
+        invMap[inv.period] = inv;
+        invMap[inv.id] = inv;
+      });
+
+      const detailedItems = buildDetailedDueItems(
+        duesArr,
+        hierarchy,
+        concepts,
+        invMap,
+        [],
+        applicationDate || today,
+        0
+      );
+
+      setUnitPortfolioMap(prev => ({
+        ...prev,
+        [targetUnitId]: {
+          dues: duesArr,
+          invoicesMap: invMap,
+          detailedItems,
+        },
+      }));
     },
-    [activeOrg, unitDuesMap]
+    [activeOrg, unitPortfolioMap, hierarchy, concepts, applicationDate, today]
   );
 
   useEffect(() => {
@@ -271,31 +342,31 @@ export function NotesTab() {
     }
   }, [noteType, unitId, beneficiaryUnitId, chargedUnitId, ensureUnitPortfolioLoaded]);
 
+  // Recalcula ítems discriminados cuando se carga la cartera del inmueble en NC
   useEffect(() => {
-    if (noteType === 'NC' && unitId && unitDuesMap[unitId]) {
+    if (noteType === 'NC' && unitId && unitPortfolioMap[unitId]) {
+      const items = unitPortfolioMap[unitId].detailedItems;
       setStandardRows(prev =>
         prev.map(r => ({
           ...r,
-          dueAllocations: buildAllocationsForConcept(unitDuesMap[unitId], r.conceptId, r.amount),
+          itemAllocations: buildAllocationsFromDetailedItems(items, r.conceptId, r.amount),
         }))
       );
     }
-  }, [noteType, unitId, unitDuesMap]);
+  }, [noteType, unitId, unitPortfolioMap]);
 
+  // Recalcula ítems discriminados cuando se carga la cartera del inmueble beneficiado en NT (Abono)
   useEffect(() => {
-    if (noteType === 'NT' && beneficiaryUnitId && unitDuesMap[beneficiaryUnitId]) {
+    if (noteType === 'NT' && beneficiaryUnitId && unitPortfolioMap[beneficiaryUnitId]) {
+      const items = unitPortfolioMap[beneficiaryUnitId].detailedItems;
       setAbonoRows(prev =>
         prev.map(r => ({
           ...r,
-          dueAllocations: buildAllocationsForConcept(
-            unitDuesMap[beneficiaryUnitId],
-            r.conceptId,
-            r.amount
-          ),
+          itemAllocations: buildAllocationsFromDetailedItems(items, r.conceptId, r.amount),
         }))
       );
     }
-  }, [noteType, beneficiaryUnitId, unitDuesMap]);
+  }, [noteType, beneficiaryUnitId, unitPortfolioMap]);
 
   function createEmptyRow(
     section: 'principal' | 'abono' | 'cargo',
@@ -303,15 +374,15 @@ export function NotesTab() {
   ): ConceptRowForm {
     const firstConcept = concepts[0];
     const counterpart =
-      firstConcept?.counterpart_account_id ||
-      firstConcept?.income_account_id ||
+      (firstConcept as any)?.counterpart_account_id ||
+      (firstConcept as any)?.income_account_id ||
       defaultOffsetAccountId;
-    const offset = firstConcept?.income_account_id || defaultOffsetAccountId;
+    const offset = (firstConcept as any)?.income_account_id || defaultOffsetAccountId;
 
-    const duesForUnit = targetUnitId ? unitDuesMap[targetUnitId] || [] : [];
-    const dueAllocations =
+    const items = targetUnitId ? unitPortfolioMap[targetUnitId]?.detailedItems || [] : [];
+    const itemAllocations =
       section === 'principal' || section === 'abono'
-        ? buildAllocationsForConcept(duesForUnit, firstConcept?.id || '', '')
+        ? buildAllocationsFromDetailedItems(items, firstConcept?.id || '', '')
         : [];
 
     return {
@@ -321,7 +392,7 @@ export function NotesTab() {
       amount: '',
       counterpartAccountId: counterpart,
       offsetAccountId: offset,
-      dueAllocations,
+      itemAllocations,
     };
   }
 
@@ -391,7 +462,7 @@ export function NotesTab() {
 
     const targetUnit =
       section === 'abono' ? beneficiaryUnitId : section === 'cargo' ? chargedUnitId : unitId;
-    const duesForUnit = targetUnit ? unitDuesMap[targetUnit] || [] : [];
+    const items = targetUnit ? unitPortfolioMap[targetUnit]?.detailedItems || [] : [];
 
     setter(prev =>
       prev.map(r => {
@@ -399,7 +470,7 @@ export function NotesTab() {
         const updated = { ...r, [field]: value };
 
         if (field === 'conceptId') {
-          const cObj = concepts.find(c => String(c.id) === String(value));
+          const cObj: any = concepts.find(c => String(c.id) === String(value));
           if (cObj) {
             updated.counterpartAccountId =
               cObj.counterpart_account_id ||
@@ -410,8 +481,8 @@ export function NotesTab() {
             }
           }
           if (section === 'principal' || section === 'abono') {
-            updated.dueAllocations = buildAllocationsForConcept(
-              duesForUnit,
+            updated.itemAllocations = buildAllocationsFromDetailedItems(
+              items,
               updated.conceptId,
               updated.amount
             );
@@ -420,8 +491,8 @@ export function NotesTab() {
 
         if (field === 'amount') {
           if (section === 'principal' || section === 'abono') {
-            updated.dueAllocations = buildAllocationsForConcept(
-              duesForUnit,
+            updated.itemAllocations = buildAllocationsFromDetailedItems(
+              items,
               updated.conceptId,
               value
             );
@@ -435,10 +506,10 @@ export function NotesTab() {
     setSuccessMsg('');
   }
 
-  function updateDueAllocationAmount(
+  function updateItemAllocationAmount(
     section: 'principal' | 'abono',
     rowKey: string,
-    dueId: string,
+    itemId: string,
     newAppliedStr: string
   ) {
     const setter = section === 'principal' ? setStandardRows : setAbonoRows;
@@ -446,18 +517,21 @@ export function NotesTab() {
     setter(prev =>
       prev.map(r => {
         if (r.rowKey !== rowKey) return r;
-        const nextAllocs = r.dueAllocations.map(a => {
-          if (a.dueId !== dueId) return a;
+        const nextAllocs = r.itemAllocations.map(a => {
+          if (a.itemId !== itemId) return a;
           const numeric = Math.max(0, parseAmount(newAppliedStr || '0'));
-          const capped = Math.min(numeric, a.pendingBalance);
-          return { ...a, appliedAmount: newAppliedStr === '' ? '' : String(roundMoney(capped)) };
+          const capped = Math.min(numeric, a.balance);
+          return {
+            ...a,
+            appliedAmount: newAppliedStr === '' ? '' : String(roundMoney(capped)),
+          };
         });
         const sumApplied = roundMoney(
           nextAllocs.reduce((s, a) => s + parseAmount(a.appliedAmount || '0'), 0)
         );
         return {
           ...r,
-          dueAllocations: nextAllocs,
+          itemAllocations: nextAllocs,
           amount: sumApplied > 0 ? String(sumApplied) : r.amount,
         };
       })
@@ -466,11 +540,12 @@ export function NotesTab() {
     setSuccessMsg('');
   }
 
+  // Totales pendientes reales discriminados por concepto (igual que en Recibos)
   const ncPendingTotal = useMemo(() => {
     if (noteType !== 'NC' || !unitId) return 0;
-    const duesArr = unitDuesMap[unitId] || [];
-    return roundMoney(duesArr.reduce((acc, d) => acc + Number(d.balance || 0), 0));
-  }, [noteType, unitId, unitDuesMap]);
+    const items = unitPortfolioMap[unitId]?.detailedItems || [];
+    return roundMoney(items.reduce((acc, it) => acc + Number(it.balance || 0), 0));
+  }, [noteType, unitId, unitPortfolioMap]);
 
   const ncInputTotal = useMemo(() => {
     if (noteType !== 'NC') return 0;
@@ -486,9 +561,9 @@ export function NotesTab() {
 
   const beneficiaryTotalPendingBalance = useMemo(() => {
     if (!beneficiaryUnitId) return 0;
-    const duesArr = unitDuesMap[beneficiaryUnitId] || [];
-    return roundMoney(duesArr.reduce((acc, d) => acc + Number(d.balance || 0), 0));
-  }, [beneficiaryUnitId, unitDuesMap]);
+    const items = unitPortfolioMap[beneficiaryUnitId]?.detailedItems || [];
+    return roundMoney(items.reduce((acc, it) => acc + Number(it.balance || 0), 0));
+  }, [beneficiaryUnitId, unitPortfolioMap]);
 
   const rawAbonoInputTotal = useMemo(() => {
     return roundMoney(abonoRows.reduce((s, r) => s + parseAmount(r.amount || '0'), 0));
@@ -536,13 +611,17 @@ export function NotesTab() {
         amount: String(Number(l.amount || 0) + Number(l.advance_amount || 0)),
         counterpartAccountId: l.counterpart_account_id || '',
         offsetAccountId: l.offset_account_id || '',
-        dueAllocations: l.due_id
+        itemAllocations: l.due_id
           ? [
               {
+                itemId: `${l.due_id}-${l.concept_id}`,
                 dueId: l.due_id,
+                conceptId: l.concept_id,
                 period: l.period || '',
                 dueDate: l.due_date || note.application_date,
-                pendingBalance: Number(l.amount || 0),
+                conceptCode: '',
+                conceptName: '',
+                balance: Number(l.amount || 0),
                 appliedAmount: String(l.amount || 0),
               },
             ]
@@ -558,7 +637,7 @@ export function NotesTab() {
           amount: String(l.amount ?? ''),
           counterpartAccountId: l.counterpart_account_id || '',
           offsetAccountId: l.offset_account_id || '',
-          dueAllocations: [],
+          itemAllocations: [],
         }));
 
       setAbonoRows(ab.length > 0 ? ab : [createEmptyRow('abono', note.beneficiary_unit_id)]);
@@ -572,13 +651,17 @@ export function NotesTab() {
         amount: String(Number(l.amount || 0) + Number(l.advance_amount || 0)),
         counterpartAccountId: l.counterpart_account_id || '',
         offsetAccountId: l.offset_account_id || '',
-        dueAllocations: l.due_id
+        itemAllocations: l.due_id
           ? [
               {
+                itemId: `${l.due_id}-${l.concept_id}`,
                 dueId: l.due_id,
+                conceptId: l.concept_id,
                 period: l.period || '',
                 dueDate: l.due_date || note.application_date,
-                pendingBalance: Number(l.amount || 0),
+                conceptCode: '',
+                conceptName: '',
+                balance: Number(l.amount || 0),
                 appliedAmount: String(l.amount || 0),
               },
             ]
@@ -615,7 +698,7 @@ export function NotesTab() {
     }
 
     setSuccessMsg(`Nota ${note.note_number} anulada y reversada en cartera y contabilidad.`);
-    setUnitDuesMap({});
+    setUnitPortfolioMap({});
     await loadReferenceAndNotes();
   }
 
@@ -644,7 +727,7 @@ export function NotesTab() {
     }
 
     setSuccessMsg(`Nota ${note.note_number} eliminada correctamente.`);
-    setUnitDuesMap({});
+    setUnitPortfolioMap({});
     await loadReferenceAndNotes();
   }
 
@@ -661,7 +744,7 @@ export function NotesTab() {
       const totalRowAmt = roundMoney(parseAmount(r.amount || '0'));
       if (totalRowAmt <= 0) continue;
 
-      const activeAllocs = (r.dueAllocations || []).filter(
+      const activeAllocs = (r.itemAllocations || []).filter(
         a => roundMoney(parseAmount(a.appliedAmount || '0')) > 0
       );
 
@@ -752,7 +835,9 @@ export function NotesTab() {
     }
 
     if (!activePeriod) {
-      return setFormError('No hay un período de trabajo activo configurado en el Calendario de Recaudo.');
+      return setFormError(
+        'No hay un período de trabajo activo configurado en el Calendario de Recaudo.'
+      );
     }
 
     if (applicationDate < activePeriod.start_date || applicationDate > activePeriod.end_date) {
@@ -780,7 +865,9 @@ export function NotesTab() {
         return setFormError('Seleccione el inmueble a debitar en la sección Cargo.');
       }
       if (calculatedAdvanceAmount > 0 && (!advanceAccountId || !advanceCounterpartAccountId)) {
-        return setFormError('Seleccione la cuenta contable para el anticipo generado en el abono.');
+        return setFormError(
+          'Seleccione la cuenta contable para el anticipo generado en el abono.'
+        );
       }
 
       resolvedBeneficiaryId = beneficiaryUnitId;
@@ -796,7 +883,9 @@ export function NotesTab() {
       const builtCargo = buildPayloadLinesForRows(cargoRows, 'cargo', chargedUnitId, 0);
 
       if (builtAbono.length === 0 || builtCargo.length === 0) {
-        return setFormError('En Traslado de Cartera (NT) debe ingresar valores en Abono y en Cargo.');
+        return setFormError(
+          'En Traslado de Cartera (NT) debe ingresar valores en Abono y en Cargo.'
+        );
       }
 
       const sumAbono = roundMoney(
@@ -817,8 +906,14 @@ export function NotesTab() {
       if (!unitId) {
         return setFormError('Seleccione el inmueble al cual aplica la nota.');
       }
-      if (noteType === 'NC' && ncAdvanceAmount > 0 && (!advanceAccountId || !advanceCounterpartAccountId)) {
-        return setFormError('Seleccione la cuenta contable para el anticipo generado en la Nota Crédito.');
+      if (
+        noteType === 'NC' &&
+        ncAdvanceAmount > 0 &&
+        (!advanceAccountId || !advanceCounterpartAccountId)
+      ) {
+        return setFormError(
+          'Seleccione la cuenta contable para el anticipo generado en la Nota Crédito.'
+        );
       }
 
       resolvedUnitId = unitId;
@@ -860,10 +955,14 @@ export function NotesTab() {
         });
 
         if (error || (data && (data as any).success === false)) {
-          throw new Error(error?.message || (data as any)?.message || 'No se pudo actualizar la nota.');
+          throw new Error(
+            error?.message || (data as any)?.message || 'No se pudo actualizar la nota.'
+          );
         }
 
-        setSuccessMsg(`Nota ${(data as any)?.note_number || editingNoteNumber} actualizada correctamente.`);
+        setSuccessMsg(
+          `Nota ${(data as any)?.note_number || editingNoteNumber} actualizada correctamente.`
+        );
       } else {
         const { data, error } = await supabase.rpc('save_treasury_note', {
           p_organization_id: activeOrg.id,
@@ -878,13 +977,17 @@ export function NotesTab() {
         });
 
         if (error || !(data as any)?.note_number) {
-          throw new Error(error?.message || (data as any)?.message || 'No se pudo registrar la nota.');
+          throw new Error(
+            error?.message || (data as any)?.message || 'No se pudo registrar la nota.'
+          );
         }
 
-        setSuccessMsg(`Nota ${(data as any).note_number} registrada y contabilizada correctamente.`);
+        setSuccessMsg(
+          `Nota ${(data as any).note_number} registrada y contabilizada correctamente.`
+        );
       }
 
-      setUnitDuesMap({});
+      setUnitPortfolioMap({});
       resetForm(noteType);
       handleChangeNoteType(noteType);
       await loadReferenceAndNotes();
@@ -921,9 +1024,12 @@ export function NotesTab() {
       <div className="space-y-3">
         {rows.map(row => {
           const counterpartAcc = accounts.find(a => a.id === row.counterpartAccountId);
-          const hasAllocations = showDueBreakdown && row.dueAllocations.length > 0;
+          const hasAllocations = showDueBreakdown && row.itemAllocations.length > 0;
           const totalAppliedInTable = roundMoney(
-            row.dueAllocations.reduce((s, a) => s + parseAmount(a.appliedAmount || '0'), 0)
+            row.itemAllocations.reduce((s, a) => s + parseAmount(a.appliedAmount || '0'), 0)
+          );
+          const totalBalanceInTable = roundMoney(
+            row.itemAllocations.reduce((s, a) => s + Number(a.balance || 0), 0)
           );
 
           return (
@@ -1017,11 +1123,11 @@ export function NotesTab() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
-                        {row.dueAllocations.map(alloc => {
+                        {row.itemAllocations.map(alloc => {
                           const appliedNum = roundMoney(parseAmount(alloc.appliedAmount || '0'));
-                          const newBal = roundMoney(Math.max(alloc.pendingBalance - appliedNum, 0));
+                          const newBal = roundMoney(Math.max(alloc.balance - appliedNum, 0));
                           return (
-                            <tr key={alloc.dueId}>
+                            <tr key={alloc.itemId}>
                               <td className="px-3 py-1.5 font-mono text-gray-800">
                                 {alloc.period || '—'}
                               </td>
@@ -1029,20 +1135,20 @@ export function NotesTab() {
                                 {alloc.dueDate || '—'}
                               </td>
                               <td className="px-3 py-1.5 text-right font-mono text-gray-800">
-                                {formatCOP(alloc.pendingBalance)}
+                                {formatCOP(alloc.balance)}
                               </td>
                               <td className="px-3 py-1.5 text-right">
                                 <input
                                   type="number"
                                   min={0}
-                                  max={alloc.pendingBalance}
+                                  max={alloc.balance}
                                   step="0.01"
                                   value={alloc.appliedAmount}
                                   onChange={e =>
-                                    updateDueAllocationAmount(
+                                    updateItemAllocationAmount(
                                       section === 'abono' ? 'abono' : 'principal',
                                       row.rowKey,
-                                      alloc.dueId,
+                                      alloc.itemId,
                                       e.target.value
                                     )
                                   }
@@ -1057,21 +1163,18 @@ export function NotesTab() {
                           );
                         })}
                         <tr className="bg-gray-50/70 font-semibold text-gray-800">
-                          <td colSpan={3} className="px-3 py-1.5 text-right">
-                            Total aplicado al concepto:
+                          <td colSpan={2} className="px-3 py-1.5 text-right">
+                            Totales del concepto:
+                          </td>
+                          <td className="px-3 py-1.5 text-right font-mono text-gray-900">
+                            {formatCOP(totalBalanceInTable)}
                           </td>
                           <td className="px-3 py-1.5 text-right font-mono text-blue-700">
                             {formatCOP(totalAppliedInTable)}
                           </td>
                           <td className="px-3 py-1.5 text-right font-mono text-gray-800">
                             {formatCOP(
-                              roundMoney(
-                                Math.max(
-                                  row.dueAllocations.reduce((s, a) => s + a.pendingBalance, 0) -
-                                    totalAppliedInTable,
-                                  0
-                                )
-                              )
+                              roundMoney(Math.max(totalBalanceInTable - totalAppliedInTable, 0))
                             )}
                           </td>
                         </tr>
