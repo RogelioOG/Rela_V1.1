@@ -15,6 +15,7 @@ import {
   Wallet,
   Home,
   FileText,
+  FileSpreadsheet,
   Landmark,
   BookOpen,
   BarChart3,
@@ -44,7 +45,7 @@ interface NavItem {
 
 export default function Layout({ children }: { children: ReactNode }) {
   const { profile, signOut } = useAuth();
-  const { activeOrg, orgs, setActiveOrg, isOrgAdmin, isOrgCollaborator } = useOrg();
+  const { activeOrg, orgs, setActiveOrg, isOrgAdmin } = useOrg();
   const navigate = useNavigate();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -101,6 +102,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           { to: '/facturacion', label: 'Proceso de Facturación', icon: FileText },
           { to: '/acuerdos-pago', label: 'Acuerdos de Pago', icon: Handshake },
           { to: '/recaudos', label: 'Recaudos', icon: Landmark },
+          { to: '/reportes-cartera', label: 'Reportes de Cartera', icon: FileSpreadsheet },
         ],
       });
     }
