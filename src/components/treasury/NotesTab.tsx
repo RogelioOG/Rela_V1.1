@@ -78,12 +78,15 @@ function buildAllocationsForConcept(
   conceptId: string,
   totalAmountStr: string
 ): DueAllocationItem[] {
+  if (!conceptId) return [];
+
   const targetAmount = roundMoney(parseAmount(totalAmountStr || '0'));
   const matchingDues = sortDuesOldestFirst(
     dues.filter(
       d =>
         Number(d.balance || 0) > 0 &&
-        (!conceptId || !d.concept_id || String(d.concept_id) === String(conceptId))
+        d.concept_id &&
+        String(d.concept_id) === String(conceptId)
     )
   );
 
@@ -268,7 +271,6 @@ export function NotesTab() {
     }
   }, [noteType, unitId, beneficiaryUnitId, chargedUnitId, ensureUnitPortfolioLoaded]);
 
-  // Recalcula discriminación de cuotas cuando cambian las cuotas cargadas del inmueble
   useEffect(() => {
     if (noteType === 'NC' && unitId && unitDuesMap[unitId]) {
       setStandardRows(prev =>
@@ -464,7 +466,6 @@ export function NotesTab() {
     setSuccessMsg('');
   }
 
-  // Saldo pendiente total del inmueble en NC o en Abono de NT
   const ncPendingTotal = useMemo(() => {
     if (noteType !== 'NC' || !unitId) return 0;
     const duesArr = unitDuesMap[unitId] || [];
@@ -921,6 +922,9 @@ export function NotesTab() {
         {rows.map(row => {
           const counterpartAcc = accounts.find(a => a.id === row.counterpartAccountId);
           const hasAllocations = showDueBreakdown && row.dueAllocations.length > 0;
+          const totalAppliedInTable = roundMoney(
+            row.dueAllocations.reduce((s, a) => s + parseAmount(a.appliedAmount || '0'), 0)
+          );
 
           return (
             <div
@@ -928,11 +932,7 @@ export function NotesTab() {
               className="p-4 rounded-lg border border-gray-200 bg-gray-50/70 space-y-3"
             >
               <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-start">
-                <div
-                  className={
-                    showOffsetAccount ? 'md:col-span-5' : 'md:col-span-7'
-                  }
-                >
+                <div className={showOffsetAccount ? 'md:col-span-5' : 'md:col-span-7'}>
                   <Select
                     label="Concepto *"
                     value={row.conceptId}
@@ -1013,41 +1013,68 @@ export function NotesTab() {
                           <th className="px-3 py-1.5">Vencimiento</th>
                           <th className="px-3 py-1.5 text-right">Saldo pendiente</th>
                           <th className="px-3 py-1.5 text-right w-40">Valor a aplicar</th>
+                          <th className="px-3 py-1.5 text-right">Nuevo saldo</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
-                        {row.dueAllocations.map(alloc => (
-                          <tr key={alloc.dueId}>
-                            <td className="px-3 py-1.5 font-mono text-gray-800">
-                              {alloc.period || '—'}
-                            </td>
-                            <td className="px-3 py-1.5 text-gray-600">
-                              {alloc.dueDate || '—'}
-                            </td>
-                            <td className="px-3 py-1.5 text-right font-mono text-gray-800">
-                              {formatCOP(alloc.pendingBalance)}
-                            </td>
-                            <td className="px-3 py-1.5 text-right">
-                              <input
-                                type="number"
-                                min={0}
-                                max={alloc.pendingBalance}
-                                step="0.01"
-                                value={alloc.appliedAmount}
-                                onChange={e =>
-                                  updateDueAllocationAmount(
-                                    section === 'abono' ? 'abono' : 'principal',
-                                    row.rowKey,
-                                    alloc.dueId,
-                                    e.target.value
-                                  )
-                                }
-                                placeholder="0"
-                                className="w-32 rounded border border-gray-300 bg-white px-2 py-1 text-right font-mono text-xs text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                              />
-                            </td>
-                          </tr>
-                        ))}
+                        {row.dueAllocations.map(alloc => {
+                          const appliedNum = roundMoney(parseAmount(alloc.appliedAmount || '0'));
+                          const newBal = roundMoney(Math.max(alloc.pendingBalance - appliedNum, 0));
+                          return (
+                            <tr key={alloc.dueId}>
+                              <td className="px-3 py-1.5 font-mono text-gray-800">
+                                {alloc.period || '—'}
+                              </td>
+                              <td className="px-3 py-1.5 text-gray-600">
+                                {alloc.dueDate || '—'}
+                              </td>
+                              <td className="px-3 py-1.5 text-right font-mono text-gray-800">
+                                {formatCOP(alloc.pendingBalance)}
+                              </td>
+                              <td className="px-3 py-1.5 text-right">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={alloc.pendingBalance}
+                                  step="0.01"
+                                  value={alloc.appliedAmount}
+                                  onChange={e =>
+                                    updateDueAllocationAmount(
+                                      section === 'abono' ? 'abono' : 'principal',
+                                      row.rowKey,
+                                      alloc.dueId,
+                                      e.target.value
+                                    )
+                                  }
+                                  placeholder="0"
+                                  className="w-32 rounded border border-gray-300 bg-white px-2 py-1 text-right font-mono text-xs text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                />
+                              </td>
+                              <td className="px-3 py-1.5 text-right font-mono text-gray-700">
+                                {formatCOP(newBal)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        <tr className="bg-gray-50/70 font-semibold text-gray-800">
+                          <td colSpan={3} className="px-3 py-1.5 text-right">
+                            Total aplicado al concepto:
+                          </td>
+                          <td className="px-3 py-1.5 text-right font-mono text-blue-700">
+                            {formatCOP(totalAppliedInTable)}
+                          </td>
+                          <td className="px-3 py-1.5 text-right font-mono text-gray-800">
+                            {formatCOP(
+                              roundMoney(
+                                Math.max(
+                                  row.dueAllocations.reduce((s, a) => s + a.pendingBalance, 0) -
+                                    totalAppliedInTable,
+                                  0
+                                )
+                              )
+                            )}
+                          </td>
+                        </tr>
                       </tbody>
                     </table>
                   </div>
