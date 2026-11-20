@@ -29,20 +29,22 @@ interface AccountOption {
   name: string;
 }
 
-interface ConceptRowForm {
-  rowKey: string;
-  section: 'principal' | 'abono' | 'cargo';
-  conceptId: string;
+interface DueAllocationItem {
   dueId: string;
   period: string;
   dueDate: string;
   pendingBalance: number;
+  appliedAmount: string;
+}
+
+interface ConceptRowForm {
+  rowKey: string;
+  section: 'principal' | 'abono' | 'cargo';
+  conceptId: string;
   amount: string;
-  discountAmount: string;
-  advanceAmount: string;
   counterpartAccountId: string;
   offsetAccountId: string;
-  lineNotes: string;
+  dueAllocations: DueAllocationItem[];
 }
 
 function todayISO(): string {
@@ -58,6 +60,46 @@ function unitDisplay(unit: any): string {
 
 function makeRowKey(): string {
   return `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function sortDuesOldestFirst(dues: Due[]): Due[] {
+  return [...dues].sort((a, b) => {
+    const pA = String(a.period || '');
+    const pB = String(b.period || '');
+    if (pA !== pB) return pA.localeCompare(pB);
+    const dA = String(a.due_date || '');
+    const dB = String(b.due_date || '');
+    return dA.localeCompare(dB);
+  });
+}
+
+function buildAllocationsForConcept(
+  dues: Due[],
+  conceptId: string,
+  totalAmountStr: string
+): DueAllocationItem[] {
+  const targetAmount = roundMoney(parseAmount(totalAmountStr || '0'));
+  const matchingDues = sortDuesOldestFirst(
+    dues.filter(
+      d =>
+        Number(d.balance || 0) > 0 &&
+        (!conceptId || !d.concept_id || String(d.concept_id) === String(conceptId))
+    )
+  );
+
+  let remaining = targetAmount;
+  return matchingDues.map(d => {
+    const bal = roundMoney(Number(d.balance || 0));
+    const apply = roundMoney(Math.min(bal, Math.max(remaining, 0)));
+    remaining = roundMoney(Math.max(remaining - apply, 0));
+    return {
+      dueId: d.id,
+      period: d.period || '',
+      dueDate: d.due_date || '',
+      pendingBalance: bal,
+      appliedAmount: apply > 0 ? String(apply) : '',
+    };
+  });
 }
 
 export function NotesTab() {
@@ -96,7 +138,7 @@ export function NotesTab() {
   const [chargedUnitId, setChargedUnitId] = useState<string>('');
   const [description, setDescription] = useState<string>('');
 
-  // Cuenta contable para anticipo en Traslado de Cartera (NT - Abono)
+  // Cuentas contables para anticipo (cuando no hay saldo pendiente o el valor supera el saldo)
   const [advanceAccountId, setAdvanceAccountId] = useState<string>('');
   const [advanceCounterpartAccountId, setAdvanceCounterpartAccountId] = useState<string>('');
 
@@ -211,7 +253,8 @@ export function NotesTab() {
         .gt('balance', 0)
         .order('due_date', { ascending: true });
 
-      setUnitDuesMap(prev => ({ ...prev, [targetUnitId]: (data || []) as Due[] }));
+      const sorted = sortDuesOldestFirst((data || []) as Due[]);
+      setUnitDuesMap(prev => ({ ...prev, [targetUnitId]: sorted }));
     },
     [activeOrg, unitDuesMap]
   );
@@ -225,48 +268,58 @@ export function NotesTab() {
     }
   }, [noteType, unitId, beneficiaryUnitId, chargedUnitId, ensureUnitPortfolioLoaded]);
 
+  // Recalcula discriminación de cuotas cuando cambian las cuotas cargadas del inmueble
+  useEffect(() => {
+    if (noteType === 'NC' && unitId && unitDuesMap[unitId]) {
+      setStandardRows(prev =>
+        prev.map(r => ({
+          ...r,
+          dueAllocations: buildAllocationsForConcept(unitDuesMap[unitId], r.conceptId, r.amount),
+        }))
+      );
+    }
+  }, [noteType, unitId, unitDuesMap]);
+
+  useEffect(() => {
+    if (noteType === 'NT' && beneficiaryUnitId && unitDuesMap[beneficiaryUnitId]) {
+      setAbonoRows(prev =>
+        prev.map(r => ({
+          ...r,
+          dueAllocations: buildAllocationsForConcept(
+            unitDuesMap[beneficiaryUnitId],
+            r.conceptId,
+            r.amount
+          ),
+        }))
+      );
+    }
+  }, [noteType, beneficiaryUnitId, unitDuesMap]);
+
   function createEmptyRow(
     section: 'principal' | 'abono' | 'cargo',
     targetUnitId?: string
   ): ConceptRowForm {
     const firstConcept = concepts[0];
-    const defaultPeriod =
-      activePeriod?.start_date?.slice(0, 7) || applicationDate.slice(0, 7) || today.slice(0, 7);
-
-    let pendingBalance = 0;
-    let matchedDueId = '';
-    let matchedPeriod = defaultPeriod;
-    let matchedDueDate = applicationDate || today;
-
-    if (targetUnitId && unitDuesMap[targetUnitId]?.length) {
-      const firstDue = unitDuesMap[targetUnitId][0];
-      matchedDueId = firstDue.id;
-      matchedPeriod = firstDue.period || defaultPeriod;
-      matchedDueDate = firstDue.due_date || applicationDate || today;
-      pendingBalance = roundMoney(Number(firstDue.balance || 0));
-    }
-
     const counterpart =
       firstConcept?.counterpart_account_id ||
       firstConcept?.income_account_id ||
       defaultOffsetAccountId;
-
     const offset = firstConcept?.income_account_id || defaultOffsetAccountId;
+
+    const duesForUnit = targetUnitId ? unitDuesMap[targetUnitId] || [] : [];
+    const dueAllocations =
+      section === 'principal' || section === 'abono'
+        ? buildAllocationsForConcept(duesForUnit, firstConcept?.id || '', '')
+        : [];
 
     return {
       rowKey: makeRowKey(),
       section,
       conceptId: firstConcept?.id || '',
-      dueId: matchedDueId,
-      period: matchedPeriod,
-      dueDate: matchedDueDate,
-      pendingBalance,
       amount: '',
-      discountAmount: '0',
-      advanceAmount: '0',
       counterpartAccountId: counterpart,
       offsetAccountId: offset,
-      lineNotes: '',
+      dueAllocations,
     };
   }
 
@@ -324,8 +377,8 @@ export function NotesTab() {
   function updateRowField(
     section: 'principal' | 'abono' | 'cargo',
     rowKey: string,
-    field: keyof ConceptRowForm,
-    value: any
+    field: 'conceptId' | 'amount' | 'counterpartAccountId' | 'offsetAccountId',
+    value: string
   ) {
     const setter =
       section === 'principal'
@@ -333,6 +386,10 @@ export function NotesTab() {
         : section === 'abono'
         ? setAbonoRows
         : setCargoRows;
+
+    const targetUnit =
+      section === 'abono' ? beneficiaryUnitId : section === 'cargo' ? chargedUnitId : unitId;
+    const duesForUnit = targetUnit ? unitDuesMap[targetUnit] || [] : [];
 
     setter(prev =>
       prev.map(r => {
@@ -350,17 +407,22 @@ export function NotesTab() {
               updated.offsetAccountId = cObj.income_account_id;
             }
           }
+          if (section === 'principal' || section === 'abono') {
+            updated.dueAllocations = buildAllocationsForConcept(
+              duesForUnit,
+              updated.conceptId,
+              updated.amount
+            );
+          }
         }
 
-        if (field === 'dueId') {
-          const targetUnit =
-            section === 'abono' ? beneficiaryUnitId : section === 'cargo' ? chargedUnitId : unitId;
-          const dueList = unitDuesMap[targetUnit] || [];
-          const foundDue = dueList.find(d => String(d.id) === String(value));
-          if (foundDue) {
-            updated.period = foundDue.period;
-            updated.dueDate = foundDue.due_date;
-            updated.pendingBalance = roundMoney(Number(foundDue.balance || 0));
+        if (field === 'amount') {
+          if (section === 'principal' || section === 'abono') {
+            updated.dueAllocations = buildAllocationsForConcept(
+              duesForUnit,
+              updated.conceptId,
+              value
+            );
           }
         }
 
@@ -370,6 +432,56 @@ export function NotesTab() {
     setFormError('');
     setSuccessMsg('');
   }
+
+  function updateDueAllocationAmount(
+    section: 'principal' | 'abono',
+    rowKey: string,
+    dueId: string,
+    newAppliedStr: string
+  ) {
+    const setter = section === 'principal' ? setStandardRows : setAbonoRows;
+
+    setter(prev =>
+      prev.map(r => {
+        if (r.rowKey !== rowKey) return r;
+        const nextAllocs = r.dueAllocations.map(a => {
+          if (a.dueId !== dueId) return a;
+          const numeric = Math.max(0, parseAmount(newAppliedStr || '0'));
+          const capped = Math.min(numeric, a.pendingBalance);
+          return { ...a, appliedAmount: newAppliedStr === '' ? '' : String(roundMoney(capped)) };
+        });
+        const sumApplied = roundMoney(
+          nextAllocs.reduce((s, a) => s + parseAmount(a.appliedAmount || '0'), 0)
+        );
+        return {
+          ...r,
+          dueAllocations: nextAllocs,
+          amount: sumApplied > 0 ? String(sumApplied) : r.amount,
+        };
+      })
+    );
+    setFormError('');
+    setSuccessMsg('');
+  }
+
+  // Saldo pendiente total del inmueble en NC o en Abono de NT
+  const ncPendingTotal = useMemo(() => {
+    if (noteType !== 'NC' || !unitId) return 0;
+    const duesArr = unitDuesMap[unitId] || [];
+    return roundMoney(duesArr.reduce((acc, d) => acc + Number(d.balance || 0), 0));
+  }, [noteType, unitId, unitDuesMap]);
+
+  const ncInputTotal = useMemo(() => {
+    if (noteType !== 'NC') return 0;
+    return roundMoney(standardRows.reduce((s, r) => s + parseAmount(r.amount || '0'), 0));
+  }, [noteType, standardRows]);
+
+  const ncAdvanceAmount = useMemo(() => {
+    if (noteType !== 'NC' || !unitId || ncInputTotal <= 0) return 0;
+    if (ncPendingTotal === 0) return ncInputTotal;
+    if (ncInputTotal > ncPendingTotal) return roundMoney(ncInputTotal - ncPendingTotal);
+    return 0;
+  }, [noteType, unitId, ncPendingTotal, ncInputTotal]);
 
   const beneficiaryTotalPendingBalance = useMemo(() => {
     if (!beneficiaryUnitId) return 0;
@@ -382,12 +494,17 @@ export function NotesTab() {
   }, [abonoRows]);
 
   const calculatedAdvanceAmount = useMemo(() => {
-    if (noteType !== 'NT' || !beneficiaryUnitId) return 0;
-    if (beneficiaryTotalPendingBalance > 0 && rawAbonoInputTotal > beneficiaryTotalPendingBalance) {
+    if (noteType !== 'NT' || !beneficiaryUnitId || rawAbonoInputTotal <= 0) return 0;
+    if (beneficiaryTotalPendingBalance === 0) return rawAbonoInputTotal;
+    if (rawAbonoInputTotal > beneficiaryTotalPendingBalance) {
       return roundMoney(rawAbonoInputTotal - beneficiaryTotalPendingBalance);
     }
     return 0;
   }, [noteType, beneficiaryUnitId, beneficiaryTotalPendingBalance, rawAbonoInputTotal]);
+
+  const showAdvanceBox =
+    (noteType === 'NC' && ncAdvanceAmount > 0) ||
+    (noteType === 'NT' && calculatedAdvanceAmount > 0);
 
   function handleEditNote(note: any) {
     const lines = noteLinesMap[note.id] || [];
@@ -415,16 +532,20 @@ export function NotesTab() {
         rowKey: makeRowKey(),
         section: 'abono',
         conceptId: l.concept_id || '',
-        dueId: l.due_id || '',
-        period: l.period || '',
-        dueDate: l.due_date || note.application_date,
-        pendingBalance: 0,
-        amount: String(l.amount ?? ''),
-        discountAmount: '0',
-        advanceAmount: String(l.advance_amount ?? '0'),
+        amount: String(Number(l.amount || 0) + Number(l.advance_amount || 0)),
         counterpartAccountId: l.counterpart_account_id || '',
         offsetAccountId: l.offset_account_id || '',
-        lineNotes: l.line_notes || '',
+        dueAllocations: l.due_id
+          ? [
+              {
+                dueId: l.due_id,
+                period: l.period || '',
+                dueDate: l.due_date || note.application_date,
+                pendingBalance: Number(l.amount || 0),
+                appliedAmount: String(l.amount || 0),
+              },
+            ]
+          : [],
       }));
 
       const cg: ConceptRowForm[] = lines
@@ -433,16 +554,10 @@ export function NotesTab() {
           rowKey: makeRowKey(),
           section: 'cargo',
           conceptId: l.concept_id || '',
-          dueId: l.due_id || '',
-          period: l.period || '',
-          dueDate: l.due_date || note.application_date,
-          pendingBalance: 0,
           amount: String(l.amount ?? ''),
-          discountAmount: '0',
-          advanceAmount: '0',
           counterpartAccountId: l.counterpart_account_id || '',
           offsetAccountId: l.offset_account_id || '',
-          lineNotes: l.line_notes || '',
+          dueAllocations: [],
         }));
 
       setAbonoRows(ab.length > 0 ? ab : [createEmptyRow('abono', note.beneficiary_unit_id)]);
@@ -453,16 +568,20 @@ export function NotesTab() {
         rowKey: makeRowKey(),
         section: 'principal',
         conceptId: l.concept_id || '',
-        dueId: l.due_id || '',
-        period: l.period || '',
-        dueDate: l.due_date || note.application_date,
-        pendingBalance: 0,
-        amount: String(l.amount ?? ''),
-        discountAmount: '0',
-        advanceAmount: '0',
+        amount: String(Number(l.amount || 0) + Number(l.advance_amount || 0)),
         counterpartAccountId: l.counterpart_account_id || '',
         offsetAccountId: l.offset_account_id || '',
-        lineNotes: l.line_notes || '',
+        dueAllocations: l.due_id
+          ? [
+              {
+                dueId: l.due_id,
+                period: l.period || '',
+                dueDate: l.due_date || note.application_date,
+                pendingBalance: Number(l.amount || 0),
+                appliedAmount: String(l.amount || 0),
+              },
+            ]
+          : [],
       }));
       setStandardRows(std.length > 0 ? std : [createEmptyRow('principal', note.unit_id)]);
       setAbonoRows([]);
@@ -528,6 +647,101 @@ export function NotesTab() {
     await loadReferenceAndNotes();
   }
 
+  function buildPayloadLinesForRows(
+    rows: ConceptRowForm[],
+    section: 'principal' | 'abono' | 'cargo',
+    targetUnitId: string,
+    advanceTotal: number
+  ): any[] {
+    let remainingAdvance = roundMoney(advanceTotal);
+    const result: any[] = [];
+
+    for (const r of rows) {
+      const totalRowAmt = roundMoney(parseAmount(r.amount || '0'));
+      if (totalRowAmt <= 0) continue;
+
+      const activeAllocs = (r.dueAllocations || []).filter(
+        a => roundMoney(parseAmount(a.appliedAmount || '0')) > 0
+      );
+
+      if ((section === 'principal' || section === 'abono') && activeAllocs.length > 0) {
+        for (const alloc of activeAllocs) {
+          const applied = roundMoney(parseAmount(alloc.appliedAmount || '0'));
+          if (applied <= 0) continue;
+          result.push({
+            section,
+            unit_id: targetUnitId,
+            due_id: alloc.dueId,
+            concept_id: r.conceptId,
+            period: alloc.period || accountingDate.slice(0, 7),
+            due_date: alloc.dueDate || applicationDate,
+            amount: applied,
+            discount_amount: 0,
+            advance_amount: 0,
+            counterpart_account_id: r.counterpartAccountId,
+            offset_account_id: r.offsetAccountId,
+            line_notes: description,
+          });
+        }
+
+        const sumAllocs = roundMoney(
+          activeAllocs.reduce((s, a) => s + parseAmount(a.appliedAmount || '0'), 0)
+        );
+        const leftoverOnRow = roundMoney(Math.max(totalRowAmt - sumAllocs, 0));
+        if (leftoverOnRow > 0 && remainingAdvance > 0) {
+          const advPortion = roundMoney(Math.min(leftoverOnRow, remainingAdvance));
+          remainingAdvance = roundMoney(Math.max(remainingAdvance - advPortion, 0));
+          if (advPortion > 0) {
+            result.push({
+              section,
+              unit_id: targetUnitId,
+              due_id: null,
+              concept_id: r.conceptId,
+              period: accountingDate.slice(0, 7),
+              due_date: applicationDate,
+              amount: 0,
+              discount_amount: 0,
+              advance_amount: advPortion,
+              counterpart_account_id: advanceAccountId || r.counterpartAccountId,
+              offset_account_id: advanceCounterpartAccountId || r.offsetAccountId,
+              line_notes: description,
+            });
+          }
+        }
+      } else {
+        let advPortion = 0;
+        if ((section === 'principal' || section === 'abono') && remainingAdvance > 0) {
+          advPortion = roundMoney(Math.min(totalRowAmt, remainingAdvance));
+          remainingAdvance = roundMoney(Math.max(remainingAdvance - advPortion, 0));
+        }
+        const appliedAmt = roundMoney(Math.max(totalRowAmt - advPortion, 0));
+
+        result.push({
+          section,
+          unit_id: targetUnitId,
+          due_id: null,
+          concept_id: r.conceptId,
+          period: accountingDate.slice(0, 7),
+          due_date: applicationDate,
+          amount: appliedAmt,
+          discount_amount: 0,
+          advance_amount: advPortion,
+          counterpart_account_id:
+            advPortion > 0 && appliedAmt === 0
+              ? advanceAccountId || r.counterpartAccountId
+              : r.counterpartAccountId,
+          offset_account_id:
+            advPortion > 0 && appliedAmt === 0
+              ? advanceCounterpartAccountId || r.offsetAccountId
+              : r.offsetAccountId,
+          line_notes: description,
+        });
+      }
+    }
+
+    return result;
+  }
+
   async function handleSaveNote(e: React.FormEvent) {
     e.preventDefault();
     if (!activeOrg) return;
@@ -572,67 +786,24 @@ export function NotesTab() {
       resolvedChargedId = chargedUnitId;
       resolvedUnitId = beneficiaryUnitId;
 
-      let remainingAdvance = calculatedAdvanceAmount;
-      const builtAbono = abonoRows
-        .slice()
-        .reverse()
-        .map(r => {
-          const rawAmt = roundMoney(parseAmount(r.amount || '0'));
-          let advPortion = 0;
-          if (remainingAdvance > 0 && rawAmt > 0) {
-            advPortion = Math.min(rawAmt, remainingAdvance);
-            remainingAdvance = roundMoney(remainingAdvance - advPortion);
-          }
-          const appliedAmt = roundMoney(Math.max(rawAmt - advPortion, 0));
-
-          return {
-            section: 'abono',
-            unit_id: beneficiaryUnitId,
-            due_id: r.dueId || null,
-            concept_id: r.conceptId,
-            period: r.period || accountingDate.slice(0, 7),
-            due_date: r.dueDate || applicationDate,
-            amount: appliedAmt,
-            discount_amount: 0,
-            advance_amount: advPortion,
-            counterpart_account_id:
-              advPortion > 0 && appliedAmt === 0 ? advanceAccountId : r.counterpartAccountId,
-            offset_account_id:
-              advPortion > 0 && appliedAmt === 0 ? advanceCounterpartAccountId : r.offsetAccountId,
-            line_notes: description,
-          };
-        })
-        .reverse()
-        .filter(l => l.amount + l.advance_amount > 0);
-
-      const builtCargo = cargoRows
-        .map(r => {
-          const amt = roundMoney(parseAmount(r.amount || '0'));
-          return {
-            section: 'cargo',
-            unit_id: chargedUnitId,
-            due_id: r.dueId || null,
-            concept_id: r.conceptId,
-            period: r.period || accountingDate.slice(0, 7),
-            due_date: r.dueDate || applicationDate,
-            amount: amt,
-            discount_amount: 0,
-            advance_amount: 0,
-            counterpart_account_id: r.counterpartAccountId,
-            offset_account_id: r.offsetAccountId,
-            line_notes: description,
-          };
-        })
-        .filter(l => l.amount > 0);
+      const builtAbono = buildPayloadLinesForRows(
+        abonoRows,
+        'abono',
+        beneficiaryUnitId,
+        calculatedAdvanceAmount
+      );
+      const builtCargo = buildPayloadLinesForRows(cargoRows, 'cargo', chargedUnitId, 0);
 
       if (builtAbono.length === 0 || builtCargo.length === 0) {
         return setFormError('En Traslado de Cartera (NT) debe ingresar valores en Abono y en Cargo.');
       }
 
       const sumAbono = roundMoney(
-        builtAbono.reduce((acc, x) => acc + x.amount + x.advance_amount, 0)
+        builtAbono.reduce((acc, x) => acc + Number(x.amount || 0) + Number(x.advance_amount || 0), 0)
       );
-      const sumCargo = roundMoney(builtCargo.reduce((acc, x) => acc + x.amount, 0));
+      const sumCargo = roundMoney(
+        builtCargo.reduce((acc, x) => acc + Number(x.amount || 0), 0)
+      );
 
       if (sumAbono !== sumCargo) {
         return setFormError(
@@ -645,27 +816,17 @@ export function NotesTab() {
       if (!unitId) {
         return setFormError('Seleccione el inmueble al cual aplica la nota.');
       }
-      resolvedUnitId = unitId;
+      if (noteType === 'NC' && ncAdvanceAmount > 0 && (!advanceAccountId || !advanceCounterpartAccountId)) {
+        return setFormError('Seleccione la cuenta contable para el anticipo generado en la Nota Crédito.');
+      }
 
-      payloadLines = standardRows
-        .map(r => {
-          const amt = roundMoney(parseAmount(r.amount || '0'));
-          return {
-            section: 'principal',
-            unit_id: unitId,
-            due_id: r.dueId || null,
-            concept_id: r.conceptId,
-            period: r.period || accountingDate.slice(0, 7),
-            due_date: r.dueDate || applicationDate,
-            amount: amt,
-            discount_amount: 0,
-            advance_amount: 0,
-            counterpart_account_id: r.counterpartAccountId,
-            offset_account_id: r.offsetAccountId,
-            line_notes: description,
-          };
-        })
-        .filter(l => l.amount > 0);
+      resolvedUnitId = unitId;
+      payloadLines = buildPayloadLinesForRows(
+        standardRows,
+        'principal',
+        unitId,
+        noteType === 'NC' ? ncAdvanceAmount : 0
+      );
 
       if (payloadLines.length === 0) {
         return setFormError('Ingrese un valor mayor a cero en al menos un concepto.');
@@ -676,7 +837,7 @@ export function NotesTab() {
       l => !l.concept_id || !l.counterpart_account_id || !l.offset_account_id
     );
     if (missingAccounts) {
-      return setFormError('Verifique que cada concepto tenga cuenta de cartera y cuenta de cruce.');
+      return setFormError('Verifique que cada concepto tenga cuenta asignada.');
     }
 
     setSaving(true);
@@ -752,100 +913,146 @@ export function NotesTab() {
   function renderConceptRows(
     rows: ConceptRowForm[],
     section: 'principal' | 'abono' | 'cargo',
-    targetUnitId: string
+    showDueBreakdown: boolean,
+    showOffsetAccount: boolean
   ) {
-    const unitDues = unitDuesMap[targetUnitId] || [];
-    const hasDues = unitDues.length > 0;
-
     return (
       <div className="space-y-3">
         {rows.map(row => {
           const counterpartAcc = accounts.find(a => a.id === row.counterpartAccountId);
+          const hasAllocations = showDueBreakdown && row.dueAllocations.length > 0;
 
           return (
             <div
               key={row.rowKey}
-              className="grid grid-cols-1 md:grid-cols-12 gap-4 p-4 rounded-lg border border-gray-200 bg-gray-50/70 items-start"
+              className="p-4 rounded-lg border border-gray-200 bg-gray-50/70 space-y-3"
             >
-              <div className={hasDues ? 'md:col-span-4' : 'md:col-span-5'}>
-                <Select
-                  label="Concepto *"
-                  value={row.conceptId}
-                  onChange={e => updateRowField(section, row.rowKey, 'conceptId', e.target.value)}
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-start">
+                <div
+                  className={
+                    showOffsetAccount ? 'md:col-span-5' : 'md:col-span-7'
+                  }
                 >
-                  <option value="">— Concepto —</option>
-                  {concepts.map(c => (
-                    <option key={c.id} value={c.id}>
-                      {c.code} — {c.name}
-                    </option>
-                  ))}
-                </Select>
-                <p className="text-[11px] text-gray-500 mt-1 truncate">
-                  Cuenta concepto (defecto):{' '}
-                  <span className="font-mono text-gray-700">
-                    {counterpartAcc ? `${counterpartAcc.code} · ${counterpartAcc.name}` : 'No configurada'}
-                  </span>
-                </p>
-              </div>
-
-              {hasDues && (
-                <div className="md:col-span-2">
                   <Select
-                    label="Cuota pendiente"
-                    value={row.dueId}
-                    onChange={e => updateRowField(section, row.rowKey, 'dueId', e.target.value)}
+                    label="Concepto *"
+                    value={row.conceptId}
+                    onChange={e => updateRowField(section, row.rowKey, 'conceptId', e.target.value)}
                   >
-                    <option value="">— Sin cuota —</option>
-                    {unitDues.map(d => (
-                      <option key={d.id} value={d.id}>
-                        {d.period} ({formatCOP(Number(d.balance || 0))})
+                    <option value="">— Concepto —</option>
+                    {concepts.map(c => (
+                      <option key={c.id} value={c.id}>
+                        {c.code} — {c.name}
                       </option>
                     ))}
                   </Select>
+                  <p className="text-[11px] text-gray-500 mt-1 truncate">
+                    Cuenta concepto (defecto):{' '}
+                    <span className="font-mono text-gray-700">
+                      {counterpartAcc
+                        ? `${counterpartAcc.code} · ${counterpartAcc.name}`
+                        : 'No configurada'}
+                    </span>
+                  </p>
+                </div>
+
+                <div className="md:col-span-2">
+                  <Input
+                    label="Valor a aplicar *"
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={row.amount}
+                    onChange={e => updateRowField(section, row.rowKey, 'amount', e.target.value)}
+                    placeholder="0"
+                  />
+                </div>
+
+                {showOffsetAccount && (
+                  <div className="md:col-span-4">
+                    <Select
+                      label="Cuenta contable cruce *"
+                      value={row.offsetAccountId}
+                      onChange={e =>
+                        updateRowField(section, row.rowKey, 'offsetAccountId', e.target.value)
+                      }
+                    >
+                      <option value="">— Seleccionar cuenta —</option>
+                      {accounts.map(acc => (
+                        <option key={acc.id} value={acc.id}>
+                          {acc.code} — {acc.name}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                )}
+
+                <div className="md:col-span-1 flex justify-end pt-6">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="text-red-700 border-red-200 hover:bg-red-50"
+                    onClick={() => removeRow(section, row.rowKey)}
+                    title="Quitar concepto"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+              </div>
+
+              {hasAllocations && (
+                <div className="border-t border-gray-200 pt-3">
+                  <p className="text-[11px] font-semibold uppercase text-gray-600 mb-2">
+                    Aplicación discriminada por documento (más antiguo a más reciente)
+                  </p>
+                  <div className="overflow-x-auto rounded border border-gray-200 bg-white">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-gray-50 text-gray-500 border-b border-gray-200">
+                        <tr>
+                          <th className="px-3 py-1.5">Período</th>
+                          <th className="px-3 py-1.5">Vencimiento</th>
+                          <th className="px-3 py-1.5 text-right">Saldo pendiente</th>
+                          <th className="px-3 py-1.5 text-right w-40">Valor a aplicar</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {row.dueAllocations.map(alloc => (
+                          <tr key={alloc.dueId}>
+                            <td className="px-3 py-1.5 font-mono text-gray-800">
+                              {alloc.period || '—'}
+                            </td>
+                            <td className="px-3 py-1.5 text-gray-600">
+                              {alloc.dueDate || '—'}
+                            </td>
+                            <td className="px-3 py-1.5 text-right font-mono text-gray-800">
+                              {formatCOP(alloc.pendingBalance)}
+                            </td>
+                            <td className="px-3 py-1.5 text-right">
+                              <input
+                                type="number"
+                                min={0}
+                                max={alloc.pendingBalance}
+                                step="0.01"
+                                value={alloc.appliedAmount}
+                                onChange={e =>
+                                  updateDueAllocationAmount(
+                                    section === 'abono' ? 'abono' : 'principal',
+                                    row.rowKey,
+                                    alloc.dueId,
+                                    e.target.value
+                                  )
+                                }
+                                placeholder="0"
+                                className="w-32 rounded border border-gray-300 bg-white px-2 py-1 text-right font-mono text-xs text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
-
-              <div className="md:col-span-2">
-                <Input
-                  label="Valor a aplicar *"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={row.amount}
-                  onChange={e => updateRowField(section, row.rowKey, 'amount', e.target.value)}
-                  placeholder="0"
-                />
-              </div>
-
-              <div className={hasDues ? 'md:col-span-3' : 'md:col-span-4'}>
-                <Select
-                  label="Cuenta contable cruce *"
-                  value={row.offsetAccountId}
-                  onChange={e =>
-                    updateRowField(section, row.rowKey, 'offsetAccountId', e.target.value)
-                  }
-                >
-                  <option value="">— Seleccionar cuenta —</option>
-                  {accounts.map(acc => (
-                    <option key={acc.id} value={acc.id}>
-                      {acc.code} — {acc.name}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-
-              <div className="md:col-span-1 flex justify-end pt-6">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="text-red-700 border-red-200 hover:bg-red-50"
-                  onClick={() => removeRow(section, row.rowKey)}
-                  title="Quitar concepto"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </Button>
-              </div>
             </div>
           );
         })}
@@ -897,6 +1104,7 @@ export function NotesTab() {
   const totalCargo = roundMoney(
     cargoRows.reduce((s, r) => s + parseAmount(r.amount || '0'), 0)
   );
+  const activeAdvanceAmount = noteType === 'NC' ? ncAdvanceAmount : calculatedAdvanceAmount;
 
   return (
     <div className="space-y-6">
@@ -1020,7 +1228,7 @@ export function NotesTab() {
                   <p className="text-xs text-gray-500">
                     {noteType === 'ND'
                       ? 'Aumenta saldo en cartera del inmueble y debita la cuenta del concepto / acredita la cuenta de cruce.'
-                      : 'Disminuye saldo en cartera del inmueble y debita la cuenta de cruce / acredita la cuenta del concepto.'}
+                      : 'Disminuye saldo en cartera del inmueble aplicando del documento más antiguo al más reciente; si no hay saldo pendiente aplica como anticipo.'}
                   </p>
                 </div>
                 <div className="text-right">
@@ -1029,7 +1237,46 @@ export function NotesTab() {
                 </div>
               </div>
 
-              {renderConceptRows(standardRows, 'principal', unitId)}
+              {renderConceptRows(standardRows, 'principal', noteType === 'NC', true)}
+
+              {showAdvanceBox && (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold uppercase text-emerald-900">
+                      Anticipo a aplicar (sin saldo pendiente o excedente sobre saldo pendiente)
+                    </span>
+                    <span className="text-sm font-bold text-emerald-800">
+                      {formatCOP(activeAdvanceAmount)}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <Select
+                      label="Cuenta contable de anticipo *"
+                      value={advanceAccountId}
+                      onChange={e => setAdvanceAccountId(e.target.value)}
+                    >
+                      <option value="">— Seleccionar cuenta anticipo —</option>
+                      {accounts.map(acc => (
+                        <option key={acc.id} value={acc.id}>
+                          {acc.code} — {acc.name}
+                        </option>
+                      ))}
+                    </Select>
+                    <Select
+                      label="Cuenta contable de cruce anticipo *"
+                      value={advanceCounterpartAccountId}
+                      onChange={e => setAdvanceCounterpartAccountId(e.target.value)}
+                    >
+                      <option value="">— Seleccionar cuenta cruce —</option>
+                      {accounts.map(acc => (
+                        <option key={acc.id} value={acc.id}>
+                          {acc.code} — {acc.name}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                </div>
+              )}
             </div>
           </Card>
         ) : (
@@ -1042,7 +1289,7 @@ export function NotesTab() {
                       1. Abono (Inmueble beneficiado)
                     </h3>
                     <p className="text-xs text-gray-500">
-                      Se acredita/abona al inmueble beneficiado aplicando a conceptos pendientes.
+                      Aplica del documento más antiguo al más reciente; si no hay saldo pendiente, se registra como anticipo.
                       {beneficiaryUnitId && (
                         <span className="ml-1 font-medium text-gray-700">
                           Saldo pendiente total: {formatCOP(beneficiaryTotalPendingBalance)}
@@ -1069,16 +1316,16 @@ export function NotesTab() {
                   </Select>
                 </div>
 
-                {renderConceptRows(abonoRows, 'abono', beneficiaryUnitId)}
+                {renderConceptRows(abonoRows, 'abono', true, false)}
 
-                {calculatedAdvanceAmount > 0 && (
+                {showAdvanceBox && (
                   <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-4 space-y-3">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-semibold uppercase text-emerald-900">
-                        Anticipo generado (excede el saldo pendiente total)
+                        Anticipo a aplicar (sin saldo pendiente o excedente sobre saldo pendiente)
                       </span>
                       <span className="text-sm font-bold text-emerald-800">
-                        {formatCOP(calculatedAdvanceAmount)}
+                        {formatCOP(activeAdvanceAmount)}
                       </span>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1142,7 +1389,7 @@ export function NotesTab() {
                   </Select>
                 </div>
 
-                {renderConceptRows(cargoRows, 'cargo', chargedUnitId)}
+                {renderConceptRows(cargoRows, 'cargo', false, false)}
               </div>
             </Card>
           </div>
