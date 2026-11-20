@@ -7,6 +7,7 @@ import {
   FileSpreadsheet,
   Loader2,
   Plus,
+  Printer,
   Trash2,
   XCircle,
 } from 'lucide-react';
@@ -16,6 +17,7 @@ import { useOrg } from '@/contexts/OrganizationContext';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input, Select, TextArea } from '@/components/ui/Input';
+import { Modal } from '@/components/ui/Modal';
 import { NoOrgSelected } from '@/components/shared';
 import { parseAmount, roundMoney } from '@/components/treasury/receiptAllocation';
 
@@ -94,15 +96,21 @@ export function NotesTab() {
   const [chargedUnitId, setChargedUnitId] = useState<string>('');
   const [description, setDescription] = useState<string>('');
 
-  // Saldos pendientes por unidad para facilitar abonos/traslados
+  // Cuenta contable para anticipo en Traslado de Cartera (NT - Abono)
+  const [advanceAccountId, setAdvanceAccountId] = useState<string>('');
+  const [advanceCounterpartAccountId, setAdvanceCounterpartAccountId] = useState<string>('');
+
+  // Saldos pendientes por unidad
   const [unitDuesMap, setUnitDuesMap] = useState<Record<string, Due[]>>({});
-  const [unitInvoicesMap, setUnitInvoicesMap] = useState<Record<string, Record<string, any>>>({});
 
   // Filas para NC / ND
   const [standardRows, setStandardRows] = useState<ConceptRowForm[]>([]);
   // Filas para Traslado de Cartera (NT): Abono y Cargo
   const [abonoRows, setAbonoRows] = useState<ConceptRowForm[]>([]);
   const [cargoRows, setCargoRows] = useState<ConceptRowForm[]>([]);
+
+  // Modal de impresión de nota
+  const [printTarget, setPrintTarget] = useState<any | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [actionId, setActionId] = useState<string | null>(null);
@@ -171,6 +179,11 @@ export function NotesTab() {
     setActivePeriod(periodRes.data || null);
     setNotesList(notesRes.data || []);
 
+    if (loadedAccounts.length > 0) {
+      setAdvanceAccountId(prev => prev || loadedAccounts[0].id);
+      setAdvanceCounterpartAccountId(prev => prev || loadedAccounts[0].id);
+    }
+
     const byNote: Record<string, any[]> = {};
     (linesRes.data || []).forEach((ln: any) => {
       if (!byNote[ln.note_id]) byNote[ln.note_id] = [];
@@ -190,30 +203,15 @@ export function NotesTab() {
     async (targetUnitId: string) => {
       if (!activeOrg || !targetUnitId || unitDuesMap[targetUnitId]) return;
 
-      const [duesRes, invRes] = await Promise.all([
-        supabase
-          .from('dues')
-          .select('*')
-          .eq('organization_id', activeOrg.id)
-          .eq('unit_id', targetUnitId)
-          .gt('balance', 0)
-          .order('due_date', { ascending: true }),
-        supabase
-          .from('invoices')
-          .select('*')
-          .eq('organization_id', activeOrg.id)
-          .eq('unit_id', targetUnitId),
-      ]);
+      const { data } = await supabase
+        .from('dues')
+        .select('*')
+        .eq('organization_id', activeOrg.id)
+        .eq('unit_id', targetUnitId)
+        .gt('balance', 0)
+        .order('due_date', { ascending: true });
 
-      const duesArr = (duesRes.data || []) as Due[];
-      const invMap: Record<string, any> = {};
-      (invRes.data || []).forEach((inv: any) => {
-        invMap[inv.period] = inv;
-        invMap[inv.id] = inv;
-      });
-
-      setUnitDuesMap(prev => ({ ...prev, [targetUnitId]: duesArr }));
-      setUnitInvoicesMap(prev => ({ ...prev, [targetUnitId]: invMap }));
+      setUnitDuesMap(prev => ({ ...prev, [targetUnitId]: (data || []) as Due[] }));
     },
     [activeOrg, unitDuesMap]
   );
@@ -253,9 +251,7 @@ export function NotesTab() {
       firstConcept?.income_account_id ||
       defaultOffsetAccountId;
 
-    const offset =
-      firstConcept?.income_account_id ||
-      defaultOffsetAccountId;
+    const offset = firstConcept?.income_account_id || defaultOffsetAccountId;
 
     return {
       rowKey: makeRowKey(),
@@ -368,23 +364,30 @@ export function NotesTab() {
           }
         }
 
-        if (section === 'abono' && (field === 'amount' || field === 'discountAmount' || field === 'dueId')) {
-          const amt = parseAmount(updated.amount || '0');
-          const disc = parseAmount(updated.discountAmount || '0');
-          const bal = Number(updated.pendingBalance || 0);
-          if (bal > 0 && amt + disc > bal) {
-            updated.advanceAmount = String(roundMoney(amt + disc - bal));
-          } else {
-            updated.advanceAmount = '0';
-          }
-        }
-
         return updated;
       })
     );
     setFormError('');
     setSuccessMsg('');
   }
+
+  const beneficiaryTotalPendingBalance = useMemo(() => {
+    if (!beneficiaryUnitId) return 0;
+    const duesArr = unitDuesMap[beneficiaryUnitId] || [];
+    return roundMoney(duesArr.reduce((acc, d) => acc + Number(d.balance || 0), 0));
+  }, [beneficiaryUnitId, unitDuesMap]);
+
+  const rawAbonoInputTotal = useMemo(() => {
+    return roundMoney(abonoRows.reduce((s, r) => s + parseAmount(r.amount || '0'), 0));
+  }, [abonoRows]);
+
+  const calculatedAdvanceAmount = useMemo(() => {
+    if (noteType !== 'NT' || !beneficiaryUnitId) return 0;
+    if (beneficiaryTotalPendingBalance > 0 && rawAbonoInputTotal > beneficiaryTotalPendingBalance) {
+      return roundMoney(rawAbonoInputTotal - beneficiaryTotalPendingBalance);
+    }
+    return 0;
+  }, [noteType, beneficiaryUnitId, beneficiaryTotalPendingBalance, rawAbonoInputTotal]);
 
   function handleEditNote(note: any) {
     const lines = noteLinesMap[note.id] || [];
@@ -401,23 +404,28 @@ export function NotesTab() {
     setSuccessMsg('');
 
     if (note.note_type === 'NT') {
-      const ab: ConceptRowForm[] = lines
-        .filter((l: any) => l.section === 'abono')
-        .map((l: any) => ({
-          rowKey: makeRowKey(),
-          section: 'abono',
-          conceptId: l.concept_id || '',
-          dueId: l.due_id || '',
-          period: l.period || '',
-          dueDate: l.due_date || note.application_date,
-          pendingBalance: 0,
-          amount: String(l.amount ?? ''),
-          discountAmount: String(l.discount_amount ?? '0'),
-          advanceAmount: String(l.advance_amount ?? '0'),
-          counterpartAccountId: l.counterpart_account_id || '',
-          offsetAccountId: l.offset_account_id || '',
-          lineNotes: l.line_notes || '',
-        }));
+      const abLines = lines.filter((l: any) => l.section === 'abono');
+      const advLine = abLines.find((l: any) => Number(l.advance_amount || 0) > 0);
+      if (advLine) {
+        if (advLine.counterpart_account_id) setAdvanceAccountId(advLine.counterpart_account_id);
+        if (advLine.offset_account_id) setAdvanceCounterpartAccountId(advLine.offset_account_id);
+      }
+
+      const ab: ConceptRowForm[] = abLines.map((l: any) => ({
+        rowKey: makeRowKey(),
+        section: 'abono',
+        conceptId: l.concept_id || '',
+        dueId: l.due_id || '',
+        period: l.period || '',
+        dueDate: l.due_date || note.application_date,
+        pendingBalance: 0,
+        amount: String(l.amount ?? ''),
+        discountAmount: '0',
+        advanceAmount: String(l.advance_amount ?? '0'),
+        counterpartAccountId: l.counterpart_account_id || '',
+        offsetAccountId: l.offset_account_id || '',
+        lineNotes: l.line_notes || '',
+      }));
 
       const cg: ConceptRowForm[] = lines
         .filter((l: any) => l.section === 'cargo')
@@ -430,8 +438,8 @@ export function NotesTab() {
           dueDate: l.due_date || note.application_date,
           pendingBalance: 0,
           amount: String(l.amount ?? ''),
-          discountAmount: String(l.discount_amount ?? '0'),
-          advanceAmount: String(l.advance_amount ?? '0'),
+          discountAmount: '0',
+          advanceAmount: '0',
           counterpartAccountId: l.counterpart_account_id || '',
           offsetAccountId: l.offset_account_id || '',
           lineNotes: l.line_notes || '',
@@ -450,8 +458,8 @@ export function NotesTab() {
         dueDate: l.due_date || note.application_date,
         pendingBalance: 0,
         amount: String(l.amount ?? ''),
-        discountAmount: String(l.discount_amount ?? '0'),
-        advanceAmount: String(l.advance_amount ?? '0'),
+        discountAmount: '0',
+        advanceAmount: '0',
         counterpartAccountId: l.counterpart_account_id || '',
         offsetAccountId: l.offset_account_id || '',
         lineNotes: l.line_notes || '',
@@ -556,16 +564,27 @@ export function NotesTab() {
       if (!chargedUnitId) {
         return setFormError('Seleccione el inmueble a debitar en la sección Cargo.');
       }
+      if (calculatedAdvanceAmount > 0 && (!advanceAccountId || !advanceCounterpartAccountId)) {
+        return setFormError('Seleccione la cuenta contable para el anticipo generado en el abono.');
+      }
 
       resolvedBeneficiaryId = beneficiaryUnitId;
       resolvedChargedId = chargedUnitId;
       resolvedUnitId = beneficiaryUnitId;
 
+      let remainingAdvance = calculatedAdvanceAmount;
       const builtAbono = abonoRows
+        .slice()
+        .reverse()
         .map(r => {
-          const amt = roundMoney(parseAmount(r.amount || '0'));
-          const disc = roundMoney(parseAmount(r.discountAmount || '0'));
-          const adv = roundMoney(parseAmount(r.advanceAmount || '0'));
+          const rawAmt = roundMoney(parseAmount(r.amount || '0'));
+          let advPortion = 0;
+          if (remainingAdvance > 0 && rawAmt > 0) {
+            advPortion = Math.min(rawAmt, remainingAdvance);
+            remainingAdvance = roundMoney(remainingAdvance - advPortion);
+          }
+          const appliedAmt = roundMoney(Math.max(rawAmt - advPortion, 0));
+
           return {
             section: 'abono',
             unit_id: beneficiaryUnitId,
@@ -573,21 +592,22 @@ export function NotesTab() {
             concept_id: r.conceptId,
             period: r.period || accountingDate.slice(0, 7),
             due_date: r.dueDate || applicationDate,
-            amount: amt,
-            discount_amount: disc,
-            advance_amount: adv,
-            counterpart_account_id: r.counterpartAccountId,
-            offset_account_id: r.offsetAccountId,
-            line_notes: r.lineNotes || description,
+            amount: appliedAmt,
+            discount_amount: 0,
+            advance_amount: advPortion,
+            counterpart_account_id:
+              advPortion > 0 && appliedAmt === 0 ? advanceAccountId : r.counterpartAccountId,
+            offset_account_id:
+              advPortion > 0 && appliedAmt === 0 ? advanceCounterpartAccountId : r.offsetAccountId,
+            line_notes: description,
           };
         })
-        .filter(l => l.amount + l.discount_amount + l.advance_amount > 0);
+        .reverse()
+        .filter(l => l.amount + l.advance_amount > 0);
 
       const builtCargo = cargoRows
         .map(r => {
           const amt = roundMoney(parseAmount(r.amount || '0'));
-          const disc = roundMoney(parseAmount(r.discountAmount || '0'));
-          const adv = roundMoney(parseAmount(r.advanceAmount || '0'));
           return {
             section: 'cargo',
             unit_id: chargedUnitId,
@@ -596,25 +616,23 @@ export function NotesTab() {
             period: r.period || accountingDate.slice(0, 7),
             due_date: r.dueDate || applicationDate,
             amount: amt,
-            discount_amount: disc,
-            advance_amount: adv,
+            discount_amount: 0,
+            advance_amount: 0,
             counterpart_account_id: r.counterpartAccountId,
             offset_account_id: r.offsetAccountId,
-            line_notes: r.lineNotes || description,
+            line_notes: description,
           };
         })
-        .filter(l => l.amount + l.discount_amount + l.advance_amount > 0);
+        .filter(l => l.amount > 0);
 
       if (builtAbono.length === 0 || builtCargo.length === 0) {
         return setFormError('En Traslado de Cartera (NT) debe ingresar valores en Abono y en Cargo.');
       }
 
       const sumAbono = roundMoney(
-        builtAbono.reduce((acc, x) => acc + x.amount + x.discount_amount + x.advance_amount, 0)
+        builtAbono.reduce((acc, x) => acc + x.amount + x.advance_amount, 0)
       );
-      const sumCargo = roundMoney(
-        builtCargo.reduce((acc, x) => acc + x.amount + x.discount_amount + x.advance_amount, 0)
-      );
+      const sumCargo = roundMoney(builtCargo.reduce((acc, x) => acc + x.amount, 0));
 
       if (sumAbono !== sumCargo) {
         return setFormError(
@@ -632,8 +650,6 @@ export function NotesTab() {
       payloadLines = standardRows
         .map(r => {
           const amt = roundMoney(parseAmount(r.amount || '0'));
-          const disc = roundMoney(parseAmount(r.discountAmount || '0'));
-          const adv = roundMoney(parseAmount(r.advanceAmount || '0'));
           return {
             section: 'principal',
             unit_id: unitId,
@@ -642,14 +658,14 @@ export function NotesTab() {
             period: r.period || accountingDate.slice(0, 7),
             due_date: r.dueDate || applicationDate,
             amount: amt,
-            discount_amount: disc,
-            advance_amount: adv,
+            discount_amount: 0,
+            advance_amount: 0,
             counterpart_account_id: r.counterpartAccountId,
             offset_account_id: r.offsetAccountId,
-            line_notes: r.lineNotes || description,
+            line_notes: description,
           };
         })
-        .filter(l => l.amount + l.discount_amount + l.advance_amount > 0);
+        .filter(l => l.amount > 0);
 
       if (payloadLines.length === 0) {
         return setFormError('Ingrese un valor mayor a cero en al menos un concepto.');
@@ -736,25 +752,22 @@ export function NotesTab() {
   function renderConceptRows(
     rows: ConceptRowForm[],
     section: 'principal' | 'abono' | 'cargo',
-    targetUnitId: string,
-    showAbonoExtras = false
+    targetUnitId: string
   ) {
     const unitDues = unitDuesMap[targetUnitId] || [];
-    const conceptMap = new Map<string, BillingConcept>();
-    concepts.forEach(c => conceptMap.set(String(c.id), c));
+    const hasDues = unitDues.length > 0;
 
     return (
       <div className="space-y-3">
         {rows.map(row => {
-          const cObj = conceptMap.get(String(row.conceptId));
           const counterpartAcc = accounts.find(a => a.id === row.counterpartAccountId);
 
           return (
             <div
               key={row.rowKey}
-              className="grid grid-cols-1 md:grid-cols-12 gap-4 p-4 rounded-lg border border-gray-200 bg-gray-50/70 items-end"
+              className="grid grid-cols-1 md:grid-cols-12 gap-4 p-4 rounded-lg border border-gray-200 bg-gray-50/70 items-start"
             >
-              <div className={showAbonoExtras ? 'md:col-span-3' : 'md:col-span-4'}>
+              <div className={hasDues ? 'md:col-span-4' : 'md:col-span-5'}>
                 <Select
                   label="Concepto *"
                   value={row.conceptId}
@@ -775,14 +788,14 @@ export function NotesTab() {
                 </p>
               </div>
 
-              {unitDues.length > 0 && (
+              {hasDues && (
                 <div className="md:col-span-2">
                   <Select
                     label="Cuota pendiente"
                     value={row.dueId}
                     onChange={e => updateRowField(section, row.rowKey, 'dueId', e.target.value)}
                   >
-                    <option value="">— Ajuste / Sin cuota —</option>
+                    <option value="">— Sin cuota —</option>
                     {unitDues.map(d => (
                       <option key={d.id} value={d.id}>
                         {d.period} ({formatCOP(Number(d.balance || 0))})
@@ -792,7 +805,7 @@ export function NotesTab() {
                 </div>
               )}
 
-              <div className={showAbonoExtras ? 'md:col-span-2' : 'md:col-span-2'}>
+              <div className="md:col-span-2">
                 <Input
                   label="Valor a aplicar *"
                   type="number"
@@ -804,46 +817,7 @@ export function NotesTab() {
                 />
               </div>
 
-              {showAbonoExtras && (
-                <>
-                  <div className="md:col-span-1">
-                    <Input
-                      label="Desc."
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={row.discountAmount}
-                      onChange={e =>
-                        updateRowField(section, row.rowKey, 'discountAmount', e.target.value)
-                      }
-                    />
-                  </div>
-                  <div className="md:col-span-1">
-                    <Input
-                      label="Anticipo"
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={row.advanceAmount}
-                      onChange={e =>
-                        updateRowField(section, row.rowKey, 'advanceAmount', e.target.value)
-                      }
-                    />
-                  </div>
-                </>
-              )}
-
-              <div
-                className={
-                  showAbonoExtras
-                    ? unitDues.length > 0
-                      ? 'md:col-span-2'
-                      : 'md:col-span-2'
-                    : unitDues.length > 0
-                    ? 'md:col-span-2'
-                    : 'md:col-span-3'
-                }
-              >
+              <div className={hasDues ? 'md:col-span-3' : 'md:col-span-4'}>
                 <Select
                   label="Cuenta contable cruce *"
                   value={row.offsetAccountId}
@@ -860,7 +834,7 @@ export function NotesTab() {
                 </Select>
               </div>
 
-              <div className="md:col-span-1 flex justify-end pb-0.5">
+              <div className="md:col-span-1 flex justify-end pt-6">
                 <Button
                   type="button"
                   variant="outline"
@@ -872,24 +846,6 @@ export function NotesTab() {
                   <Trash2 className="w-3.5 h-3.5" />
                 </Button>
               </div>
-
-              {cObj && (
-                <div className="md:col-span-12 flex flex-wrap items-center justify-between gap-2 text-[11px] text-gray-500 pt-2 border-t border-gray-200/70">
-                  <span>
-                    Período: <strong>{row.period || accountingDate.slice(0, 7)}</strong>
-                    {row.pendingBalance > 0 && ` · Saldo cuota: ${formatCOP(row.pendingBalance)}`}
-                  </span>
-                  <input
-                    type="text"
-                    value={row.lineNotes}
-                    onChange={e =>
-                      updateRowField(section, row.rowKey, 'lineNotes', e.target.value)
-                    }
-                    placeholder="Detalle o nota del concepto (opcional)"
-                    className="w-full sm:w-96 rounded border border-gray-300 bg-white px-2.5 py-1 text-xs text-gray-800"
-                  />
-                </div>
-              )}
             </div>
           );
         })}
@@ -928,35 +884,18 @@ export function NotesTab() {
   const unitById = new Map<string, any>();
   units.forEach(u => unitById.set(String(u.id), u));
 
+  const conceptById = new Map<string, BillingConcept>();
+  concepts.forEach(c => conceptById.set(String(c.id), c));
+
+  const accountById = new Map<string, AccountOption>();
+  accounts.forEach(a => accountById.set(String(a.id), a));
+
   const totalStandard = roundMoney(
-    standardRows.reduce(
-      (s, r) =>
-        s +
-        parseAmount(r.amount || '0') +
-        parseAmount(r.discountAmount || '0') +
-        parseAmount(r.advanceAmount || '0'),
-      0
-    )
+    standardRows.reduce((s, r) => s + parseAmount(r.amount || '0'), 0)
   );
-  const totalAbono = roundMoney(
-    abonoRows.reduce(
-      (s, r) =>
-        s +
-        parseAmount(r.amount || '0') +
-        parseAmount(r.discountAmount || '0') +
-        parseAmount(r.advanceAmount || '0'),
-      0
-    )
-  );
+  const totalAbono = rawAbonoInputTotal;
   const totalCargo = roundMoney(
-    cargoRows.reduce(
-      (s, r) =>
-        s +
-        parseAmount(r.amount || '0') +
-        parseAmount(r.discountAmount || '0') +
-        parseAmount(r.advanceAmount || '0'),
-      0
-    )
+    cargoRows.reduce((s, r) => s + parseAmount(r.amount || '0'), 0)
   );
 
   return (
@@ -1025,7 +964,7 @@ export function NotesTab() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
               <Input
                 label="Fecha de aplicación *"
                 type="date"
@@ -1090,18 +1029,25 @@ export function NotesTab() {
                 </div>
               </div>
 
-              {renderConceptRows(standardRows, 'principal', unitId, false)}
+              {renderConceptRows(standardRows, 'principal', unitId)}
             </div>
           </Card>
         ) : (
           <div className="grid grid-cols-1 gap-6">
             <Card>
               <div className="p-6 space-y-4">
-                <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 pb-3">
                   <div>
-                    <h3 className="text-sm font-semibold text-green-900">1. Abono (Inmueble beneficiado)</h3>
+                    <h3 className="text-sm font-semibold text-green-900">
+                      1. Abono (Inmueble beneficiado)
+                    </h3>
                     <p className="text-xs text-gray-500">
                       Se acredita/abona al inmueble beneficiado aplicando a conceptos pendientes.
+                      {beneficiaryUnitId && (
+                        <span className="ml-1 font-medium text-gray-700">
+                          Saldo pendiente total: {formatCOP(beneficiaryTotalPendingBalance)}
+                        </span>
+                      )}
                     </p>
                   </div>
                   <span className="text-base font-bold text-green-700">{formatCOP(totalAbono)}</span>
@@ -1123,7 +1069,46 @@ export function NotesTab() {
                   </Select>
                 </div>
 
-                {renderConceptRows(abonoRows, 'abono', beneficiaryUnitId, true)}
+                {renderConceptRows(abonoRows, 'abono', beneficiaryUnitId)}
+
+                {calculatedAdvanceAmount > 0 && (
+                  <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold uppercase text-emerald-900">
+                        Anticipo generado (excede el saldo pendiente total)
+                      </span>
+                      <span className="text-sm font-bold text-emerald-800">
+                        {formatCOP(calculatedAdvanceAmount)}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <Select
+                        label="Cuenta contable de anticipo *"
+                        value={advanceAccountId}
+                        onChange={e => setAdvanceAccountId(e.target.value)}
+                      >
+                        <option value="">— Seleccionar cuenta anticipo —</option>
+                        {accounts.map(acc => (
+                          <option key={acc.id} value={acc.id}>
+                            {acc.code} — {acc.name}
+                          </option>
+                        ))}
+                      </Select>
+                      <Select
+                        label="Cuenta contable de cruce anticipo *"
+                        value={advanceCounterpartAccountId}
+                        onChange={e => setAdvanceCounterpartAccountId(e.target.value)}
+                      >
+                        <option value="">— Seleccionar cuenta cruce —</option>
+                        {accounts.map(acc => (
+                          <option key={acc.id} value={acc.id}>
+                            {acc.code} — {acc.name}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                  </div>
+                )}
               </div>
             </Card>
 
@@ -1131,7 +1116,9 @@ export function NotesTab() {
               <div className="p-6 space-y-4">
                 <div className="flex items-center justify-between border-b border-gray-100 pb-3">
                   <div>
-                    <h3 className="text-sm font-semibold text-amber-900">2. Cargo (Inmueble debitado)</h3>
+                    <h3 className="text-sm font-semibold text-amber-900">
+                      2. Cargo (Inmueble debitado)
+                    </h3>
                     <p className="text-xs text-gray-500">
                       Se carga/debita al inmueble afectado usando por defecto la cuenta del concepto.
                     </p>
@@ -1155,7 +1142,7 @@ export function NotesTab() {
                   </Select>
                 </div>
 
-                {renderConceptRows(cargoRows, 'cargo', chargedUnitId, false)}
+                {renderConceptRows(cargoRows, 'cargo', chargedUnitId)}
               </div>
             </Card>
           </div>
@@ -1207,7 +1194,7 @@ export function NotesTab() {
             </span>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
             <Select
               label="Tipo de nota"
               value={filterType}
@@ -1309,6 +1296,15 @@ export function NotesTab() {
                       </td>
                       <td className="px-4 py-3 text-center">
                         <div className="inline-flex items-center gap-1.5">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setPrintTarget(n)}
+                            title="Imprimir nota"
+                          >
+                            <Printer className="w-3.5 h-3.5 mr-1" /> Imprimir
+                          </Button>
                           {!isVoided && (
                             <>
                               <Button
@@ -1356,6 +1352,99 @@ export function NotesTab() {
           </div>
         )}
       </Card>
+
+      {/* Modal Imprimir Nota */}
+      <Modal
+        open={!!printTarget}
+        onClose={() => setPrintTarget(null)}
+        title={printTarget ? `Documento de Tesorería · ${printTarget.note_number}` : 'Imprimir Nota'}
+        size="lg"
+      >
+        {printTarget && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-gray-50 p-3.5 rounded-lg border border-gray-200 text-xs">
+              <div>
+                <span className="text-gray-500 block">Documento</span>
+                <strong className="text-sm font-mono text-blue-700">
+                  {printTarget.note_number}
+                </strong>
+              </div>
+              <div>
+                <span className="text-gray-500 block">Fecha Aplicación / Contable</span>
+                <strong className="text-sm text-gray-900">
+                  {printTarget.application_date} / {printTarget.accounting_date}
+                </strong>
+              </div>
+              <div>
+                <span className="text-gray-500 block">Total</span>
+                <strong className="text-sm text-gray-900">
+                  {formatCOP(
+                    printTarget.status === 'anulado' ? 0 : Number(printTarget.total_amount || 0)
+                  )}
+                </strong>
+              </div>
+              <div className="sm:col-span-3">
+                <span className="text-gray-500 block">Descripción</span>
+                <span className="text-sm text-gray-800">
+                  {printTarget.description || 'Sin descripción'}
+                </span>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto border border-gray-200 rounded-lg">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 text-xs text-gray-500 border-b border-gray-200">
+                  <tr>
+                    <th className="text-left px-3 py-2">Sección / Inmueble</th>
+                    <th className="text-left px-3 py-2">Concepto</th>
+                    <th className="text-left px-3 py-2">Cuenta Cruce</th>
+                    <th className="text-right px-3 py-2">Valor</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {(noteLinesMap[printTarget.id] || []).map((ln: any) => {
+                    const cObj = conceptById.get(String(ln.concept_id));
+                    const uObj = unitById.get(String(ln.unit_id));
+                    const accObj = accountById.get(String(ln.offset_account_id));
+                    const lineVal =
+                      Number(ln.amount || 0) +
+                      Number(ln.discount_amount || 0) +
+                      Number(ln.advance_amount || 0);
+                    return (
+                      <tr key={ln.id}>
+                        <td className="px-3 py-2 text-xs text-gray-800">
+                          {ln.section && ln.section !== 'principal'
+                            ? `${String(ln.section).toUpperCase()} · `
+                            : ''}
+                          {unitDisplay(uObj)}
+                        </td>
+                        <td className="px-3 py-2 text-xs text-gray-800">
+                          {cObj ? `${cObj.code} — ${cObj.name}` : 'Concepto'}
+                        </td>
+                        <td className="px-3 py-2 text-xs font-mono text-gray-600">
+                          {accObj ? `${accObj.code} — ${accObj.name}` : '—'}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono text-gray-900">
+                          {formatCOP(lineVal)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-gray-200">
+              <Button variant="outline" onClick={() => setPrintTarget(null)}>
+                Cerrar
+              </Button>
+              <Button onClick={() => window.print()}>
+                <Printer className="w-4 h-4" /> Imprimir
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
