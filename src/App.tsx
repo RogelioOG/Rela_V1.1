@@ -25,6 +25,7 @@ import CuentasPage from '@/pages/CuentasPage';
 import AsientosPage from '@/pages/AsientosPage';
 import ReportesPage from '@/pages/ReportesPage';
 import TesoreriaPage from '@/pages/TesoreriaPage';
+import { PortfolioReportsTab } from '@/components/portfolio/PortfolioReportsTab';
 import { Loader2 } from 'lucide-react';
 import { NoOrgSelected } from '@/components/shared';
 
@@ -119,6 +120,7 @@ function App() {
           <Route path="/facturacion" element={<ProtectedRoute><OrgMemberRoute><ProcesoFacturacionPage /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/acuerdos-pago" element={<ProtectedRoute><OrgMemberRoute><AcuerdosPagoPage /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/recaudos" element={<ProtectedRoute><OrgMemberRoute><RecaudosPage /></OrgMemberRoute></ProtectedRoute>} />
+          <Route path="/reportes-cartera" element={<ProtectedRoute><OrgMemberRoute><PortfolioReportsTab /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/calendario" element={<ProtectedRoute><OrgMemberRoute><CalendarioPage /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/conceptos" element={<ProtectedRoute><OrgMemberRoute><ConceptosPage /></OrgMemberRoute></ProtectedRoute>} />
           <Route path="/descuentos" element={<ProtectedRoute><OrgMemberRoute><DescuentosPage /></OrgMemberRoute></ProtectedRoute>} />
