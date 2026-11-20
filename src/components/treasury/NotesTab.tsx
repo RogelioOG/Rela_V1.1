@@ -129,6 +129,14 @@ function buildAllocationsFromDetailedItems(
   });
 }
 
+function escapeHtml(text: string): string {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 export function NotesTab() {
   const { activeOrg } = useOrg();
   const today = todayISO();
@@ -1001,6 +1009,185 @@ export function NotesTab() {
     });
   }, [notesList, filterType, filterUnitId, filterDateFrom, filterDateTo]);
 
+  function handlePrintNoteDocument(note: any) {
+    if (!note) return;
+
+    const unitByIdMap = new Map<string, any>();
+    units.forEach(u => unitByIdMap.set(String(u.id), u));
+
+    const conceptByIdMap = new Map<string, BillingConcept>();
+    concepts.forEach(c => conceptByIdMap.set(String(c.id), c));
+
+    const lines = noteLinesMap[note.id] || [];
+    const totalFormatted = formatCOP(
+      note.status === 'anulado' ? 0 : Number(note.total_amount || 0)
+    );
+
+    const rowsHtml = lines
+      .map((ln: any) => {
+        const cObj = conceptByIdMap.get(String(ln.concept_id));
+        const uObj = unitByIdMap.get(String(ln.unit_id));
+        const sectionPrefix =
+          ln.section && ln.section !== 'principal'
+            ? `${String(ln.section).toUpperCase()} · `
+            : '';
+        const unitText = `${sectionPrefix}${unitDisplay(uObj)}`;
+        const conceptText = cObj ? `${cObj.code} — ${cObj.name}` : 'Concepto';
+        const lineVal =
+          Number(ln.amount || 0) +
+          Number(ln.discount_amount || 0) +
+          Number(ln.advance_amount || 0);
+
+        return `
+          <tr>
+            <td>${escapeHtml(unitText)}</td>
+            <td>${escapeHtml(conceptText)}</td>
+            <td class="right mono">${escapeHtml(formatCOP(lineVal))}</td>
+          </tr>
+        `;
+      })
+      .join('');
+
+    const htmlDoc = `
+      <!doctype html>
+      <html lang="es">
+        <head>
+          <meta charset="utf-8" />
+          <title>Documento de Tesorería · ${escapeHtml(note.note_number)}</title>
+          <style>
+            * { box-sizing: border-box; }
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+              color: #111827;
+              margin: 24px;
+            }
+            .header-box {
+              border: 1px solid #d1d5db;
+              background: #f9fafb;
+              border-radius: 8px;
+              padding: 14px 16px;
+              margin-bottom: 16px;
+            }
+            .grid {
+              display: grid;
+              grid-template-columns: repeat(3, 1fr);
+              gap: 12px;
+              margin-bottom: 10px;
+            }
+            .label {
+              font-size: 11px;
+              color: #6b7280;
+              display: block;
+              margin-bottom: 2px;
+            }
+            .val {
+              font-size: 13px;
+              font-weight: 700;
+              color: #111827;
+            }
+            .mono {
+              font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            }
+            .doc-num {
+              color: #1d4ed8;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              border: 1px solid #d1d5db;
+              font-size: 12px;
+            }
+            th, td {
+              padding: 9px 12px;
+              border-bottom: 1px solid #e5e7eb;
+              text-align: left;
+            }
+            th {
+              background: #f9fafb;
+              color: #4b5563;
+              font-size: 11px;
+              text-transform: uppercase;
+            }
+            .right {
+              text-align: right;
+            }
+            @media print {
+              body { margin: 12px; }
+            }
+          </style>
+        </head>
+        <body>
+          <h2 style="margin:0 0 12px 0;font-size:16px;">Documento de Tesorería · ${escapeHtml(note.note_number)}</h2>
+          <div class="header-box">
+            <div class="grid">
+              <div>
+                <span class="label">Documento</span>
+                <span class="val mono doc-num">${escapeHtml(note.note_number)}</span>
+              </div>
+              <div>
+                <span class="label">Fecha Aplicación / Contable</span>
+                <span class="val">${escapeHtml(note.application_date || '')} / ${escapeHtml(note.accounting_date || '')}</span>
+              </div>
+              <div>
+                <span class="label">Total</span>
+                <span class="val">${escapeHtml(totalFormatted)}</span>
+              </div>
+            </div>
+            <div>
+              <span class="label">Descripción</span>
+              <span style="font-size:12px;color:#1f2937;">${escapeHtml(note.description || 'Sin descripción')}</span>
+            </div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Sección / Inmueble</th>
+                <th>Concepto</th>
+                <th class="right">Valor</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml || '<tr><td colspan="3">Sin detalle</td></tr>'}
+            </tbody>
+          </table>
+        </body>
+      </html>
+    `;
+
+    const printFrame = document.createElement('iframe');
+    printFrame.style.position = 'fixed';
+    printFrame.style.right = '0';
+    printFrame.style.bottom = '0';
+    printFrame.style.width = '0';
+    printFrame.style.height = '0';
+    printFrame.style.border = '0';
+    document.body.appendChild(printFrame);
+
+    const frameWin = printFrame.contentWindow;
+    const frameDoc = printFrame.contentDocument || frameWin?.document;
+
+    if (frameDoc && frameWin) {
+      frameDoc.open();
+      frameDoc.write(htmlDoc);
+      frameDoc.close();
+
+      frameWin.focus();
+      setTimeout(() => {
+        frameWin.print();
+        setTimeout(() => {
+          if (printFrame.parentNode) {
+            printFrame.parentNode.removeChild(printFrame);
+          }
+        }, 500);
+      }, 150);
+    } else {
+      window.print();
+      if (printFrame.parentNode) {
+        printFrame.parentNode.removeChild(printFrame);
+      }
+    }
+  }
+
   function renderConceptRows(
     rows: ConceptRowForm[],
     section: 'principal' | 'abono' | 'cargo',
@@ -1210,9 +1397,6 @@ export function NotesTab() {
 
   const conceptById = new Map<string, BillingConcept>();
   concepts.forEach(c => conceptById.set(String(c.id), c));
-
-  const accountById = new Map<string, AccountOption>();
-  accounts.forEach(a => accountById.set(String(a.id), a));
 
   const totalStandard = roundMoney(
     standardRows.reduce((s, r) => s + parseAmount(r.amount || '0'), 0)
@@ -1737,7 +1921,6 @@ export function NotesTab() {
                   <tr>
                     <th className="text-left px-3 py-2">Sección / Inmueble</th>
                     <th className="text-left px-3 py-2">Concepto</th>
-                    <th className="text-left px-3 py-2">Cuenta Cruce</th>
                     <th className="text-right px-3 py-2">Valor</th>
                   </tr>
                 </thead>
@@ -1745,7 +1928,6 @@ export function NotesTab() {
                   {(noteLinesMap[printTarget.id] || []).map((ln: any) => {
                     const cObj = conceptById.get(String(ln.concept_id));
                     const uObj = unitById.get(String(ln.unit_id));
-                    const accObj = accountById.get(String(ln.offset_account_id));
                     const lineVal =
                       Number(ln.amount || 0) +
                       Number(ln.discount_amount || 0) +
@@ -1761,9 +1943,6 @@ export function NotesTab() {
                         <td className="px-3 py-2 text-xs text-gray-800">
                           {cObj ? `${cObj.code} — ${cObj.name}` : 'Concepto'}
                         </td>
-                        <td className="px-3 py-2 text-xs font-mono text-gray-600">
-                          {accObj ? `${accObj.code} — ${accObj.name}` : '—'}
-                        </td>
                         <td className="px-3 py-2 text-right font-mono text-gray-900">
                           {formatCOP(lineVal)}
                         </td>
@@ -1778,7 +1957,7 @@ export function NotesTab() {
               <Button variant="outline" onClick={() => setPrintTarget(null)}>
                 Cerrar
               </Button>
-              <Button onClick={() => window.print()}>
+              <Button type="button" onClick={() => handlePrintNoteDocument(printTarget)}>
                 <Printer className="w-4 h-4" /> Imprimir
               </Button>
             </div>
