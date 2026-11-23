@@ -103,27 +103,28 @@ function classifyConcept(
 }
 
 /**
- * Calcula el impacto neto de una línea de nota (NC, ND, NT) de forma aislada:
+ * Calcula el impacto neto de una línea de nota para NC, ND y NT:
  * - section === 'abono' => resta (-val)
  * - section === 'cargo' => suma (+val)
- * - section === 'principal' o vacío => ND suma (+val), NC resta (-val)
+ * - ND => suma (+val)
+ * - NC => resta (-val)
  */
 function noteLineSignedDelta(parentNote: any, line: any): number {
-  const val = roundMoney(
+  const rawVal =
     Number(line?.amount || 0) +
-      Number(line?.discount_amount || 0) +
-      Number(line?.advance_amount || 0)
-  );
+    Number(line?.discount_amount || 0) +
+    Number(line?.advance_amount || 0);
+  const val = roundMoney(Math.abs(rawVal));
   if (val === 0) return 0;
 
   const noteType = String(parentNote?.note_type || '').toUpperCase().trim();
   const section = String(line?.section || '').toLowerCase().trim();
 
-  if (section === 'abono') return -Math.abs(val);
-  if (section === 'cargo') return Math.abs(val);
+  if (section === 'abono') return -val;
+  if (section === 'cargo') return val;
 
-  if (noteType === 'ND') return Math.abs(val);
-  if (noteType === 'NC') return -Math.abs(val);
+  if (noteType === 'ND') return val;
+  if (noteType === 'NC') return -val;
   return 0;
 }
 
@@ -224,7 +225,6 @@ export function PortfolioReportsTab() {
         .from('billing_concepts')
         .select('*')
         .eq('organization_id', activeOrg.id)
-        .eq('is_active', true)
         .order('name', { ascending: true }),
       supabase
         .from('payment_hierarchy_configs')
@@ -350,16 +350,6 @@ export function PortfolioReportsTab() {
     return m;
   }, [concepts]);
 
-  const activeConceptById = useMemo(() => {
-    const m = new Map<string, BillingConcept>();
-    concepts.forEach(c => {
-      if (c.is_active !== false) {
-        m.set(String(c.id), c);
-      }
-    });
-    return m;
-  }, [concepts]);
-
   const pmMap = useMemo(() => {
     const m = new Map<string, string>();
     paymentMethods.forEach(p => m.set(String(p.id), p.name));
@@ -394,10 +384,6 @@ export function PortfolioReportsTab() {
     return m;
   }, [receiptAllocations]);
 
-  /**
-   * Extrae el valor base de la cuenta de cobro por concepto SIN mezclar
-   * notas ni pagos, para que las notas se reflejen únicamente en su propia línea/columna.
-   */
   const getInvoiceBaseConceptAmounts = useCallback(
     (inv: any) => {
       const snapItems = Array.isArray(inv.items_snapshot) ? inv.items_snapshot : [];
@@ -530,7 +516,7 @@ export function PortfolioReportsTab() {
     selectedConceptId,
   ]);
 
-  // 1. Estado de Cuenta Resumido
+  // 1. Estado de Cuenta Resumido (NC, ND, NT)
   const summaryStatementRows = useMemo(() => {
     const targetUnitId =
       selectedUnitId || (filteredUnits.length === 1 ? String(filteredUnits[0].id) : '');
@@ -598,7 +584,6 @@ export function PortfolioReportsTab() {
       else row.otros = roundMoney(row.otros + amount);
     };
 
-    // 1.1 Cuentas de cobro base (sin mezclar notas)
     invoices
       .filter(
         inv =>
@@ -622,7 +607,6 @@ export function PortfolioReportsTab() {
         });
       });
 
-    // 1.2 Cuotas sin factura asociada
     dues
       .filter(
         d =>
@@ -653,7 +637,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // 1.3 Pagos / Recibos de caja
     receipts
       .filter(
         r =>
@@ -699,7 +682,7 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // 1.4 Ajustes por Notas (NC, ND, NT) en su propia columna AJUSTES
+    // Notas NC, ND y NT en columna AJUSTES
     noteLines.forEach(ln => {
       const parent = noteByIdMap.get(String(ln.note_id));
       if (!parent || !isStatusAllowed(parent.status)) return;
@@ -756,7 +739,7 @@ export function PortfolioReportsTab() {
     selectedConceptId,
   ]);
 
-  // 2. Estado de Cuenta Detallado
+  // 2. Estado de Cuenta Detallado (NC, ND, NT)
   const detailedStatementData = useMemo(() => {
     const targetUnitId =
       selectedUnitId || (filteredUnits.length === 1 ? String(filteredUnits[0].id) : '');
@@ -792,7 +775,6 @@ export function PortfolioReportsTab() {
     ) => {
       const rounded = roundMoney(amount);
       if (Math.abs(rounded) < 0.005) return;
-      if (conceptId && activeConceptById.size > 0 && !activeConceptById.has(conceptId)) return;
 
       if (!candidateCols.has(colKey)) {
         candidateCols.set(colKey, {
@@ -804,7 +786,7 @@ export function PortfolioReportsTab() {
       eventMap[colKey] = roundMoney((eventMap[colKey] || 0) + rounded);
     };
 
-    // 2.1 Cuentas de cobro base (intactas, sin cruce con notas)
+    // Cuentas de cobro
     invoices
       .filter(
         inv =>
@@ -818,10 +800,9 @@ export function PortfolioReportsTab() {
 
         baseLines.forEach(line => {
           const cid = line.conceptId ? String(line.conceptId) : '';
-          if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
           if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
 
-          const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
+          const cObj = cid ? conceptMap.get(cid) : undefined;
           const label = cObj?.name || line.name || 'Concepto';
           const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
           addMovementToConcept(byConceptKey, key, label, cid || undefined, line.baseAmount);
@@ -842,7 +823,7 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // 2.2 Recibos de caja (intactos, sin cruce con notas)
+    // Recibos de caja
     receipts
       .filter(
         r =>
@@ -859,7 +840,6 @@ export function PortfolioReportsTab() {
         if (rAllocs.length > 0) {
           rAllocs.forEach(al => {
             const cid = String(al.concept_id || '');
-            if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
             if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
 
             const appliedVal = roundMoney(
@@ -867,7 +847,7 @@ export function PortfolioReportsTab() {
             );
             if (Math.abs(appliedVal) < 0.005) return;
 
-            const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
+            const cObj = cid ? conceptMap.get(cid) : undefined;
             const label = cObj?.name || 'Concepto';
             const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
             addMovementToConcept(byConceptKey, key, label, cid || undefined, -appliedVal);
@@ -891,7 +871,7 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // 2.3 Notas (NC, ND, NT) como filas independientes con su propio efecto
+    // Todas las notas: NC, ND y NT
     const linesByNote = new Map<string, any[]>();
     noteLines.forEach(ln => {
       const nid = String(ln.note_id || '');
@@ -904,25 +884,56 @@ export function PortfolioReportsTab() {
         if (!isStatusAllowed(parent.status)) return false;
         if (!isDateAllowed(parent.accounting_date || parent.application_date)) return false;
         const nLines = linesByNote.get(String(parent.id)) || [];
-        return nLines.some(l => String(l.unit_id || parent.unit_id || '') === targetUnitId);
+        return (
+          String(parent.unit_id || '') === targetUnitId ||
+          nLines.some(l => String(l.unit_id || parent.unit_id || '') === targetUnitId)
+        );
       })
       .forEach(parent => {
-        const nLines = (linesByNote.get(String(parent.id)) || []).filter(
+        const allParentLines = linesByNote.get(String(parent.id)) || [];
+        const unitLines = allParentLines.filter(
           l => String(l.unit_id || parent.unit_id || '') === targetUnitId
         );
 
         const byConceptKey: Record<string, number> = {};
+        const noteTypeUpper = String(parent.note_type || '').toUpperCase().trim();
 
-        nLines.forEach(ln => {
-          const cid = String(ln.conceptId ?? ln.concept_id ?? '');
-          if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
-          if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
-          const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
-          const label = cObj?.name || 'Ajuste Nota';
-          const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
-          const delta = noteLineSignedDelta(parent, ln);
-          addMovementToConcept(byConceptKey, key, label, cid || undefined, delta);
-        });
+        if (unitLines.length > 0) {
+          unitLines.forEach(ln => {
+            const cid = String(ln.conceptId ?? ln.concept_id ?? '');
+            if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
+            const cObj = cid ? conceptMap.get(cid) : undefined;
+            const label =
+              cObj?.name ||
+              (noteTypeUpper === 'ND'
+                ? 'Ajuste Nota Débito'
+                : noteTypeUpper === 'NC'
+                ? 'Ajuste Nota Crédito'
+                : 'Ajuste Nota');
+            const key = cid ? `cid_${cid}` : `lbl_NOTA_${noteTypeUpper || 'ADJ'}`;
+            const delta = noteLineSignedDelta(parent, ln);
+            addMovementToConcept(byConceptKey, key, label, cid || undefined, delta);
+          });
+        } else if (
+          selectedConceptId === 'ALL' &&
+          String(parent.unit_id || '') === targetUnitId
+        ) {
+          const val = roundMoney(Math.abs(Number(parent.total_amount || 0)));
+          const delta = noteTypeUpper === 'ND' ? val : noteTypeUpper === 'NC' ? -val : 0;
+          const label =
+            noteTypeUpper === 'ND'
+              ? 'Ajuste Nota Débito'
+              : noteTypeUpper === 'NC'
+              ? 'Ajuste Nota Crédito'
+              : 'Ajuste Nota';
+          addMovementToConcept(
+            byConceptKey,
+            `lbl_NOTA_${noteTypeUpper || 'ADJ'}`,
+            label,
+            undefined,
+            delta
+          );
+        }
 
         const totalDoc = roundMoney(
           Object.values(byConceptKey).reduce((s, v) => s + v, 0)
@@ -930,13 +941,13 @@ export function PortfolioReportsTab() {
 
         if (selectedConceptId === 'ALL' || Math.abs(totalDoc) > 0) {
           const typeLabel =
-            parent.note_type === 'NT'
+            noteTypeUpper === 'NT'
               ? 'Traslado de cartera (NT)'
-              : parent.note_type === 'NC'
+              : noteTypeUpper === 'NC'
               ? 'Nota crédito (NC)'
-              : parent.note_type === 'ND'
+              : noteTypeUpper === 'ND'
               ? 'Nota débito (ND)'
-              : parent.note_type || 'Nota';
+              : noteTypeUpper || 'Nota';
           rawEvents.push({
             date: String(parent.accounting_date || parent.application_date || ''),
             doc: String(parent.note_number || parent.note_type),
@@ -996,7 +1007,6 @@ export function PortfolioReportsTab() {
     tpMap,
     pmMap,
     conceptMap,
-    activeConceptById,
     getInvoiceBaseConceptAmounts,
     invoices,
     receipts,
