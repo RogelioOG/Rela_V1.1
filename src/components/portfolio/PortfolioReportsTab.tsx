@@ -102,20 +102,28 @@ function classifyConcept(
   return 'other';
 }
 
+/**
+ * Calcula el impacto neto de una línea de nota (NC, ND, NT) de forma aislada:
+ * - section === 'abono' => resta (-val)
+ * - section === 'cargo' => suma (+val)
+ * - section === 'principal' o vacío => ND suma (+val), NC resta (-val)
+ */
 function noteLineSignedDelta(parentNote: any, line: any): number {
   const val = roundMoney(
     Number(line?.amount || 0) +
       Number(line?.discount_amount || 0) +
       Number(line?.advance_amount || 0)
   );
+  if (val === 0) return 0;
+
   const noteType = String(parentNote?.note_type || '').toUpperCase().trim();
   const section = String(line?.section || '').toLowerCase().trim();
 
-  if (section === 'abono') return -val;
-  if (section === 'cargo') return val;
+  if (section === 'abono') return -Math.abs(val);
+  if (section === 'cargo') return Math.abs(val);
 
-  if (noteType === 'ND') return val;
-  if (noteType === 'NC') return -val;
+  if (noteType === 'ND') return Math.abs(val);
+  if (noteType === 'NC') return -Math.abs(val);
   return 0;
 }
 
@@ -370,15 +378,6 @@ export function PortfolioReportsTab() {
     return m;
   }, [dues]);
 
-  const dueByUnitPeriodMap = useMemo(() => {
-    const m = new Map<string, any>();
-    dues.forEach(d => {
-      const k = `${String(d.unit_id || '')}_${String(d.period || '')}`;
-      if (!m.has(k)) m.set(k, d);
-    });
-    return m;
-  }, [dues]);
-
   const noteByIdMap = useMemo(() => {
     const m = new Map<string, any>();
     notes.forEach(n => m.set(String(n.id), n));
@@ -395,42 +394,18 @@ export function PortfolioReportsTab() {
     return m;
   }, [receiptAllocations]);
 
-  const getInvoiceOriginalConceptAmounts = useCallback(
+  /**
+   * Extrae el valor base de la cuenta de cobro por concepto SIN mezclar
+   * notas ni pagos, para que las notas se reflejen únicamente en su propia línea/columna.
+   */
+  const getInvoiceBaseConceptAmounts = useCallback(
     (inv: any) => {
-      const uid = String(inv.unit_id || '');
-      const period = String(inv.period || '');
-      const matchingDue = dueByUnitPeriodMap.get(`${uid}_${period}`);
-      const matchingDueId = matchingDue ? String(matchingDue.id) : '';
-
-      const appliedByConcept = new Map<string, number>();
-      receipts.forEach(r => {
-        if (!isStatusAllowed(r.status)) return;
-        if (!isDateAllowed(r.payment_date || r.accounting_date)) return;
-        const rAllocs = allocsByReceiptId.get(String(r.id)) || [];
-        rAllocs.forEach(al => {
-          const sameDue = matchingDueId && String(al.due_id || '') === matchingDueId;
-          const sameUnitAndPeriod =
-            !matchingDueId &&
-            String(r.unit_id || '') === uid &&
-            (!al.period || String(al.period) === period);
-          if (!sameDue && !sameUnitAndPeriod) return;
-
-          const cid = String(al.concept_id || '');
-          const cap = Number(al.capital_applied || 0);
-          const intr = Number(al.interest_applied || 0);
-          const totAl = roundMoney(cap + intr);
-          if (cid && totAl > 0) {
-            appliedByConcept.set(cid, roundMoney((appliedByConcept.get(cid) || 0) + totAl));
-          }
-        });
-      });
-
       const snapItems = Array.isArray(inv.items_snapshot) ? inv.items_snapshot : [];
       const result: {
         conceptId?: string;
         code: string;
         name: string;
-        originalAmount: number;
+        baseAmount: number;
         isLateInterest: boolean;
       }[] = [];
 
@@ -438,17 +413,7 @@ export function PortfolioReportsTab() {
         snapItems.forEach((it: any) => {
           const cid = String(it.conceptId ?? it.concept_id ?? it.billing_concept_id ?? '');
           const cObj = cid ? conceptMap.get(cid) : undefined;
-          const snapAmt = Number(it.amount ?? it.total ?? it.value ?? 0);
-          const appliedForThis = cid ? appliedByConcept.get(cid) || 0 : 0;
-
-          const dueBal = matchingDue ? Number(matchingDue.balance ?? matchingDue.amount ?? 0) : 0;
-          const dueAmt = matchingDue ? Number(matchingDue.amount ?? 0) : 0;
-          const hasPartialPaymentOnDue =
-            matchingDue && dueBal < dueAmt - 0.01 && appliedForThis > 0;
-
-          const originalAmt = hasPartialPaymentOnDue
-            ? roundMoney(snapAmt + appliedForThis)
-            : roundMoney(snapAmt > 0 ? snapAmt : snapAmt + appliedForThis);
+          const snapAmt = roundMoney(Number(it.amount ?? it.total ?? it.value ?? 0));
 
           result.push({
             conceptId: cid || undefined,
@@ -456,14 +421,14 @@ export function PortfolioReportsTab() {
             name:
               cObj?.name ||
               String(it.conceptName ?? it.concept_name ?? it.name ?? 'Concepto'),
-            originalAmount: originalAmt,
+            baseAmount: snapAmt,
             isLateInterest: Boolean(
               cObj?.is_late_interest ?? it.isLateInterest ?? it.is_late_interest
             ),
           });
         });
 
-        const intr = Number(inv.interest_amount || 0);
+        const intr = roundMoney(Number(inv.interest_amount || 0));
         const hasInterestInSnap = result.some(r =>
           classifyConcept(r.code, r.name, r.isLateInterest) === 'intereses'
         );
@@ -473,18 +438,18 @@ export function PortfolioReportsTab() {
             conceptId: moraConcept?.id ? String(moraConcept.id) : undefined,
             code: moraConcept?.code || 'MORA_ADM',
             name: moraConcept?.name || 'Intereses de Mora',
-            originalAmount: roundMoney(intr),
+            baseAmount: intr,
             isLateInterest: true,
           });
         }
       } else {
-        const sub = Number(inv.subtotal || 0);
-        const intr = Number(inv.interest_amount || 0);
+        const sub = roundMoney(Number(inv.subtotal || 0));
+        const intr = roundMoney(Number(inv.interest_amount || 0));
         if (sub > 0) {
           result.push({
             code: 'ADM',
             name: 'Cuota de Administración',
-            originalAmount: roundMoney(sub),
+            baseAmount: sub,
             isLateInterest: false,
           });
         }
@@ -492,7 +457,7 @@ export function PortfolioReportsTab() {
           result.push({
             code: 'MORA_ADM',
             name: 'Intereses de Mora',
-            originalAmount: roundMoney(intr),
+            baseAmount: intr,
             isLateInterest: true,
           });
         }
@@ -500,7 +465,7 @@ export function PortfolioReportsTab() {
 
       return result;
     },
-    [dueByUnitPeriodMap, receipts, allocsByReceiptId, conceptMap, concepts, isStatusAllowed, isDateAllowed]
+    [conceptMap, concepts]
   );
 
   const allDetailedItems = useMemo(() => {
@@ -633,6 +598,7 @@ export function PortfolioReportsTab() {
       else row.otros = roundMoney(row.otros + amount);
     };
 
+    // 1.1 Cuentas de cobro base (sin mezclar notas)
     invoices
       .filter(
         inv =>
@@ -643,19 +609,20 @@ export function PortfolioReportsTab() {
       .forEach(inv => {
         const p = String(inv.period || 'SIN PERIODO');
         const row = getOrCreate(p);
-        const origLines = getInvoiceOriginalConceptAmounts(inv);
-        origLines.forEach(line => {
+        const baseLines = getInvoiceBaseConceptAmounts(inv);
+        baseLines.forEach(line => {
           addDiscriminatedAmount(
             row,
             line.conceptId,
             line.code,
             line.name,
-            line.originalAmount,
+            line.baseAmount,
             line.isLateInterest
           );
         });
       });
 
+    // 1.2 Cuotas sin factura asociada
     dues
       .filter(
         d =>
@@ -686,6 +653,7 @@ export function PortfolioReportsTab() {
         }
       });
 
+    // 1.3 Pagos / Recibos de caja
     receipts
       .filter(
         r =>
@@ -731,16 +699,15 @@ export function PortfolioReportsTab() {
         }
       });
 
+    // 1.4 Ajustes por Notas (NC, ND, NT) en su propia columna AJUSTES
     noteLines.forEach(ln => {
       const parent = noteByIdMap.get(String(ln.note_id));
       if (!parent || !isStatusAllowed(parent.status)) return;
       const lineUnit = String(ln.unit_id || parent.unit_id || '');
       if (lineUnit !== targetUnitId) return;
       if (!isDateAllowed(parent.accounting_date || parent.application_date)) return;
-      if (
-        selectedConceptId !== 'ALL' &&
-        String(ln.concept_id || ln.conceptId || '') !== selectedConceptId
-      ) {
+      const cid = String(ln.conceptId ?? ln.concept_id ?? '');
+      if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) {
         return;
       }
 
@@ -783,7 +750,7 @@ export function PortfolioReportsTab() {
     noteByIdMap,
     noteLines,
     conceptMap,
-    getInvoiceOriginalConceptAmounts,
+    getInvoiceBaseConceptAmounts,
     isStatusAllowed,
     isDateAllowed,
     selectedConceptId,
@@ -815,7 +782,6 @@ export function PortfolioReportsTab() {
     }[] = [];
 
     const candidateCols = new Map<string, ConceptColumnDef>();
-    const movementSumByCol = new Map<string, number>();
 
     const addMovementToConcept = (
       eventMap: Record<string, number>,
@@ -836,9 +802,9 @@ export function PortfolioReportsTab() {
         });
       }
       eventMap[colKey] = roundMoney((eventMap[colKey] || 0) + rounded);
-      movementSumByCol.set(colKey, roundMoney((movementSumByCol.get(colKey) || 0) + rounded));
     };
 
+    // 2.1 Cuentas de cobro base (intactas, sin cruce con notas)
     invoices
       .filter(
         inv =>
@@ -848,9 +814,9 @@ export function PortfolioReportsTab() {
       )
       .forEach(inv => {
         const byConceptKey: Record<string, number> = {};
-        const origLines = getInvoiceOriginalConceptAmounts(inv);
+        const baseLines = getInvoiceBaseConceptAmounts(inv);
 
-        origLines.forEach(line => {
+        baseLines.forEach(line => {
           const cid = line.conceptId ? String(line.conceptId) : '';
           if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
           if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
@@ -858,7 +824,7 @@ export function PortfolioReportsTab() {
           const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
           const label = cObj?.name || line.name || 'Concepto';
           const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
-          addMovementToConcept(byConceptKey, key, label, cid || undefined, line.originalAmount);
+          addMovementToConcept(byConceptKey, key, label, cid || undefined, line.baseAmount);
         });
 
         const totalDoc = roundMoney(
@@ -876,6 +842,7 @@ export function PortfolioReportsTab() {
         }
       });
 
+    // 2.2 Recibos de caja (intactos, sin cruce con notas)
     receipts
       .filter(
         r =>
@@ -924,6 +891,7 @@ export function PortfolioReportsTab() {
         }
       });
 
+    // 2.3 Notas (NC, ND, NT) como filas independientes con su propio efecto
     const linesByNote = new Map<string, any[]>();
     noteLines.forEach(ln => {
       const nid = String(ln.note_id || '');
@@ -936,44 +904,25 @@ export function PortfolioReportsTab() {
         if (!isStatusAllowed(parent.status)) return false;
         if (!isDateAllowed(parent.accounting_date || parent.application_date)) return false;
         const nLines = linesByNote.get(String(parent.id)) || [];
-        const hasUnit =
-          String(parent.unit_id || '') === targetUnitId ||
-          String(parent.charged_unit_id || '') === targetUnitId ||
-          String(parent.beneficiary_unit_id || '') === targetUnitId ||
-          nLines.some(l => String(l.unit_id || '') === targetUnitId);
-        return hasUnit;
+        return nLines.some(l => String(l.unit_id || parent.unit_id || '') === targetUnitId);
       })
       .forEach(parent => {
-        const nLines = (linesByNote.get(String(parent.id)) || []).filter(l => {
-          const lineUid = String(l.unit_id || parent.unit_id || '');
-          return lineUid === targetUnitId;
-        });
+        const nLines = (linesByNote.get(String(parent.id)) || []).filter(
+          l => String(l.unit_id || parent.unit_id || '') === targetUnitId
+        );
 
         const byConceptKey: Record<string, number> = {};
 
-        if (nLines.length > 0) {
-          nLines.forEach(ln => {
-            const cid = String(ln.conceptId ?? ln.concept_id ?? '');
-            if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
-            if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
-            const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
-            const label = cObj?.name || 'Ajuste Nota';
-            const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
-            const delta = noteLineSignedDelta(parent, ln);
-            addMovementToConcept(byConceptKey, key, label, cid || undefined, delta);
-          });
-        } else if (selectedConceptId === 'ALL') {
-          const val = roundMoney(Number(parent.total_amount || 0));
-          const delta =
-            String(parent.note_type || '').toUpperCase() === 'ND' ? val : -val;
-          addMovementToConcept(
-            byConceptKey,
-            `lbl_NOTA_${parent.note_type || 'ADJ'}`,
-            `Nota ${parent.note_type || 'Ajuste'}`,
-            undefined,
-            delta
-          );
-        }
+        nLines.forEach(ln => {
+          const cid = String(ln.conceptId ?? ln.concept_id ?? '');
+          if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
+          if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
+          const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
+          const label = cObj?.name || 'Ajuste Nota';
+          const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
+          const delta = noteLineSignedDelta(parent, ln);
+          addMovementToConcept(byConceptKey, key, label, cid || undefined, delta);
+        });
 
         const totalDoc = roundMoney(
           Object.values(byConceptKey).reduce((s, v) => s + v, 0)
@@ -1048,7 +997,7 @@ export function PortfolioReportsTab() {
     pmMap,
     conceptMap,
     activeConceptById,
-    getInvoiceOriginalConceptAmounts,
+    getInvoiceBaseConceptAmounts,
     invoices,
     receipts,
     allocsByReceiptId,
@@ -1093,10 +1042,8 @@ export function PortfolioReportsTab() {
       const uid = String(ln.unit_id || parentNote.unit_id || '');
       if (!allowedUnitIds.has(uid)) return;
       if (!isDateAllowed(parentNote.accounting_date || parentNote.application_date)) return;
-      if (
-        selectedConceptId !== 'ALL' &&
-        String(ln.concept_id || ln.conceptId || '') !== selectedConceptId
-      ) {
+      const cid = String(ln.conceptId ?? ln.concept_id ?? '');
+      if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) {
         return;
       }
       advanceTotal = roundMoney(advanceTotal + Number(ln.advance_amount || 0));
@@ -1359,10 +1306,8 @@ export function PortfolioReportsTab() {
       const uid = String(ln.unit_id || parent.unit_id || '');
       if (!allowedUnitIds.has(uid)) return;
       if (!isDateAllowed(parent.accounting_date || parent.application_date)) return;
-      if (
-        selectedConceptId !== 'ALL' &&
-        String(ln.concept_id || ln.conceptId || '') !== selectedConceptId
-      ) {
+      const cid = String(ln.conceptId ?? ln.concept_id ?? '');
+      if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) {
         return;
       }
       const adv = roundMoney(Number(ln.advance_amount || 0));
