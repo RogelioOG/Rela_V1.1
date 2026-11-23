@@ -55,10 +55,10 @@ interface ThirdPartyOption {
   document_number?: string | null;
 }
 
-interface ConceptBucket {
+interface ConceptColumnDef {
   key: string;
   label: string;
-  category: 'admon' | 'intereses' | 'retroactivo' | 'cuotaExtra' | 'custom';
+  conceptId?: string;
 }
 
 function todayISO(): string {
@@ -85,17 +85,21 @@ function classifyConcept(
   name?: string | null,
   isLateInterest?: boolean
 ): 'admon' | 'intereses' | 'retroactivo' | 'cuotaExtra' | 'other' {
-  const text = `${code || ''} ${name || ''}`.toUpperCase();
-  if (isLateInterest || text.includes('INTERES')) return 'intereses';
-  if (text.includes('RETRO')) return 'retroactivo';
-  if (text.includes('EXTRA')) return 'cuotaExtra';
-  if (text.includes('ADMON') || text.includes('ADMIN')) return 'admon';
+  const c = String(code || '').toUpperCase().trim();
+  const n = String(name || '').toUpperCase().trim();
+  if (isLateInterest || c.startsWith('MORA') || n.includes('INTERES')) {
+    return 'intereses';
+  }
+  if (c === 'REA' || n.includes('RETRO')) {
+    return 'retroactivo';
+  }
+  if (c === 'EXT' || n.includes('EXTRAORDINARIA') || n.includes('CUOTA EXTRA')) {
+    return 'cuotaExtra';
+  }
+  if (c === 'ADM' || n.includes('ADMINISTRACI') || n.includes('ADMON')) {
+    return 'admon';
+  }
   return 'other';
-}
-
-function formatSignedCOP(val: number): string {
-  const rounded = roundMoney(val);
-  return formatCOP(rounded);
 }
 
 function escapeHtml(text: string): string {
@@ -146,7 +150,6 @@ export function PortfolioReportsTab() {
   const [errorMsg, setErrorMsg] = useState('');
 
   const [activeReport, setActiveReport] = useState<ReportKey>('statement_summary');
-  // Fechas libres: el usuario define cuándo aplicar corte o rango
   const [cutoffDate, setCutoffDate] = useState<string>(today);
   const [dateFrom, setDateFrom] = useState<string>('');
   const [dateTo, setDateTo] = useState<string>('');
@@ -278,7 +281,7 @@ export function PortfolioReportsTab() {
 
   const isStatusAllowed = useCallback(
     (st?: string | null) => {
-      const status = String(st || 'contabilizado').toLowerCase();
+      const status = String(st || 'pendiente').toLowerCase();
       if (statusFilter === 'ALL') {
         return status !== 'anulado' && status !== 'void';
       }
@@ -316,6 +319,16 @@ export function PortfolioReportsTab() {
   const conceptMap = useMemo(() => {
     const m = new Map<string, BillingConcept>();
     concepts.forEach(c => m.set(String(c.id), c));
+    return m;
+  }, [concepts]);
+
+  const activeConceptById = useMemo(() => {
+    const m = new Map<string, BillingConcept>();
+    concepts.forEach(c => {
+      if (c.is_active !== false) {
+        m.set(String(c.id), c);
+      }
+    });
     return m;
   }, [concepts]);
 
@@ -457,7 +470,7 @@ export function PortfolioReportsTab() {
     selectedConceptId,
   ]);
 
-  // 1. Estado de Cuenta Resumido (discriminando Admon, Intereses, Retroactivo, Cuota Extra, Otros)
+  // 1. Estado de Cuenta Resumido (lee items_snapshot en camelCase o snake_case + interest_amount + dues + recibos + notas)
   const summaryStatementRows = useMemo(() => {
     const targetUnitId =
       selectedUnitId || (filteredUnits.length === 1 ? String(filteredUnits[0].id) : '');
@@ -502,24 +515,27 @@ export function PortfolioReportsTab() {
     const addDiscriminatedAmount = (
       row: ReturnType<typeof getOrCreate>,
       conceptId: string | null | undefined,
-      fallbackLabel: string,
+      fallbackCode: string,
+      fallbackName: string,
       val: number,
       isLateInterest = false
     ) => {
+      const amount = roundMoney(val);
+      if (Math.abs(amount) < 0.005) return;
       if (selectedConceptId !== 'ALL' && String(conceptId || '') !== selectedConceptId) {
         return;
       }
       const cObj = conceptId ? conceptMap.get(String(conceptId)) : undefined;
       const cat = classifyConcept(
-        cObj?.code,
-        cObj?.name || fallbackLabel,
+        cObj?.code || fallbackCode,
+        cObj?.name || fallbackName,
         Boolean(cObj?.is_late_interest || isLateInterest)
       );
-      if (cat === 'intereses') row.intereses = roundMoney(row.intereses + val);
-      else if (cat === 'retroactivo') row.retroactivo = roundMoney(row.retroactivo + val);
-      else if (cat === 'cuotaExtra') row.cuotaExtra = roundMoney(row.cuotaExtra + val);
-      else if (cat === 'admon') row.admon = roundMoney(row.admon + val);
-      else row.otros = roundMoney(row.otros + val);
+      if (cat === 'intereses') row.intereses = roundMoney(row.intereses + amount);
+      else if (cat === 'retroactivo') row.retroactivo = roundMoney(row.retroactivo + amount);
+      else if (cat === 'cuotaExtra') row.cuotaExtra = roundMoney(row.cuotaExtra + amount);
+      else if (cat === 'admon') row.admon = roundMoney(row.admon + amount);
+      else row.otros = roundMoney(row.otros + amount);
     };
 
     // Facturas / cuentas de cobro
@@ -537,24 +553,43 @@ export function PortfolioReportsTab() {
 
         if (snapItems.length > 0) {
           snapItems.forEach((it: any) => {
+            const cid = String(it.conceptId ?? it.concept_id ?? it.billing_concept_id ?? '');
+            const cCode = String(it.conceptCode ?? it.concept_code ?? '');
+            const cName = String(it.conceptName ?? it.concept_name ?? it.name ?? '');
             const val = Number(it.amount ?? it.total ?? it.value ?? 0);
             addDiscriminatedAmount(
               row,
-              it.concept_id || it.billing_concept_id,
-              it.concept_name || it.name || '',
+              cid || null,
+              cCode,
+              cName,
               val,
-              Boolean(it.is_late_interest)
+              Boolean(it.isLateInterest ?? it.is_late_interest)
             );
           });
+
+          // Si la factura tiene interest_amount y no venía ya desglosado en items_snapshot
+          const intr = Number(inv.interest_amount || 0);
+          const alreadyHasInterestInSnap = snapItems.some((it: any) => {
+            const cid = String(it.conceptId ?? it.concept_id ?? '');
+            const cObj = cid ? conceptMap.get(cid) : undefined;
+            return classifyConcept(
+              cObj?.code || it.conceptCode || it.concept_code,
+              cObj?.name || it.conceptName || it.concept_name,
+              Boolean(cObj?.is_late_interest)
+            ) === 'intereses';
+          });
+          if (intr > 0 && !alreadyHasInterestInSnap) {
+            addDiscriminatedAmount(row, null, 'MORA_ADM', 'Intereses de Mora', intr, true);
+          }
         } else {
           const sub = Number(inv.subtotal || 0);
           const intr = Number(inv.interest_amount || 0);
-          if (sub > 0) addDiscriminatedAmount(row, null, 'ADMON', sub, false);
-          if (intr > 0) addDiscriminatedAmount(row, null, 'INTERESES', intr, true);
+          if (sub > 0) addDiscriminatedAmount(row, null, 'ADM', 'Cuota de Administración', sub, false);
+          if (intr > 0) addDiscriminatedAmount(row, null, 'MORA_ADM', 'Intereses de Mora', intr, true);
         }
       });
 
-    // Cuotas (dues) que no estén ya cubiertas por factura o que aporten intereses/conceptos
+    // Cuotas (dues) sin factura asociada en el período o con intereses propios
     dues
       .filter(
         d =>
@@ -579,14 +614,15 @@ export function PortfolioReportsTab() {
         if (!hasInvoiceForPeriod && dueAmt > 0) {
           addDiscriminatedAmount(
             row,
-            d.concept_id || d.billing_concept_id,
-            d.concept_name || 'ADMON',
+            d.conceptId ?? d.concept_id ?? d.billing_concept_id ?? null,
+            d.conceptCode ?? d.concept_code ?? 'ADM',
+            d.conceptName ?? d.concept_name ?? 'Cuota de Administración',
             dueAmt,
             false
           );
         }
-        if (dueInterest > 0) {
-          addDiscriminatedAmount(row, null, 'INTERESES', dueInterest, true);
+        if (!hasInvoiceForPeriod && dueInterest > 0) {
+          addDiscriminatedAmount(row, null, 'MORA_ADM', 'Intereses de Mora', dueInterest, true);
         }
       });
 
@@ -620,7 +656,7 @@ export function PortfolioReportsTab() {
       if (!isDateAllowed(parent.accounting_date || parent.application_date)) return;
       if (
         selectedConceptId !== 'ALL' &&
-        String(ln.concept_id || '') !== selectedConceptId
+        String(ln.concept_id || ln.conceptId || '') !== selectedConceptId
       ) {
         return;
       }
@@ -672,16 +708,26 @@ export function PortfolioReportsTab() {
     selectedConceptId,
   ]);
 
-  // 2. Estado de Cuenta Detallado con columnas dinámicas por cada concepto que tenga movimiento
+  // 2. Estado de Cuenta Detallado: columnas dinámicas SOLO de conceptos activos con movimiento/saldo en el inmueble
   const detailedStatementData = useMemo(() => {
     const targetUnitId =
       selectedUnitId || (filteredUnits.length === 1 ? String(filteredUnits[0].id) : '');
     if (!targetUnitId) {
-      return { columns: [] as ConceptBucket[], rows: [] as any[] };
+      return { columns: [] as ConceptColumnDef[], rows: [] as any[] };
     }
 
     const uObj = unitMap.get(targetUnitId);
     const tpObj = uObj?.third_party_id ? tpMap.get(String(uObj.third_party_id)) : null;
+
+    // Saldos pendientes actuales del inmueble por concepto (de allDetailedItems)
+    const unitBalancesByConcept = new Map<string, number>();
+    allDetailedItems
+      .filter(it => String(it.unitId) === targetUnitId)
+      .forEach(it => {
+        const cid = String(it.conceptId || '');
+        const bal = roundMoney(Number(it.balance || 0));
+        unitBalancesByConcept.set(cid, roundMoney((unitBalancesByConcept.get(cid) || 0) + bal));
+      });
 
     const rawEvents: {
       date: string;
@@ -691,23 +737,29 @@ export function PortfolioReportsTab() {
       byConceptKey: Record<string, number>;
     }[] = [];
 
-    const activeColsMap = new Map<string, ConceptBucket>();
+    const candidateCols = new Map<string, ConceptColumnDef>();
+    const movementSumByCol = new Map<string, number>();
 
-    const registerConceptValue = (
-      map: Record<string, number>,
-      key: string,
+    const addMovementToConcept = (
+      eventMap: Record<string, number>,
+      colKey: string,
       label: string,
+      conceptId: string | undefined,
       amount: number
     ) => {
-      if (Math.abs(roundMoney(amount)) < 0.005) return;
-      if (!activeColsMap.has(key)) {
-        activeColsMap.set(key, {
-          key,
+      const rounded = roundMoney(amount);
+      if (Math.abs(rounded) < 0.005) return;
+      if (conceptId && !activeConceptById.has(conceptId)) return;
+
+      if (!candidateCols.has(colKey)) {
+        candidateCols.set(colKey, {
+          key: colKey,
           label,
-          category: 'custom',
+          conceptId,
         });
       }
-      map[key] = roundMoney((map[key] || 0) + amount);
+      eventMap[colKey] = roundMoney((eventMap[colKey] || 0) + rounded);
+      movementSumByCol.set(colKey, roundMoney((movementSumByCol.get(colKey) || 0) + rounded));
     };
 
     // Facturas / cuentas de cobro
@@ -724,23 +776,54 @@ export function PortfolioReportsTab() {
 
         if (snapItems.length > 0) {
           snapItems.forEach((it: any) => {
-            const cid = String(it.concept_id || it.billing_concept_id || '');
-            const cObj = cid ? conceptMap.get(cid) : undefined;
-            const label =
-              cObj?.name || it.concept_name || it.name || (cid ? `Concepto ${cid}` : 'Administración');
-            const key = cid ? `concept_${cid}` : `label_${label.toUpperCase()}`;
-            const val = Number(it.amount ?? it.total ?? it.value ?? 0);
+            const cid = String(it.conceptId ?? it.concept_id ?? it.billing_concept_id ?? '');
+            const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
+            if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
             if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
-            registerConceptValue(byConceptKey, key, label, val);
+
+            const label =
+              cObj?.name ||
+              it.conceptName ||
+              it.concept_name ||
+              it.name ||
+              (cid ? `Concepto ${cid}` : 'Administración');
+            const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
+            const val = Number(it.amount ?? it.total ?? it.value ?? 0);
+            addMovementToConcept(byConceptKey, key, label, cid || undefined, val);
           });
+
+          const intr = Number(inv.interest_amount || 0);
+          const alreadyHasInterestInSnap = snapItems.some((it: any) => {
+            const cid = String(it.conceptId ?? it.concept_id ?? '');
+            const cObj = cid ? conceptMap.get(cid) : undefined;
+            return (
+              classifyConcept(
+                cObj?.code || it.conceptCode || it.concept_code,
+                cObj?.name || it.conceptName || it.concept_name,
+                Boolean(cObj?.is_late_interest)
+              ) === 'intereses'
+            );
+          });
+
+          if (intr > 0 && !alreadyHasInterestInSnap) {
+            const moraConcept = concepts.find(
+              c => c.is_active !== false && c.is_late_interest
+            );
+            const moraCid = moraConcept?.id ? String(moraConcept.id) : undefined;
+            if (selectedConceptId === 'ALL' || (moraCid && selectedConceptId === moraCid)) {
+              const label = moraConcept?.name || 'Intereses de Mora';
+              const key = moraCid ? `cid_${moraCid}` : 'lbl_INTERESES_MORA';
+              addMovementToConcept(byConceptKey, key, label, moraCid, intr);
+            }
+          }
         } else {
           const sub = Number(inv.subtotal || 0);
           const intr = Number(inv.interest_amount || 0);
           if (sub > 0 && selectedConceptId === 'ALL') {
-            registerConceptValue(byConceptKey, 'base_admon', 'Administración', sub);
+            addMovementToConcept(byConceptKey, 'lbl_ADMON', 'Cuota de Administración', undefined, sub);
           }
           if (intr > 0 && selectedConceptId === 'ALL') {
-            registerConceptValue(byConceptKey, 'base_intereses', 'Intereses Mora', intr);
+            addMovementToConcept(byConceptKey, 'lbl_MORA', 'Intereses de Mora', undefined, intr);
           }
         }
 
@@ -772,20 +855,26 @@ export function PortfolioReportsTab() {
         const amt = roundMoney(Number(r.total_amount || 0));
         const pmName = r.payment_method_id ? pmMap.get(String(r.payment_method_id)) : '';
         const byConceptKey: Record<string, number> = {};
-
-        // Si el recibo trae distribución por concepto, la discriminamos; si no, lo ponemos en Recaudo / Concepto
         const allocs = Array.isArray(r.allocations) ? r.allocations : [];
+
         if (allocs.length > 0) {
           allocs.forEach((al: any) => {
-            const cid = String(al.concept_id || '');
+            const cid = String(al.conceptId ?? al.concept_id ?? '');
+            if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
             if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
-            const cObj = cid ? conceptMap.get(cid) : undefined;
-            const label = cObj?.name || al.concept_name || 'Recaudo';
-            const key = cid ? `concept_${cid}` : `label_${label.toUpperCase()}`;
-            registerConceptValue(byConceptKey, key, label, -Math.abs(Number(al.amount || 0)));
+            const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
+            const label = cObj?.name || al.conceptName || al.concept_name || 'Recaudo';
+            const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
+            addMovementToConcept(
+              byConceptKey,
+              key,
+              label,
+              cid || undefined,
+              -Math.abs(Number(al.amount || 0))
+            );
           });
         } else if (selectedConceptId === 'ALL') {
-          registerConceptValue(byConceptKey, 'recaudo_rc', 'Recaudo / Pago', -Math.abs(amt));
+          addMovementToConcept(byConceptKey, 'lbl_RECAUDO', 'Recaudo / Pago', undefined, -Math.abs(amt));
         }
 
         const totalDoc = roundMoney(
@@ -803,7 +892,7 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // Notas NC / ND / NT agrupadas por nota
+    // Notas NC / ND / NT (incluyendo traslado de cartera)
     const linesByNote = new Map<string, any[]>();
     noteLines.forEach(ln => {
       const nid = String(ln.note_id || '');
@@ -818,38 +907,70 @@ export function PortfolioReportsTab() {
         const nLines = linesByNote.get(String(parent.id)) || [];
         const hasUnit =
           String(parent.unit_id || '') === targetUnitId ||
+          String(parent.charged_unit_id || '') === targetUnitId ||
+          String(parent.beneficiary_unit_id || '') === targetUnitId ||
           nLines.some(l => String(l.unit_id || '') === targetUnitId);
         return hasUnit;
       })
       .forEach(parent => {
-        const nLines = (linesByNote.get(String(parent.id)) || []).filter(
-          l => String(l.unit_id || parent.unit_id || '') === targetUnitId
-        );
+        const nLines = (linesByNote.get(String(parent.id)) || []).filter(l => {
+          const lineUid = String(
+            l.unit_id || parent.unit_id || parent.charged_unit_id || parent.beneficiary_unit_id || ''
+          );
+          return lineUid === targetUnitId;
+        });
+
         const byConceptKey: Record<string, number> = {};
 
-        nLines.forEach(ln => {
-          const cid = String(ln.concept_id || '');
-          if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
-          const cObj = cid ? conceptMap.get(cid) : undefined;
-          const label = cObj?.name || 'Ajuste Nota';
-          const key = cid ? `concept_${cid}` : `label_${label.toUpperCase()}`;
-          const val =
-            Number(ln.amount || 0) +
-            Number(ln.discount_amount || 0) +
-            Number(ln.advance_amount || 0);
-          const isDebit = parent.note_type === 'ND' || ln.section === 'cargo';
-          registerConceptValue(byConceptKey, key, label, isDebit ? val : -val);
-        });
+        if (nLines.length > 0) {
+          nLines.forEach(ln => {
+            const cid = String(ln.conceptId ?? ln.concept_id ?? '');
+            if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
+            if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
+            const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
+            const label = cObj?.name || 'Ajuste Nota';
+            const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
+            const val =
+              Number(ln.amount || 0) +
+              Number(ln.discount_amount || 0) +
+              Number(ln.advance_amount || 0);
+            const isDebit =
+              parent.note_type === 'ND' ||
+              ln.section === 'cargo' ||
+              (parent.note_type === 'NT' && String(parent.charged_unit_id || '') === targetUnitId);
+            addMovementToConcept(byConceptKey, key, label, cid || undefined, isDebit ? val : -val);
+          });
+        } else if (selectedConceptId === 'ALL') {
+          const val = Number(parent.total_amount || 0);
+          const isDebit =
+            parent.note_type === 'ND' ||
+            (parent.note_type === 'NT' && String(parent.charged_unit_id || '') === targetUnitId);
+          addMovementToConcept(
+            byConceptKey,
+            `lbl_NOTA_${parent.note_type || 'ADJ'}`,
+            `Nota ${parent.note_type || 'Ajuste'}`,
+            undefined,
+            isDebit ? val : -val
+          );
+        }
 
         const totalDoc = roundMoney(
           Object.values(byConceptKey).reduce((s, v) => s + v, 0)
         );
 
         if (selectedConceptId === 'ALL' || Math.abs(totalDoc) > 0) {
+          const typeLabel =
+            parent.note_type === 'NT'
+              ? 'Traslado de cartera (NT)'
+              : parent.note_type === 'NC'
+              ? 'Nota crédito (NC)'
+              : parent.note_type === 'ND'
+              ? 'Nota débito (ND)'
+              : parent.note_type || 'Nota';
           rawEvents.push({
             date: String(parent.accounting_date || parent.application_date || ''),
             doc: String(parent.note_number || parent.note_type),
-            detail: `${parent.note_type}${parent.description ? ` · ${parent.description}` : ''}`,
+            detail: `${typeLabel}${parent.description ? ` · ${parent.description}` : ''}`,
             totalDoc,
             byConceptKey,
           });
@@ -858,7 +979,15 @@ export function PortfolioReportsTab() {
 
     rawEvents.sort((a, b) => a.date.localeCompare(b.date));
 
-    const columns = Array.from(activeColsMap.values());
+    // Filtrar columnas: solo conceptos activos que tengan movimiento o saldo en el inmueble
+    const columns = Array.from(candidateCols.values()).filter(col => {
+      const movTotal = Math.abs(roundMoney(movementSumByCol.get(col.key) || 0));
+      const unitConceptBal = col.conceptId
+        ? Math.abs(roundMoney(unitBalancesByConcept.get(col.conceptId) || 0))
+        : 0;
+      return movTotal > 0.005 || unitConceptBal > 0.005;
+    });
+
     let runningSaldo = 0;
 
     const rows = rawEvents.map(ev => {
@@ -888,6 +1017,9 @@ export function PortfolioReportsTab() {
     tpMap,
     pmMap,
     conceptMap,
+    activeConceptById,
+    concepts,
+    allDetailedItems,
     invoices,
     receipts,
     notes,
@@ -1117,7 +1249,7 @@ export function PortfolioReportsTab() {
       if (!isDateAllowed(parent.accounting_date || parent.application_date)) return;
       if (
         selectedConceptId !== 'ALL' &&
-        String(ln.concept_id || '') !== selectedConceptId
+        String(ln.concept_id || ln.conceptId || '') !== selectedConceptId
       ) {
         return;
       }
@@ -1445,9 +1577,9 @@ export function PortfolioReportsTab() {
             <td class="num">${escapeHtml(formatCOP(r.cuotaExtra))}</td>
             <td class="num">${escapeHtml(formatCOP(r.otros))}</td>
             <td class="num">${escapeHtml(formatCOP(r.totalCobro))}</td>
-            <td class="num ${r.ajustes < 0 ? 'neg' : ''}">${escapeHtml(formatSignedCOP(r.ajustes))}</td>
-            <td class="num ${r.pagos < 0 ? 'neg' : ''}">${escapeHtml(formatSignedCOP(r.pagos))}</td>
-            <td class="num ${r.saldo < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatSignedCOP(r.saldo))}</strong></td>
+            <td class="num ${r.ajustes < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(r.ajustes))}</td>
+            <td class="num ${r.pagos < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(r.pagos))}</td>
+            <td class="num ${r.saldo < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(r.saldo))}</strong></td>
             <td>${escapeHtml(r.lastPaymentDate || '—')}</td>
           </tr>`
         )
@@ -1466,16 +1598,16 @@ export function PortfolioReportsTab() {
           const conceptCells = detailedStatementData.columns
             .map(c => {
               const v = roundMoney(r.conceptValues[c.key] || 0);
-              return `<td class="num ${v < 0 ? 'neg' : ''}">${escapeHtml(formatSignedCOP(v))}</td>`;
+              return `<td class="num ${v < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(v))}</td>`;
             })
             .join('');
           return `<tr>
             <td>${escapeHtml(r.date || '—')}</td>
             <td>${escapeHtml(r.doc)}</td>
             <td>${escapeHtml(r.detail)}</td>
-            <td class="num ${r.totalDoc < 0 ? 'neg' : ''}">${escapeHtml(formatSignedCOP(r.totalDoc))}</td>
+            <td class="num ${r.totalDoc < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(r.totalDoc))}</td>
             ${conceptCells}
-            <td class="num ${r.balance < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatSignedCOP(r.balance))}</strong></td>
+            <td class="num ${r.balance < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(r.balance))}</strong></td>
           </tr>`;
         })
         .join('');
@@ -1717,7 +1849,9 @@ export function PortfolioReportsTab() {
               onChange={e => setStatusFilter(e.target.value)}
             >
               <option value="ALL">Todos</option>
+              <option value="pendiente">Pendiente</option>
               <option value="contabilizado">Contabilizado</option>
+              <option value="pagada">Pagada</option>
               <option value="anulado">Anulado</option>
             </Select>
           </div>
@@ -1760,7 +1894,7 @@ export function PortfolioReportsTab() {
         </Card>
       </div>
 
-      {/* Contenido del reporte seleccionado */}
+      {/* Tablas por reporte */}
       <Card>
         <div className="p-6">
           {requiresSingleUnit && !selectedUnitId ? (
@@ -1828,21 +1962,21 @@ export function PortfolioReportsTab() {
                               r.ajustes < 0 ? 'text-red-600' : 'text-gray-900'
                             }`}
                           >
-                            {formatSignedCOP(r.ajustes)}
+                            {formatCOP(r.ajustes)}
                           </td>
                           <td
                             className={`px-3 py-2 text-right font-mono ${
                               r.pagos < 0 ? 'text-red-600' : 'text-gray-900'
                             }`}
                           >
-                            {formatSignedCOP(r.pagos)}
+                            {formatCOP(r.pagos)}
                           </td>
                           <td
                             className={`px-3 py-2 text-right font-mono font-bold ${
                               r.saldo < 0 ? 'text-red-600' : 'text-gray-900'
                             }`}
                           >
-                            {formatSignedCOP(r.saldo)}
+                            {formatCOP(r.saldo)}
                           </td>
                           <td className="px-3 py-2 text-gray-600">
                             {r.lastPaymentDate || '—'}
@@ -1910,7 +2044,7 @@ export function PortfolioReportsTab() {
                               r.totalDoc < 0 ? 'text-red-600' : 'text-gray-900'
                             }`}
                           >
-                            {formatSignedCOP(r.totalDoc)}
+                            {formatCOP(r.totalDoc)}
                           </td>
                           {detailedStatementData.columns.map(col => {
                             const v = roundMoney(r.conceptValues[col.key] || 0);
@@ -1921,7 +2055,7 @@ export function PortfolioReportsTab() {
                                   v < 0 ? 'text-red-600' : 'text-gray-900'
                                 }`}
                               >
-                                {formatSignedCOP(v)}
+                                {formatCOP(v)}
                               </td>
                             );
                           })}
@@ -1930,7 +2064,7 @@ export function PortfolioReportsTab() {
                               r.balance < 0 ? 'text-red-600' : 'text-gray-900'
                             }`}
                           >
-                            {formatSignedCOP(r.balance)}
+                            {formatCOP(r.balance)}
                           </td>
                         </tr>
                       ))
