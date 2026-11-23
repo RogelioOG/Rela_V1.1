@@ -55,6 +55,12 @@ interface ThirdPartyOption {
   document_number?: string | null;
 }
 
+interface ConceptBucket {
+  key: string;
+  label: string;
+  category: 'admon' | 'intereses' | 'retroactivo' | 'cuotaExtra' | 'custom';
+}
+
 function todayISO(): string {
   const now = new Date();
   const offset = now.getTimezoneOffset() * 60000;
@@ -67,11 +73,29 @@ function unitLabelText(u: any): string {
 }
 
 function daysPastDue(dueDateStr: string | null | undefined, cutoffDateStr: string): number {
-  if (!dueDateStr) return 0;
+  if (!dueDateStr || !cutoffDateStr) return 0;
   const due = new Date(`${dueDateStr.slice(0, 10)}T00:00:00`);
   const cut = new Date(`${cutoffDateStr.slice(0, 10)}T00:00:00`);
   if (Number.isNaN(due.getTime()) || Number.isNaN(cut.getTime())) return 0;
   return Math.floor((cut.getTime() - due.getTime()) / 86400000);
+}
+
+function classifyConcept(
+  code?: string | null,
+  name?: string | null,
+  isLateInterest?: boolean
+): 'admon' | 'intereses' | 'retroactivo' | 'cuotaExtra' | 'other' {
+  const text = `${code || ''} ${name || ''}`.toUpperCase();
+  if (isLateInterest || text.includes('INTERES')) return 'intereses';
+  if (text.includes('RETRO')) return 'retroactivo';
+  if (text.includes('EXTRA')) return 'cuotaExtra';
+  if (text.includes('ADMON') || text.includes('ADMIN')) return 'admon';
+  return 'other';
+}
+
+function formatSignedCOP(val: number): string {
+  const rounded = roundMoney(val);
+  return formatCOP(rounded);
 }
 
 function escapeHtml(text: string): string {
@@ -122,9 +146,10 @@ export function PortfolioReportsTab() {
   const [errorMsg, setErrorMsg] = useState('');
 
   const [activeReport, setActiveReport] = useState<ReportKey>('statement_summary');
+  // Fechas libres: el usuario define cuándo aplicar corte o rango
   const [cutoffDate, setCutoffDate] = useState<string>(today);
   const [dateFrom, setDateFrom] = useState<string>('');
-  const [dateTo, setDateTo] = useState<string>(today);
+  const [dateTo, setDateTo] = useState<string>('');
   const [selectedUnitId, setSelectedUnitId] = useState<string>('');
   const [selectedTower, setSelectedTower] = useState<string>('ALL');
   const [selectedConceptId, setSelectedConceptId] = useState<string>('ALL');
@@ -234,6 +259,34 @@ export function PortfolioReportsTab() {
     loadData();
   }, [loadData]);
 
+  // Filtro unificado de fechas para todos los cálculos (KPIs y reportes)
+  const isDateAllowed = useCallback(
+    (docDateStr?: string | null) => {
+      const dt = String(docDateStr || '').slice(0, 10);
+      if (!dt) return true;
+      if (dateFrom && dt < dateFrom) return false;
+      if (dateTo && dt > dateTo) return false;
+      if (!dateFrom && !dateTo && cutoffDate && dt > cutoffDate) return false;
+      return true;
+    },
+    [cutoffDate, dateFrom, dateTo]
+  );
+
+  const effectiveCutoff = useMemo(() => {
+    return dateTo || cutoffDate || today;
+  }, [dateTo, cutoffDate, today]);
+
+  const isStatusAllowed = useCallback(
+    (st?: string | null) => {
+      const status = String(st || 'contabilizado').toLowerCase();
+      if (statusFilter === 'ALL') {
+        return status !== 'anulado' && status !== 'void';
+      }
+      return status === statusFilter.toLowerCase();
+    },
+    [statusFilter]
+  );
+
   const towers = useMemo(() => {
     const set = new Set<string>();
     units.forEach(u => {
@@ -278,7 +331,7 @@ export function PortfolioReportsTab() {
     return m;
   }, [thirdParties]);
 
-  // Ítems detallados de cartera por unidad
+  // Ítems detallados de cartera filtrados por unidad, fecha y concepto
   const allDetailedItems = useMemo(() => {
     const items: (DetailedDueItem & { unitId: string })[] = [];
     const duesByUnit = new Map<string, any[]>();
@@ -287,7 +340,8 @@ export function PortfolioReportsTab() {
     dues.forEach(d => {
       const uid = String(d.unit_id || '');
       if (!allowedUnitIds.has(uid)) return;
-      if (d.status === 'anulado' || d.status === 'void') return;
+      if (!isStatusAllowed(d.status)) return;
+      if (!isDateAllowed(d.due_date || d.period_start)) return;
       if (!duesByUnit.has(uid)) duesByUnit.set(uid, []);
       duesByUnit.get(uid)!.push(d);
     });
@@ -295,6 +349,8 @@ export function PortfolioReportsTab() {
     invoices.forEach(inv => {
       const uid = String(inv.unit_id || '');
       if (!allowedUnitIds.has(uid)) return;
+      if (!isStatusAllowed(inv.status)) return;
+      if (!isDateAllowed(inv.issue_date || inv.due_date)) return;
       if (!invByUnit.has(uid)) invByUnit.set(uid, {});
       const map = invByUnit.get(uid)!;
       map[`${inv.unit_id}_${inv.period}`] = inv;
@@ -311,7 +367,7 @@ export function PortfolioReportsTab() {
         concepts,
         uInv,
         [],
-        cutoffDate || today,
+        effectiveCutoff,
         0
       );
       det.forEach(item => {
@@ -330,14 +386,15 @@ export function PortfolioReportsTab() {
     dues,
     invoices,
     allowedUnitIds,
+    isStatusAllowed,
+    isDateAllowed,
     hierarchy,
     concepts,
-    cutoffDate,
-    today,
+    effectiveCutoff,
     selectedConceptId,
   ]);
 
-  // KPIs ejecutivos
+  // KPIs calculados con EXACTAMENTE los mismos filtros activos
   const kpis = useMemo(() => {
     let totalPortfolio = 0;
     let overduePortfolio = 0;
@@ -346,35 +403,38 @@ export function PortfolioReportsTab() {
     allDetailedItems.forEach(it => {
       const bal = roundMoney(Number(it.balance || 0));
       totalPortfolio = roundMoney(totalPortfolio + bal);
-      if (bal > 0 && daysPastDue(it.dueDate, cutoffDate || today) > 0) {
+      if (bal > 0 && daysPastDue(it.dueDate, effectiveCutoff) > 0) {
         overduePortfolio = roundMoney(overduePortfolio + bal);
       }
     });
 
     receipts.forEach(r => {
-      if (r.status === 'anulado' || r.status === 'void') return;
+      if (!isStatusAllowed(r.status)) return;
       if (!allowedUnitIds.has(String(r.unit_id || ''))) return;
-      if (cutoffDate && String(r.accounting_date || r.payment_date || '') > cutoffDate) {
-        return;
-      }
+      if (!isDateAllowed(r.payment_date || r.accounting_date)) return;
       advanceTotal = roundMoney(advanceTotal + Number(r.advance_amount || 0));
     });
 
     noteLines.forEach(ln => {
       const parentNote = notes.find(n => String(n.id) === String(ln.note_id));
-      if (!parentNote || parentNote.status === 'anulado') return;
-      if (!allowedUnitIds.has(String(ln.unit_id || parentNote.unit_id || ''))) return;
-      if (cutoffDate && String(parentNote.accounting_date || '') > cutoffDate) return;
+      if (!parentNote || !isStatusAllowed(parentNote.status)) return;
+      const uid = String(ln.unit_id || parentNote.unit_id || '');
+      if (!allowedUnitIds.has(uid)) return;
+      if (!isDateAllowed(parentNote.accounting_date || parentNote.application_date)) return;
+      if (
+        selectedConceptId !== 'ALL' &&
+        String(ln.concept_id || '') !== selectedConceptId
+      ) {
+        return;
+      }
       advanceTotal = roundMoney(advanceTotal + Number(ln.advance_amount || 0));
     });
 
     const collectedInRange = roundMoney(
       receipts.reduce((sum, r) => {
-        if (r.status === 'anulado' || r.status === 'void') return sum;
+        if (!isStatusAllowed(r.status)) return sum;
         if (!allowedUnitIds.has(String(r.unit_id || ''))) return sum;
-        const dt = String(r.payment_date || r.accounting_date || '');
-        if (dateFrom && dt < dateFrom) return sum;
-        if (dateTo && dt > dateTo) return sum;
+        if (!isDateAllowed(r.payment_date || r.accounting_date)) return sum;
         return sum + Number(r.total_amount || 0);
       }, 0)
     );
@@ -391,13 +451,13 @@ export function PortfolioReportsTab() {
     notes,
     noteLines,
     allowedUnitIds,
-    cutoffDate,
-    today,
-    dateFrom,
-    dateTo,
+    isStatusAllowed,
+    isDateAllowed,
+    effectiveCutoff,
+    selectedConceptId,
   ]);
 
-  // 1. Estado de Cuenta Resumido
+  // 1. Estado de Cuenta Resumido (discriminando Admon, Intereses, Retroactivo, Cuota Extra, Otros)
   const summaryStatementRows = useMemo(() => {
     const targetUnitId =
       selectedUnitId || (filteredUnits.length === 1 ? String(filteredUnits[0].id) : '');
@@ -439,12 +499,36 @@ export function PortfolioReportsTab() {
       return byPeriod.get(periodKey)!;
     };
 
+    const addDiscriminatedAmount = (
+      row: ReturnType<typeof getOrCreate>,
+      conceptId: string | null | undefined,
+      fallbackLabel: string,
+      val: number,
+      isLateInterest = false
+    ) => {
+      if (selectedConceptId !== 'ALL' && String(conceptId || '') !== selectedConceptId) {
+        return;
+      }
+      const cObj = conceptId ? conceptMap.get(String(conceptId)) : undefined;
+      const cat = classifyConcept(
+        cObj?.code,
+        cObj?.name || fallbackLabel,
+        Boolean(cObj?.is_late_interest || isLateInterest)
+      );
+      if (cat === 'intereses') row.intereses = roundMoney(row.intereses + val);
+      else if (cat === 'retroactivo') row.retroactivo = roundMoney(row.retroactivo + val);
+      else if (cat === 'cuotaExtra') row.cuotaExtra = roundMoney(row.cuotaExtra + val);
+      else if (cat === 'admon') row.admon = roundMoney(row.admon + val);
+      else row.otros = roundMoney(row.otros + val);
+    };
+
+    // Facturas / cuentas de cobro
     invoices
       .filter(
         inv =>
           String(inv.unit_id) === targetUnitId &&
-          inv.status !== 'anulado' &&
-          (!cutoffDate || String(inv.issue_date || '') <= cutoffDate)
+          isStatusAllowed(inv.status) &&
+          isDateAllowed(inv.issue_date || inv.due_date)
       )
       .forEach(inv => {
         const p = String(inv.period || 'SIN PERIODO');
@@ -453,55 +537,66 @@ export function PortfolioReportsTab() {
 
         if (snapItems.length > 0) {
           snapItems.forEach((it: any) => {
-            const cObj = conceptMap.get(String(it.concept_id || ''));
-            const label = `${cObj?.code || ''} ${cObj?.name || it.concept_name || it.name || ''}`.toUpperCase();
-            const val = Number(it.amount ?? it.total ?? 0);
-            if (label.includes('INTERES') || cObj?.is_late_interest) {
-              row.intereses = roundMoney(row.intereses + val);
-            } else if (label.includes('RETRO')) {
-              row.retroactivo = roundMoney(row.retroactivo + val);
-            } else if (label.includes('EXTRA')) {
-              row.cuotaExtra = roundMoney(row.cuotaExtra + val);
-            } else if (label.includes('ADMON') || label.includes('ADMIN')) {
-              row.admon = roundMoney(row.admon + val);
-            } else {
-              row.otros = roundMoney(row.otros + val);
-            }
+            const val = Number(it.amount ?? it.total ?? it.value ?? 0);
+            addDiscriminatedAmount(
+              row,
+              it.concept_id || it.billing_concept_id,
+              it.concept_name || it.name || '',
+              val,
+              Boolean(it.is_late_interest)
+            );
           });
         } else {
-          row.admon = roundMoney(row.admon + Number(inv.subtotal || 0));
-          row.intereses = roundMoney(row.intereses + Number(inv.interest_amount || 0));
+          const sub = Number(inv.subtotal || 0);
+          const intr = Number(inv.interest_amount || 0);
+          if (sub > 0) addDiscriminatedAmount(row, null, 'ADMON', sub, false);
+          if (intr > 0) addDiscriminatedAmount(row, null, 'INTERESES', intr, true);
         }
-
-        row.totalCobro = roundMoney(
-          row.admon + row.intereses + row.retroactivo + row.cuotaExtra + row.otros
-        );
       });
 
+    // Cuotas (dues) que no estén ya cubiertas por factura o que aporten intereses/conceptos
     dues
       .filter(
         d =>
           String(d.unit_id) === targetUnitId &&
-          d.status !== 'anulado' &&
-          (!cutoffDate || String(d.due_date || '') <= cutoffDate)
+          isStatusAllowed(d.status) &&
+          isDateAllowed(d.due_date || d.period_start)
       )
       .forEach(d => {
         const p = String(d.period || 'SIN PERIODO');
         const row = getOrCreate(p);
-        if (row.totalCobro === 0 && Number(d.amount || 0) > 0) {
-          row.admon = roundMoney(row.admon + Number(d.amount || 0));
-          row.totalCobro = roundMoney(row.totalCobro + Number(d.amount || 0));
+        const hasInvoiceForPeriod = invoices.some(
+          inv =>
+            String(inv.unit_id) === targetUnitId &&
+            String(inv.period || '') === p &&
+            isStatusAllowed(inv.status) &&
+            isDateAllowed(inv.issue_date || inv.due_date)
+        );
+
+        const dueAmt = Number(d.amount ?? d.base_amount ?? 0);
+        const dueInterest = Number(d.interest_amount ?? d.late_interest ?? 0);
+
+        if (!hasInvoiceForPeriod && dueAmt > 0) {
+          addDiscriminatedAmount(
+            row,
+            d.concept_id || d.billing_concept_id,
+            d.concept_name || 'ADMON',
+            dueAmt,
+            false
+          );
         }
-        row.saldo = roundMoney(row.saldo + Number(d.balance || 0));
+        if (dueInterest > 0) {
+          addDiscriminatedAmount(row, null, 'INTERESES', dueInterest, true);
+        }
       });
 
+    // Recibos de caja
     receipts
       .filter(
         r =>
           String(r.unit_id) === targetUnitId &&
-          r.status !== 'anulado' &&
-          r.status !== 'void' &&
-          (!cutoffDate || String(r.payment_date || r.accounting_date || '') <= cutoffDate)
+          isStatusAllowed(r.status) &&
+          isDateAllowed(r.payment_date || r.accounting_date)
       )
       .forEach(r => {
         const dt = String(r.payment_date || r.accounting_date || '');
@@ -516,12 +611,19 @@ export function PortfolioReportsTab() {
         }
       });
 
+    // Notas NC / ND / NT
     noteLines.forEach(ln => {
       const parent = notes.find(n => String(n.id) === String(ln.note_id));
-      if (!parent || parent.status === 'anulado') return;
+      if (!parent || !isStatusAllowed(parent.status)) return;
       const lineUnit = String(ln.unit_id || parent.unit_id || '');
       if (lineUnit !== targetUnitId) return;
-      if (cutoffDate && String(parent.accounting_date || '') > cutoffDate) return;
+      if (!isDateAllowed(parent.accounting_date || parent.application_date)) return;
+      if (
+        selectedConceptId !== 'ALL' &&
+        String(ln.concept_id || '') !== selectedConceptId
+      ) {
+        return;
+      }
 
       const pKey = String(
         ln.period || parent.period || parent.accounting_date?.slice(0, 7) || 'GENERAL'
@@ -545,10 +647,14 @@ export function PortfolioReportsTab() {
 
     let runningSaldo = 0;
     return sorted.map(r => {
-      const netPeriod = roundMoney(r.totalCobro + r.ajustes + r.pagos);
+      const totalCobro = roundMoney(
+        r.admon + r.intereses + r.retroactivo + r.cuotaExtra + r.otros
+      );
+      const netPeriod = roundMoney(totalCobro + r.ajustes + r.pagos);
       runningSaldo = roundMoney(runningSaldo + netPeriod);
       return {
         ...r,
+        totalCobro,
         saldo: runningSaldo,
       };
     });
@@ -561,99 +667,220 @@ export function PortfolioReportsTab() {
     notes,
     noteLines,
     conceptMap,
-    cutoffDate,
+    isStatusAllowed,
+    isDateAllowed,
+    selectedConceptId,
   ]);
 
-  // 2. Estado de Cuenta Detallado
-  const detailedStatementRows = useMemo(() => {
+  // 2. Estado de Cuenta Detallado con columnas dinámicas por cada concepto que tenga movimiento
+  const detailedStatementData = useMemo(() => {
     const targetUnitId =
       selectedUnitId || (filteredUnits.length === 1 ? String(filteredUnits[0].id) : '');
-    if (!targetUnitId) return [];
+    if (!targetUnitId) {
+      return { columns: [] as ConceptBucket[], rows: [] as any[] };
+    }
 
     const uObj = unitMap.get(targetUnitId);
     const tpObj = uObj?.third_party_id ? tpMap.get(String(uObj.third_party_id)) : null;
 
-    const events: {
+    const rawEvents: {
       date: string;
       doc: string;
       detail: string;
-      delta: number;
+      totalDoc: number;
+      byConceptKey: Record<string, number>;
     }[] = [];
 
+    const activeColsMap = new Map<string, ConceptBucket>();
+
+    const registerConceptValue = (
+      map: Record<string, number>,
+      key: string,
+      label: string,
+      amount: number
+    ) => {
+      if (Math.abs(roundMoney(amount)) < 0.005) return;
+      if (!activeColsMap.has(key)) {
+        activeColsMap.set(key, {
+          key,
+          label,
+          category: 'custom',
+        });
+      }
+      map[key] = roundMoney((map[key] || 0) + amount);
+    };
+
+    // Facturas / cuentas de cobro
     invoices
       .filter(
         inv =>
           String(inv.unit_id) === targetUnitId &&
-          inv.status !== 'anulado' &&
-          (!cutoffDate || String(inv.issue_date || '') <= cutoffDate)
+          isStatusAllowed(inv.status) &&
+          isDateAllowed(inv.issue_date || inv.due_date)
       )
       .forEach(inv => {
-        const sub = Number(inv.subtotal || 0);
-        const intr = Number(inv.interest_amount || 0);
-        const tot = Number(inv.total_amount || sub + intr);
-        events.push({
-          date: String(inv.issue_date || inv.due_date || ''),
-          doc: String(inv.invoice_number || `CC-${inv.period || ''}`),
-          detail: `Cuenta de cobro período ${inv.period || ''}`,
-          delta: tot,
-        });
+        const byConceptKey: Record<string, number> = {};
+        const snapItems = Array.isArray(inv.items_snapshot) ? inv.items_snapshot : [];
+
+        if (snapItems.length > 0) {
+          snapItems.forEach((it: any) => {
+            const cid = String(it.concept_id || it.billing_concept_id || '');
+            const cObj = cid ? conceptMap.get(cid) : undefined;
+            const label =
+              cObj?.name || it.concept_name || it.name || (cid ? `Concepto ${cid}` : 'Administración');
+            const key = cid ? `concept_${cid}` : `label_${label.toUpperCase()}`;
+            const val = Number(it.amount ?? it.total ?? it.value ?? 0);
+            if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
+            registerConceptValue(byConceptKey, key, label, val);
+          });
+        } else {
+          const sub = Number(inv.subtotal || 0);
+          const intr = Number(inv.interest_amount || 0);
+          if (sub > 0 && selectedConceptId === 'ALL') {
+            registerConceptValue(byConceptKey, 'base_admon', 'Administración', sub);
+          }
+          if (intr > 0 && selectedConceptId === 'ALL') {
+            registerConceptValue(byConceptKey, 'base_intereses', 'Intereses Mora', intr);
+          }
+        }
+
+        const totalDoc = roundMoney(
+          Object.values(byConceptKey).reduce((s, v) => s + v, 0) ||
+            Number(inv.total_amount ?? Number(inv.subtotal || 0) + Number(inv.interest_amount || 0))
+        );
+
+        if (selectedConceptId === 'ALL' || Math.abs(totalDoc) > 0) {
+          rawEvents.push({
+            date: String(inv.issue_date || inv.due_date || ''),
+            doc: String(inv.invoice_number || `CC-${inv.period || ''}`),
+            detail: `Cuenta de cobro período ${inv.period || ''}`,
+            totalDoc,
+            byConceptKey,
+          });
+        }
       });
 
+    // Recibos de caja
     receipts
       .filter(
         r =>
           String(r.unit_id) === targetUnitId &&
-          r.status !== 'anulado' &&
-          r.status !== 'void' &&
-          (!cutoffDate || String(r.payment_date || r.accounting_date || '') <= cutoffDate)
+          isStatusAllowed(r.status) &&
+          isDateAllowed(r.payment_date || r.accounting_date)
       )
       .forEach(r => {
-        const amt = Number(r.total_amount || 0);
+        const amt = roundMoney(Number(r.total_amount || 0));
         const pmName = r.payment_method_id ? pmMap.get(String(r.payment_method_id)) : '';
-        events.push({
-          date: String(r.payment_date || r.accounting_date || ''),
-          doc: String(r.receipt_number || 'RC'),
-          detail: `Recibo de caja${pmName ? ` (${pmName})` : ''}${r.notes ? ` · ${r.notes}` : ''}`,
-          delta: -amt,
-        });
+        const byConceptKey: Record<string, number> = {};
+
+        // Si el recibo trae distribución por concepto, la discriminamos; si no, lo ponemos en Recaudo / Concepto
+        const allocs = Array.isArray(r.allocations) ? r.allocations : [];
+        if (allocs.length > 0) {
+          allocs.forEach((al: any) => {
+            const cid = String(al.concept_id || '');
+            if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
+            const cObj = cid ? conceptMap.get(cid) : undefined;
+            const label = cObj?.name || al.concept_name || 'Recaudo';
+            const key = cid ? `concept_${cid}` : `label_${label.toUpperCase()}`;
+            registerConceptValue(byConceptKey, key, label, -Math.abs(Number(al.amount || 0)));
+          });
+        } else if (selectedConceptId === 'ALL') {
+          registerConceptValue(byConceptKey, 'recaudo_rc', 'Recaudo / Pago', -Math.abs(amt));
+        }
+
+        const totalDoc = roundMoney(
+          Object.values(byConceptKey).reduce((s, v) => s + v, 0) || -Math.abs(amt)
+        );
+
+        if (selectedConceptId === 'ALL' || Math.abs(totalDoc) > 0) {
+          rawEvents.push({
+            date: String(r.payment_date || r.accounting_date || ''),
+            doc: String(r.receipt_number || 'RC'),
+            detail: `Recibo de caja${pmName ? ` (${pmName})` : ''}${r.notes ? ` · ${r.notes}` : ''}`,
+            totalDoc,
+            byConceptKey,
+          });
+        }
       });
 
+    // Notas NC / ND / NT agrupadas por nota
+    const linesByNote = new Map<string, any[]>();
     noteLines.forEach(ln => {
-      const parent = notes.find(n => String(n.id) === String(ln.note_id));
-      if (!parent || parent.status === 'anulado') return;
-      const lineUnit = String(ln.unit_id || parent.unit_id || '');
-      if (lineUnit !== targetUnitId) return;
-      if (cutoffDate && String(parent.accounting_date || '') > cutoffDate) return;
-
-      const cObj = conceptMap.get(String(ln.concept_id || ''));
-      const val =
-        Number(ln.amount || 0) +
-        Number(ln.discount_amount || 0) +
-        Number(ln.advance_amount || 0);
-      const isDebit = parent.note_type === 'ND' || ln.section === 'cargo';
-      const signed = isDebit ? val : -val;
-
-      events.push({
-        date: String(parent.accounting_date || parent.application_date || ''),
-        doc: String(parent.note_number || parent.note_type),
-        detail: `${parent.note_type} · ${cObj?.name || 'Concepto'}${parent.description ? ` · ${parent.description}` : ''}`,
-        delta: signed,
-      });
+      const nid = String(ln.note_id || '');
+      if (!linesByNote.has(nid)) linesByNote.set(nid, []);
+      linesByNote.get(nid)!.push(ln);
     });
 
-    events.sort((a, b) => a.date.localeCompare(b.date));
+    notes
+      .filter(parent => {
+        if (!isStatusAllowed(parent.status)) return false;
+        if (!isDateAllowed(parent.accounting_date || parent.application_date)) return false;
+        const nLines = linesByNote.get(String(parent.id)) || [];
+        const hasUnit =
+          String(parent.unit_id || '') === targetUnitId ||
+          nLines.some(l => String(l.unit_id || '') === targetUnitId);
+        return hasUnit;
+      })
+      .forEach(parent => {
+        const nLines = (linesByNote.get(String(parent.id)) || []).filter(
+          l => String(l.unit_id || parent.unit_id || '') === targetUnitId
+        );
+        const byConceptKey: Record<string, number> = {};
 
-    let running = 0;
-    return events.map(ev => {
-      running = roundMoney(running + ev.delta);
+        nLines.forEach(ln => {
+          const cid = String(ln.concept_id || '');
+          if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
+          const cObj = cid ? conceptMap.get(cid) : undefined;
+          const label = cObj?.name || 'Ajuste Nota';
+          const key = cid ? `concept_${cid}` : `label_${label.toUpperCase()}`;
+          const val =
+            Number(ln.amount || 0) +
+            Number(ln.discount_amount || 0) +
+            Number(ln.advance_amount || 0);
+          const isDebit = parent.note_type === 'ND' || ln.section === 'cargo';
+          registerConceptValue(byConceptKey, key, label, isDebit ? val : -val);
+        });
+
+        const totalDoc = roundMoney(
+          Object.values(byConceptKey).reduce((s, v) => s + v, 0)
+        );
+
+        if (selectedConceptId === 'ALL' || Math.abs(totalDoc) > 0) {
+          rawEvents.push({
+            date: String(parent.accounting_date || parent.application_date || ''),
+            doc: String(parent.note_number || parent.note_type),
+            detail: `${parent.note_type}${parent.description ? ` · ${parent.description}` : ''}`,
+            totalDoc,
+            byConceptKey,
+          });
+        }
+      });
+
+    rawEvents.sort((a, b) => a.date.localeCompare(b.date));
+
+    const columns = Array.from(activeColsMap.values());
+    let runningSaldo = 0;
+
+    const rows = rawEvents.map(ev => {
+      runningSaldo = roundMoney(runningSaldo + ev.totalDoc);
+      const conceptValues: Record<string, number> = {};
+      columns.forEach(col => {
+        conceptValues[col.key] = roundMoney(ev.byConceptKey[col.key] || 0);
+      });
       return {
-        ...ev,
+        date: ev.date,
+        doc: ev.doc,
+        detail: ev.detail,
+        totalDoc: ev.totalDoc,
+        conceptValues,
+        balance: runningSaldo,
         code: unitLabelText(uObj),
         ownerName: tpObj?.name || uObj?.owner_name || '—',
         docId: tpObj?.document_number || uObj?.owner_document || '—',
-        balance: running,
       };
     });
+
+    return { columns, rows };
   }, [
     selectedUnitId,
     filteredUnits,
@@ -665,7 +892,9 @@ export function PortfolioReportsTab() {
     receipts,
     notes,
     noteLines,
-    cutoffDate,
+    isStatusAllowed,
+    isDateAllowed,
+    selectedConceptId,
   ]);
 
   // 3. Cartera por Conceptos
@@ -700,7 +929,7 @@ export function PortfolioReportsTab() {
         });
       }
       const row = map.get(cid)!;
-      const past = daysPastDue(it.dueDate, cutoffDate || today);
+      const past = daysPastDue(it.dueDate, effectiveCutoff);
       if (past > 0) {
         row.overdueAmt = roundMoney(row.overdueAmt + bal);
       } else {
@@ -716,7 +945,7 @@ export function PortfolioReportsTab() {
         unitsCount: r.unitSet.size,
       }))
       .sort((a, b) => b.totalAmt - a.totalAmt);
-  }, [allDetailedItems, conceptMap, cutoffDate, today]);
+  }, [allDetailedItems, conceptMap, effectiveCutoff]);
 
   // 4. Cartera por Edades
   const byAgingRows = useMemo(() => {
@@ -754,7 +983,7 @@ export function PortfolioReportsTab() {
         });
       }
       const row = map.get(uid)!;
-      const past = daysPastDue(it.dueDate, cutoffDate || today);
+      const past = daysPastDue(it.dueDate, effectiveCutoff);
 
       if (past <= 0) {
         row.currentAmt = roundMoney(row.currentAmt + bal);
@@ -771,17 +1000,15 @@ export function PortfolioReportsTab() {
     });
 
     return Array.from(map.values()).sort((a, b) => b.totalAmt - a.totalAmt);
-  }, [allDetailedItems, unitMap, cutoffDate, today]);
+  }, [allDetailedItems, unitMap, effectiveCutoff]);
 
-  // 5. Relación de Recibos de Caja (Bloque 2)
+  // 5. Relación de Recibos de Caja
   const receiptRows = useMemo(() => {
     return receipts
       .filter(r => {
         if (!allowedUnitIds.has(String(r.unit_id || ''))) return false;
-        const dt = String(r.payment_date || r.accounting_date || '');
-        if (dateFrom && dt < dateFrom) return false;
-        if (dateTo && dt > dateTo) return false;
-        if (statusFilter !== 'ALL' && String(r.status || '') !== statusFilter) return false;
+        if (!isDateAllowed(r.payment_date || r.accounting_date)) return false;
+        if (!isStatusAllowed(r.status)) return false;
         return true;
       })
       .map(r => {
@@ -803,9 +1030,9 @@ export function PortfolioReportsTab() {
           notes: String(r.notes || ''),
         };
       });
-  }, [receipts, allowedUnitIds, dateFrom, dateTo, statusFilter, unitMap, pmMap]);
+  }, [receipts, allowedUnitIds, isDateAllowed, isStatusAllowed, unitMap, pmMap]);
 
-  // 6. Recaudo por Fecha o Medio de Pago (Bloque 2)
+  // 6. Recaudo por Fecha o Medio de Pago
   const collectionSummaryRows = useMemo(() => {
     const map = new Map<
       string,
@@ -820,7 +1047,6 @@ export function PortfolioReportsTab() {
     >();
 
     receiptRows.forEach(r => {
-      if (r.status === 'anulado' || r.status === 'void') return;
       const key = `${r.paymentDate}__${r.paymentMethod}`;
       if (!map.has(key)) {
         map.set(key, {
@@ -842,7 +1068,7 @@ export function PortfolioReportsTab() {
     return Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
   }, [receiptRows]);
 
-  // 7. Saldos a Favor / Anticipos (Bloque 2)
+  // 7. Saldos a Favor / Anticipos
   const advancesRows = useMemo(() => {
     const map = new Map<
       string,
@@ -872,10 +1098,10 @@ export function PortfolioReportsTab() {
     };
 
     receipts.forEach(r => {
-      if (r.status === 'anulado' || r.status === 'void') return;
+      if (!isStatusAllowed(r.status)) return;
       const uid = String(r.unit_id || '');
       if (!allowedUnitIds.has(uid)) return;
-      if (cutoffDate && String(r.accounting_date || r.payment_date || '') > cutoffDate) return;
+      if (!isDateAllowed(r.accounting_date || r.payment_date)) return;
       const adv = roundMoney(Number(r.advance_amount || 0));
       if (adv <= 0) return;
       const row = ensureUnit(uid);
@@ -885,10 +1111,16 @@ export function PortfolioReportsTab() {
 
     noteLines.forEach(ln => {
       const parent = notes.find(n => String(n.id) === String(ln.note_id));
-      if (!parent || parent.status === 'anulado') return;
+      if (!parent || !isStatusAllowed(parent.status)) return;
       const uid = String(ln.unit_id || parent.unit_id || '');
       if (!allowedUnitIds.has(uid)) return;
-      if (cutoffDate && String(parent.accounting_date || '') > cutoffDate) return;
+      if (!isDateAllowed(parent.accounting_date || parent.application_date)) return;
+      if (
+        selectedConceptId !== 'ALL' &&
+        String(ln.concept_id || '') !== selectedConceptId
+      ) {
+        return;
+      }
       const adv = roundMoney(Number(ln.advance_amount || 0));
       if (adv <= 0) return;
       const row = ensureUnit(uid);
@@ -897,9 +1129,18 @@ export function PortfolioReportsTab() {
     });
 
     return Array.from(map.values()).sort((a, b) => b.totalAdvance - a.totalAdvance);
-  }, [receipts, noteLines, notes, allowedUnitIds, cutoffDate, unitMap]);
+  }, [
+    receipts,
+    noteLines,
+    notes,
+    allowedUnitIds,
+    isStatusAllowed,
+    isDateAllowed,
+    selectedConceptId,
+    unitMap,
+  ]);
 
-  // 8. Paz y Salvo de Cartera (Bloque 2)
+  // 8. Paz y Salvo de Cartera
   const pazYSalvoRows = useMemo(() => {
     const balanceByUnit = new Map<string, { current: number; overdue: number; total: number }>();
 
@@ -911,7 +1152,7 @@ export function PortfolioReportsTab() {
       }
       const b = balanceByUnit.get(uid)!;
       if (bal > 0) {
-        if (daysPastDue(it.dueDate, cutoffDate || today) > 0) {
+        if (daysPastDue(it.dueDate, effectiveCutoff) > 0) {
           b.overdue = roundMoney(b.overdue + bal);
         } else {
           b.current = roundMoney(b.current + bal);
@@ -935,18 +1176,16 @@ export function PortfolioReportsTab() {
         isClear,
       };
     });
-  }, [filteredUnits, allDetailedItems, cutoffDate, today]);
+  }, [filteredUnits, allDetailedItems, effectiveCutoff]);
 
-  // 9. Relación de Notas NC / ND / NT (Bloque 2)
+  // 9. Relación de Notas NC / ND / NT
   const treasuryNotesRows = useMemo(() => {
     return notes
       .filter(n => {
         const uid = String(n.unit_id || n.charged_unit_id || n.beneficiary_unit_id || '');
         if (uid && !allowedUnitIds.has(uid)) return false;
-        const dt = String(n.accounting_date || n.application_date || '');
-        if (dateFrom && dt < dateFrom) return false;
-        if (dateTo && dt > dateTo) return false;
-        if (statusFilter !== 'ALL' && String(n.status || '') !== statusFilter) return false;
+        if (!isDateAllowed(n.accounting_date || n.application_date)) return false;
+        if (!isStatusAllowed(n.status)) return false;
         return true;
       })
       .map(n => {
@@ -964,9 +1203,9 @@ export function PortfolioReportsTab() {
           description: String(n.description || ''),
         };
       });
-  }, [notes, allowedUnitIds, dateFrom, dateTo, statusFilter, unitMap]);
+  }, [notes, allowedUnitIds, isDateAllowed, isStatusAllowed, unitMap]);
 
-  // 10. Cartera Morosa (Bloque 2)
+  // 10. Cartera Morosa
   const delinquencyRows = useMemo(() => {
     const map = new Map<
       string,
@@ -983,7 +1222,7 @@ export function PortfolioReportsTab() {
     allDetailedItems.forEach(it => {
       const bal = roundMoney(Number(it.balance || 0));
       if (bal <= 0) return;
-      const past = daysPastDue(it.dueDate, cutoffDate || today);
+      const past = daysPastDue(it.dueDate, effectiveCutoff);
       if (past <= 0) return;
 
       const uid = String(it.unitId);
@@ -1004,68 +1243,169 @@ export function PortfolioReportsTab() {
     });
 
     return Array.from(map.values()).sort((a, b) => b.overdueBalance - a.overdueBalance);
-  }, [allDetailedItems, unitMap, cutoffDate, today]);
+  }, [allDetailedItems, unitMap, effectiveCutoff]);
 
   function handleExportCsv() {
+    const stamp = dateTo || cutoffDate || today;
     if (activeReport === 'statement_summary') {
       downloadCsv(
-        `estado-cuenta-resumido-${cutoffDate}.csv`,
-        ['PERIODO', 'ADMON', 'INTERESES', 'RETROACTIVO', 'CUOTA EXTRA', 'TOTAL COBRO', 'AJUSTES', 'PAGOS', 'SALDO', 'FECHA PAGO'],
-        summaryStatementRows.map(r => [r.period, r.admon, r.intereses, r.retroactivo, r.cuotaExtra, r.totalCobro, r.ajustes, r.pagos, r.saldo, r.lastPaymentDate])
+        `estado-cuenta-resumido-${stamp}.csv`,
+        [
+          'PERIODO',
+          'ADMON',
+          'INTERESES',
+          'RETROACTIVO',
+          'CUOTA EXTRA',
+          'OTROS',
+          'TOTAL COBRO MES',
+          'AJUSTES',
+          'PAGOS',
+          'SALDO',
+          'FECHA PAGO',
+        ],
+        summaryStatementRows.map(r => [
+          r.period,
+          r.admon,
+          r.intereses,
+          r.retroactivo,
+          r.cuotaExtra,
+          r.otros,
+          r.totalCobro,
+          r.ajustes,
+          r.pagos,
+          r.saldo,
+          r.lastPaymentDate,
+        ])
       );
     } else if (activeReport === 'statement_detailed') {
       downloadCsv(
-        `estado-cuenta-detallado-${cutoffDate}.csv`,
-        ['INMUEBLE', 'PROPIETARIO', 'NIT/CC', 'FECHA', 'DOCUMENTO', 'DETALLE', 'MOVIMIENTO', 'SALDO'],
-        detailedStatementRows.map(r => [r.code, r.ownerName, r.docId, r.date, r.doc, r.detail, r.delta, r.balance])
+        `estado-cuenta-detallado-${stamp}.csv`,
+        [
+          'FECHA',
+          'DOCUMENTO',
+          'DETALLE',
+          'TOTAL DOCUMENTO',
+          ...detailedStatementData.columns.map(c => c.label.toUpperCase()),
+          'SALDO',
+        ],
+        detailedStatementData.rows.map(r => [
+          r.date,
+          r.doc,
+          r.detail,
+          r.totalDoc,
+          ...detailedStatementData.columns.map(c => r.conceptValues[c.key] || 0),
+          r.balance,
+        ])
       );
     } else if (activeReport === 'by_concept') {
       downloadCsv(
-        `cartera-por-conceptos-${cutoffDate}.csv`,
+        `cartera-por-conceptos-${stamp}.csv`,
         ['CODIGO', 'CONCEPTO', 'INMUEBLES', 'POR VENCER', 'VENCIDA', 'TOTAL CARTERA'],
-        byConceptRows.map(r => [r.code, r.name, r.unitsCount, r.currentAmt, r.overdueAmt, r.totalAmt])
+        byConceptRows.map(r => [
+          r.code,
+          r.name,
+          r.unitsCount,
+          r.currentAmt,
+          r.overdueAmt,
+          r.totalAmt,
+        ])
       );
     } else if (activeReport === 'by_aging') {
       downloadCsv(
-        `cartera-por-edades-${cutoffDate}.csv`,
+        `cartera-por-edades-${stamp}.csv`,
         ['INMUEBLE', 'PROPIETARIO', 'POR VENCER', '1-30 DIAS', '31-60 DIAS', '61-90 DIAS', '+90 DIAS', 'TOTAL'],
-        byAgingRows.map(r => [r.unitLabel, r.ownerName, r.currentAmt, r.d1_30, r.d31_60, r.d61_90, r.d90_plus, r.totalAmt])
+        byAgingRows.map(r => [
+          r.unitLabel,
+          r.ownerName,
+          r.currentAmt,
+          r.d1_30,
+          r.d31_60,
+          r.d61_90,
+          r.d90_plus,
+          r.totalAmt,
+        ])
       );
     } else if (activeReport === 'receipts_list') {
       downloadCsv(
-        `relacion-recibos-${dateTo || cutoffDate}.csv`,
+        `relacion-recibos-${stamp}.csv`,
         ['RECIBO', 'FECHA PAGO', 'FECHA CONTABLE', 'INMUEBLE', 'PROPIETARIO', 'MEDIO PAGO', 'TOTAL', 'APLICADO', 'ANTICIPO', 'ESTADO'],
-        receiptRows.map(r => [r.receiptNumber, r.paymentDate, r.accountingDate, r.unitLabel, r.ownerName, r.paymentMethod, r.totalAmount, r.appliedAmount, r.advanceAmount, r.status])
+        receiptRows.map(r => [
+          r.receiptNumber,
+          r.paymentDate,
+          r.accountingDate,
+          r.unitLabel,
+          r.ownerName,
+          r.paymentMethod,
+          r.totalAmount,
+          r.appliedAmount,
+          r.advanceAmount,
+          r.status,
+        ])
       );
     } else if (activeReport === 'collection_summary') {
       downloadCsv(
-        `recaudo-fecha-medio-${dateTo || cutoffDate}.csv`,
+        `recaudo-fecha-medio-${stamp}.csv`,
         ['FECHA', 'MEDIO PAGO', 'RECIBOS', 'TOTAL RECAUDO', 'APLICADO', 'ANTICIPO'],
-        collectionSummaryRows.map(r => [r.date, r.method, r.count, r.totalAmount, r.appliedAmount, r.advanceAmount])
+        collectionSummaryRows.map(r => [
+          r.date,
+          r.method,
+          r.count,
+          r.totalAmount,
+          r.appliedAmount,
+          r.advanceAmount,
+        ])
       );
     } else if (activeReport === 'advances') {
       downloadCsv(
-        `saldos-a-favor-${cutoffDate}.csv`,
+        `saldos-a-favor-${stamp}.csv`,
         ['INMUEBLE', 'PROPIETARIO', 'ANTICIPO RECIBOS', 'ANTICIPO NOTAS', 'TOTAL SALDO A FAVOR'],
-        advancesRows.map(r => [r.unitLabel, r.ownerName, r.fromReceipts, r.fromNotes, r.totalAdvance])
+        advancesRows.map(r => [
+          r.unitLabel,
+          r.ownerName,
+          r.fromReceipts,
+          r.fromNotes,
+          r.totalAdvance,
+        ])
       );
     } else if (activeReport === 'paz_y_salvo') {
       downloadCsv(
-        `paz-y-salvo-${cutoffDate}.csv`,
+        `paz-y-salvo-${stamp}.csv`,
         ['INMUEBLE', 'PROPIETARIO', 'DOCUMENTO', 'SALDO VENCIDO', 'SALDO TOTAL', 'ESTADO'],
-        pazYSalvoRows.map(r => [r.unitLabel, r.ownerName, r.ownerDoc, r.overdueBalance, r.totalBalance, r.statusLabel])
+        pazYSalvoRows.map(r => [
+          r.unitLabel,
+          r.ownerName,
+          r.ownerDoc,
+          r.overdueBalance,
+          r.totalBalance,
+          r.statusLabel,
+        ])
       );
     } else if (activeReport === 'treasury_notes') {
       downloadCsv(
-        `notas-tesoreria-${dateTo || cutoffDate}.csv`,
+        `notas-tesoreria-${stamp}.csv`,
         ['NUMERO', 'TIPO', 'FECHA', 'PERIODO', 'INMUEBLE', 'VALOR', 'ESTADO', 'DESCRIPCION'],
-        treasuryNotesRows.map(r => [r.noteNumber, r.noteType, r.date, r.period, r.unitLabel, r.totalAmount, r.status, r.description])
+        treasuryNotesRows.map(r => [
+          r.noteNumber,
+          r.noteType,
+          r.date,
+          r.period,
+          r.unitLabel,
+          r.totalAmount,
+          r.status,
+          r.description,
+        ])
       );
     } else {
       downloadCsv(
-        `cartera-morosa-${cutoffDate}.csv`,
+        `cartera-morosa-${stamp}.csv`,
         ['INMUEBLE', 'PROPIETARIO', 'TELEFONO', 'DIAS MORA MAX', 'SALDO VENCIDO'],
-        delinquencyRows.map(r => [r.unitLabel, r.ownerName, r.ownerPhone, r.maxDaysPastDue, r.overdueBalance])
+        delinquencyRows.map(r => [
+          r.unitLabel,
+          r.ownerName,
+          r.ownerPhone,
+          r.maxDaysPastDue,
+          r.overdueBalance,
+        ])
       );
     }
   }
@@ -1082,56 +1422,125 @@ export function PortfolioReportsTab() {
     let tableRowsHtml = '';
 
     if (activeReport === 'statement_summary') {
-      tableHeaders = ['Período', 'Admon', 'Intereses', 'Retroactivo', 'Cuota Extra', 'Total Cobro', 'Ajustes', 'Pagos', 'Saldo', 'Fecha Pago'];
+      tableHeaders = [
+        'Período',
+        'Admon',
+        'Intereses',
+        'Retroactivo',
+        'Cuota Extra',
+        'Otros',
+        'Total Cobro',
+        'Ajustes',
+        'Pagos',
+        'Saldo',
+        'Fecha Pago',
+      ];
       tableRowsHtml = summaryStatementRows
-        .map(r => `<tr><td>${escapeHtml(r.period)}</td><td class="num">${escapeHtml(formatCOP(r.admon))}</td><td class="num">${escapeHtml(formatCOP(r.intereses))}</td><td class="num">${escapeHtml(formatCOP(r.retroactivo))}</td><td class="num">${escapeHtml(formatCOP(r.cuotaExtra))}</td><td class="num">${escapeHtml(formatCOP(r.totalCobro))}</td><td class="num">${escapeHtml(formatCOP(r.ajustes))}</td><td class="num">${escapeHtml(formatCOP(r.pagos))}</td><td class="num"><strong>${escapeHtml(formatCOP(r.saldo))}</strong></td><td>${escapeHtml(r.lastPaymentDate || '—')}</td></tr>`)
+        .map(
+          r => `<tr>
+            <td>${escapeHtml(r.period)}</td>
+            <td class="num">${escapeHtml(formatCOP(r.admon))}</td>
+            <td class="num">${escapeHtml(formatCOP(r.intereses))}</td>
+            <td class="num">${escapeHtml(formatCOP(r.retroactivo))}</td>
+            <td class="num">${escapeHtml(formatCOP(r.cuotaExtra))}</td>
+            <td class="num">${escapeHtml(formatCOP(r.otros))}</td>
+            <td class="num">${escapeHtml(formatCOP(r.totalCobro))}</td>
+            <td class="num ${r.ajustes < 0 ? 'neg' : ''}">${escapeHtml(formatSignedCOP(r.ajustes))}</td>
+            <td class="num ${r.pagos < 0 ? 'neg' : ''}">${escapeHtml(formatSignedCOP(r.pagos))}</td>
+            <td class="num ${r.saldo < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatSignedCOP(r.saldo))}</strong></td>
+            <td>${escapeHtml(r.lastPaymentDate || '—')}</td>
+          </tr>`
+        )
         .join('');
     } else if (activeReport === 'statement_detailed') {
-      tableHeaders = ['Fecha', 'Documento', 'Detalle', 'Movimiento', 'Saldo'];
-      tableRowsHtml = detailedStatementRows
-        .map(r => `<tr><td>${escapeHtml(r.date)}</td><td>${escapeHtml(r.doc)}</td><td>${escapeHtml(r.detail)}</td><td class="num">${escapeHtml(formatCOP(r.delta))}</td><td class="num"><strong>${escapeHtml(formatCOP(r.balance))}</strong></td></tr>`)
+      tableHeaders = [
+        'Fecha',
+        'Documento',
+        'Detalle',
+        'Total Documento',
+        ...detailedStatementData.columns.map(c => c.label),
+        'Saldo',
+      ];
+      tableRowsHtml = detailedStatementData.rows
+        .map(r => {
+          const conceptCells = detailedStatementData.columns
+            .map(c => {
+              const v = roundMoney(r.conceptValues[c.key] || 0);
+              return `<td class="num ${v < 0 ? 'neg' : ''}">${escapeHtml(formatSignedCOP(v))}</td>`;
+            })
+            .join('');
+          return `<tr>
+            <td>${escapeHtml(r.date || '—')}</td>
+            <td>${escapeHtml(r.doc)}</td>
+            <td>${escapeHtml(r.detail)}</td>
+            <td class="num ${r.totalDoc < 0 ? 'neg' : ''}">${escapeHtml(formatSignedCOP(r.totalDoc))}</td>
+            ${conceptCells}
+            <td class="num ${r.balance < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatSignedCOP(r.balance))}</strong></td>
+          </tr>`;
+        })
         .join('');
     } else if (activeReport === 'by_concept') {
       tableHeaders = ['Código', 'Concepto', 'Inmuebles', 'Por Vencer', 'Vencida', 'Total'];
       tableRowsHtml = byConceptRows
-        .map(r => `<tr><td>${escapeHtml(r.code)}</td><td>${escapeHtml(r.name)}</td><td class="num">${r.unitsCount}</td><td class="num">${escapeHtml(formatCOP(r.currentAmt))}</td><td class="num">${escapeHtml(formatCOP(r.overdueAmt))}</td><td class="num"><strong>${escapeHtml(formatCOP(r.totalAmt))}</strong></td></tr>`)
+        .map(
+          r => `<tr><td>${escapeHtml(r.code)}</td><td>${escapeHtml(r.name)}</td><td class="num">${r.unitsCount}</td><td class="num">${escapeHtml(formatCOP(r.currentAmt))}</td><td class="num">${escapeHtml(formatCOP(r.overdueAmt))}</td><td class="num"><strong>${escapeHtml(formatCOP(r.totalAmt))}</strong></td></tr>`
+        )
         .join('');
     } else if (activeReport === 'by_aging') {
       tableHeaders = ['Inmueble', 'Propietario', 'Por Vencer', '1-30 Días', '31-60 Días', '61-90 Días', '+90 Días', 'Total'];
       tableRowsHtml = byAgingRows
-        .map(r => `<tr><td>${escapeHtml(r.unitLabel)}</td><td>${escapeHtml(r.ownerName)}</td><td class="num">${escapeHtml(formatCOP(r.currentAmt))}</td><td class="num">${escapeHtml(formatCOP(r.d1_30))}</td><td class="num">${escapeHtml(formatCOP(r.d31_60))}</td><td class="num">${escapeHtml(formatCOP(r.d61_90))}</td><td class="num">${escapeHtml(formatCOP(r.d90_plus))}</td><td class="num"><strong>${escapeHtml(formatCOP(r.totalAmt))}</strong></td></tr>`)
+        .map(
+          r => `<tr><td>${escapeHtml(r.unitLabel)}</td><td>${escapeHtml(r.ownerName)}</td><td class="num">${escapeHtml(formatCOP(r.currentAmt))}</td><td class="num">${escapeHtml(formatCOP(r.d1_30))}</td><td class="num">${escapeHtml(formatCOP(r.d31_60))}</td><td class="num">${escapeHtml(formatCOP(r.d61_90))}</td><td class="num">${escapeHtml(formatCOP(r.d90_plus))}</td><td class="num"><strong>${escapeHtml(formatCOP(r.totalAmt))}</strong></td></tr>`
+        )
         .join('');
     } else if (activeReport === 'receipts_list') {
       tableHeaders = ['Recibo', 'Fecha Pago', 'Inmueble', 'Medio', 'Total', 'Aplicado', 'Anticipo', 'Estado'];
       tableRowsHtml = receiptRows
-        .map(r => `<tr><td>${escapeHtml(r.receiptNumber)}</td><td>${escapeHtml(r.paymentDate)}</td><td>${escapeHtml(r.unitLabel)}</td><td>${escapeHtml(r.paymentMethod)}</td><td class="num">${escapeHtml(formatCOP(r.totalAmount))}</td><td class="num">${escapeHtml(formatCOP(r.appliedAmount))}</td><td class="num">${escapeHtml(formatCOP(r.advanceAmount))}</td><td>${escapeHtml(r.status)}</td></tr>`)
+        .map(
+          r => `<tr><td>${escapeHtml(r.receiptNumber)}</td><td>${escapeHtml(r.paymentDate)}</td><td>${escapeHtml(r.unitLabel)}</td><td>${escapeHtml(r.paymentMethod)}</td><td class="num">${escapeHtml(formatCOP(r.totalAmount))}</td><td class="num">${escapeHtml(formatCOP(r.appliedAmount))}</td><td class="num">${escapeHtml(formatCOP(r.advanceAmount))}</td><td>${escapeHtml(r.status)}</td></tr>`
+        )
         .join('');
     } else if (activeReport === 'collection_summary') {
       tableHeaders = ['Fecha', 'Medio de Pago', 'Recibos', 'Total Recaudo', 'Aplicado', 'Anticipo'];
       tableRowsHtml = collectionSummaryRows
-        .map(r => `<tr><td>${escapeHtml(r.date)}</td><td>${escapeHtml(r.method)}</td><td class="num">${r.count}</td><td class="num"><strong>${escapeHtml(formatCOP(r.totalAmount))}</strong></td><td class="num">${escapeHtml(formatCOP(r.appliedAmount))}</td><td class="num">${escapeHtml(formatCOP(r.advanceAmount))}</td></tr>`)
+        .map(
+          r => `<tr><td>${escapeHtml(r.date)}</td><td>${escapeHtml(r.method)}</td><td class="num">${r.count}</td><td class="num"><strong>${escapeHtml(formatCOP(r.totalAmount))}</strong></td><td class="num">${escapeHtml(formatCOP(r.appliedAmount))}</td><td class="num">${escapeHtml(formatCOP(r.advanceAmount))}</td></tr>`
+        )
         .join('');
     } else if (activeReport === 'advances') {
       tableHeaders = ['Inmueble', 'Propietario', 'Anticipo Recibos', 'Anticipo Notas', 'Total Saldo a Favor'];
       tableRowsHtml = advancesRows
-        .map(r => `<tr><td>${escapeHtml(r.unitLabel)}</td><td>${escapeHtml(r.ownerName)}</td><td class="num">${escapeHtml(formatCOP(r.fromReceipts))}</td><td class="num">${escapeHtml(formatCOP(r.fromNotes))}</td><td class="num"><strong>${escapeHtml(formatCOP(r.totalAdvance))}</strong></td></tr>`)
+        .map(
+          r => `<tr><td>${escapeHtml(r.unitLabel)}</td><td>${escapeHtml(r.ownerName)}</td><td class="num">${escapeHtml(formatCOP(r.fromReceipts))}</td><td class="num">${escapeHtml(formatCOP(r.fromNotes))}</td><td class="num"><strong>${escapeHtml(formatCOP(r.totalAdvance))}</strong></td></tr>`
+        )
         .join('');
     } else if (activeReport === 'paz_y_salvo') {
       tableHeaders = ['Inmueble', 'Propietario', 'Documento', 'Saldo Vencido', 'Saldo Total', 'Estado'];
       tableRowsHtml = pazYSalvoRows
-        .map(r => `<tr><td>${escapeHtml(r.unitLabel)}</td><td>${escapeHtml(r.ownerName)}</td><td>${escapeHtml(r.ownerDoc)}</td><td class="num">${escapeHtml(formatCOP(r.overdueBalance))}</td><td class="num">${escapeHtml(formatCOP(r.totalBalance))}</td><td><strong>${escapeHtml(r.statusLabel)}</strong></td></tr>`)
+        .map(
+          r => `<tr><td>${escapeHtml(r.unitLabel)}</td><td>${escapeHtml(r.ownerName)}</td><td>${escapeHtml(r.ownerDoc)}</td><td class="num">${escapeHtml(formatCOP(r.overdueBalance))}</td><td class="num">${escapeHtml(formatCOP(r.totalBalance))}</td><td><strong>${escapeHtml(r.statusLabel)}</strong></td></tr>`
+        )
         .join('');
     } else if (activeReport === 'treasury_notes') {
       tableHeaders = ['Número', 'Tipo', 'Fecha', 'Período', 'Inmueble', 'Valor', 'Estado', 'Detalle'];
       tableRowsHtml = treasuryNotesRows
-        .map(r => `<tr><td>${escapeHtml(r.noteNumber)}</td><td>${escapeHtml(r.noteType)}</td><td>${escapeHtml(r.date)}</td><td>${escapeHtml(r.period)}</td><td>${escapeHtml(r.unitLabel)}</td><td class="num"><strong>${escapeHtml(formatCOP(r.totalAmount))}</strong></td><td>${escapeHtml(r.status)}</td><td>${escapeHtml(r.description)}</td></tr>`)
+        .map(
+          r => `<tr><td>${escapeHtml(r.noteNumber)}</td><td>${escapeHtml(r.noteType)}</td><td>${escapeHtml(r.date)}</td><td>${escapeHtml(r.period)}</td><td>${escapeHtml(r.unitLabel)}</td><td class="num"><strong>${escapeHtml(formatCOP(r.totalAmount))}</strong></td><td>${escapeHtml(r.status)}</td><td>${escapeHtml(r.description)}</td></tr>`
+        )
         .join('');
     } else {
       tableHeaders = ['Inmueble', 'Propietario', 'Teléfono', 'Días Mora', 'Saldo Vencido'];
       tableRowsHtml = delinquencyRows
-        .map(r => `<tr><td>${escapeHtml(r.unitLabel)}</td><td>${escapeHtml(r.ownerName)}</td><td>${escapeHtml(r.ownerPhone)}</td><td class="num">${r.maxDaysPastDue}</td><td class="num"><strong>${escapeHtml(formatCOP(r.overdueBalance))}</strong></td></tr>`)
+        .map(
+          r => `<tr><td>${escapeHtml(r.unitLabel)}</td><td>${escapeHtml(r.ownerName)}</td><td>${escapeHtml(r.ownerPhone)}</td><td class="num">${r.maxDaysPastDue}</td><td class="num"><strong>${escapeHtml(formatCOP(r.overdueBalance))}</strong></td></tr>`
+        )
         .join('');
     }
+
+    const rangeSub =
+      dateFrom || dateTo
+        ? `Rango: ${escapeHtml(dateFrom || 'Inicio')} a ${escapeHtml(dateTo || 'Fin')}`
+        : `Fecha de corte: ${escapeHtml(cutoffDate || 'Sin corte')}`;
 
     const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"/><title>${escapeHtml(reportTitle)}</title><style>
       body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 24px; color: #111827; }
@@ -1141,9 +1550,10 @@ export function PortfolioReportsTab() {
       th, td { border: 1px solid #d1d5db; padding: 6px 8px; text-align: left; }
       th { background: #f3f4f6; font-weight: 700; }
       .num { text-align: right; font-variant-numeric: tabular-nums; }
+      .neg { color: #b91c1c; }
     </style></head><body>
       <h1>${escapeHtml(activeOrg?.name || 'Copropiedad')} — ${escapeHtml(reportTitle)}</h1>
-      <div class="sub">Fecha de corte: ${escapeHtml(cutoffDate)}</div>
+      <div class="sub">${rangeSub}</div>
       ${unitHeaderHtml}
       <table>
         <thead><tr>${tableHeaders.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead>
@@ -1243,10 +1653,10 @@ export function PortfolioReportsTab() {
             })}
           </div>
 
-          {/* Filtros compartidos */}
+          {/* 7 Filtros compartidos */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-3 items-end pt-1">
             <Input
-              label="Fecha de corte *"
+              label="Fecha de corte"
               type="date"
               value={cutoffDate}
               onChange={e => setCutoffDate(e.target.value)}
@@ -1314,7 +1724,7 @@ export function PortfolioReportsTab() {
         </div>
       </Card>
 
-      {/* KPIs */}
+      {/* KPIs sincronizados con los filtros activos */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <Card>
           <div className="p-4">
@@ -1350,7 +1760,7 @@ export function PortfolioReportsTab() {
         </Card>
       </div>
 
-      {/* Tablas por reporte */}
+      {/* Contenido del reporte seleccionado */}
       <Card>
         <div className="p-6">
           {requiresSingleUnit && !selectedUnitId ? (
@@ -1369,8 +1779,12 @@ export function PortfolioReportsTab() {
                   <strong className="text-gray-900">{activeUnitObj?.owner_name || '—'}</strong>
                 </div>
                 <div>
-                  <span className="text-gray-500">CORTE: </span>
-                  <strong className="text-gray-900">{cutoffDate}</strong>
+                  <span className="text-gray-500">CORTE / RANGO: </span>
+                  <strong className="text-gray-900">
+                    {dateFrom || dateTo
+                      ? `${dateFrom || 'Inicio'} → ${dateTo || 'Fin'}`
+                      : cutoffDate || 'Sin corte'}
+                  </strong>
                 </div>
               </div>
               <div className="overflow-x-auto">
@@ -1382,6 +1796,7 @@ export function PortfolioReportsTab() {
                       <th className="px-3 py-2.5 text-right">Intereses</th>
                       <th className="px-3 py-2.5 text-right">Retroactivo</th>
                       <th className="px-3 py-2.5 text-right">Cuota Extra</th>
+                      <th className="px-3 py-2.5 text-right">Otros</th>
                       <th className="px-3 py-2.5 text-right">Total Cobro Mes</th>
                       <th className="px-3 py-2.5 text-right">Ajustes</th>
                       <th className="px-3 py-2.5 text-right">Pagos</th>
@@ -1392,8 +1807,8 @@ export function PortfolioReportsTab() {
                   <tbody className="divide-y divide-gray-100 bg-white">
                     {summaryStatementRows.length === 0 ? (
                       <tr>
-                        <td colSpan={10} className="px-4 py-8 text-center text-gray-500">
-                          No hay movimientos registrados para este inmueble a la fecha de corte.
+                        <td colSpan={11} className="px-4 py-8 text-center text-gray-500">
+                          No hay movimientos registrados para este inmueble con los filtros seleccionados.
                         </td>
                       </tr>
                     ) : (
@@ -1404,11 +1819,34 @@ export function PortfolioReportsTab() {
                           <td className="px-3 py-2 text-right font-mono">{formatCOP(r.intereses)}</td>
                           <td className="px-3 py-2 text-right font-mono">{formatCOP(r.retroactivo)}</td>
                           <td className="px-3 py-2 text-right font-mono">{formatCOP(r.cuotaExtra)}</td>
-                          <td className="px-3 py-2 text-right font-mono font-semibold">{formatCOP(r.totalCobro)}</td>
-                          <td className="px-3 py-2 text-right font-mono">{formatCOP(r.ajustes)}</td>
-                          <td className="px-3 py-2 text-right font-mono text-emerald-700">{formatCOP(r.pagos)}</td>
-                          <td className="px-3 py-2 text-right font-mono font-bold">{formatCOP(r.saldo)}</td>
-                          <td className="px-3 py-2 text-gray-600">{r.lastPaymentDate || '—'}</td>
+                          <td className="px-3 py-2 text-right font-mono">{formatCOP(r.otros)}</td>
+                          <td className="px-3 py-2 text-right font-mono font-semibold">
+                            {formatCOP(r.totalCobro)}
+                          </td>
+                          <td
+                            className={`px-3 py-2 text-right font-mono ${
+                              r.ajustes < 0 ? 'text-red-600' : 'text-gray-900'
+                            }`}
+                          >
+                            {formatSignedCOP(r.ajustes)}
+                          </td>
+                          <td
+                            className={`px-3 py-2 text-right font-mono ${
+                              r.pagos < 0 ? 'text-red-600' : 'text-gray-900'
+                            }`}
+                          >
+                            {formatSignedCOP(r.pagos)}
+                          </td>
+                          <td
+                            className={`px-3 py-2 text-right font-mono font-bold ${
+                              r.saldo < 0 ? 'text-red-600' : 'text-gray-900'
+                            }`}
+                          >
+                            {formatSignedCOP(r.saldo)}
+                          </td>
+                          <td className="px-3 py-2 text-gray-600">
+                            {r.lastPaymentDate || '—'}
+                          </td>
                         </tr>
                       ))
                     )}
@@ -1417,39 +1855,89 @@ export function PortfolioReportsTab() {
               </div>
             </div>
           ) : activeReport === 'statement_detailed' ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase">
-                  <tr>
-                    <th className="px-3 py-2.5">Fecha</th>
-                    <th className="px-3 py-2.5">Documento</th>
-                    <th className="px-3 py-2.5">Detalle</th>
-                    <th className="px-3 py-2.5 text-right">Movimiento</th>
-                    <th className="px-3 py-2.5 text-right">Saldo</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100 bg-white">
-                  {detailedStatementRows.length === 0 ? (
+            <div className="space-y-4">
+              <div className="rounded-lg bg-gray-50 border border-gray-200 p-3.5 text-xs flex flex-wrap justify-between gap-2">
+                <div>
+                  <span className="text-gray-500">COPROPIEDAD: </span>
+                  <strong className="text-gray-900">{activeOrg.name}</strong>
+                </div>
+                <div>
+                  <span className="text-gray-500">INMUEBLE: </span>
+                  <strong className="text-gray-900">{unitLabelText(activeUnitObj)}</strong>
+                </div>
+                <div>
+                  <span className="text-gray-500">PROPIETARIO: </span>
+                  <strong className="text-gray-900">{activeUnitObj?.owner_name || '—'}</strong>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase">
                     <tr>
-                      <td colSpan={5} className="px-4 py-8 text-center text-gray-500">
-                        Sin movimientos detallados a la fecha de corte.
-                      </td>
+                      <th className="px-3 py-2.5">Fecha</th>
+                      <th className="px-3 py-2.5">Documento</th>
+                      <th className="px-3 py-2.5">Detalle</th>
+                      <th className="px-3 py-2.5 text-right">Total Documento</th>
+                      {detailedStatementData.columns.map(col => (
+                        <th key={col.key} className="px-3 py-2.5 text-right">
+                          {col.label}
+                        </th>
+                      ))}
+                      <th className="px-3 py-2.5 text-right">Saldo</th>
                     </tr>
-                  ) : (
-                    detailedStatementRows.map((r, idx) => (
-                      <tr key={`${r.doc}-${idx}`} className="hover:bg-gray-50">
-                        <td className="px-3 py-2 font-mono">{r.date || '—'}</td>
-                        <td className="px-3 py-2 font-mono font-semibold text-blue-700">{r.doc}</td>
-                        <td className="px-3 py-2">{r.detail}</td>
-                        <td className={`px-3 py-2 text-right font-mono font-medium ${r.delta < 0 ? 'text-emerald-700' : 'text-gray-900'}`}>
-                          {formatCOP(r.delta)}
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 bg-white">
+                    {detailedStatementData.rows.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={5 + detailedStatementData.columns.length}
+                          className="px-4 py-8 text-center text-gray-500"
+                        >
+                          Sin movimientos detallados con los filtros seleccionados.
                         </td>
-                        <td className="px-3 py-2 text-right font-mono font-bold">{formatCOP(r.balance)}</td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+                    ) : (
+                      detailedStatementData.rows.map((r, idx) => (
+                        <tr key={`${r.doc}-${idx}`} className="hover:bg-gray-50">
+                          <td className="px-3 py-2 font-mono">{r.date || '—'}</td>
+                          <td className="px-3 py-2 font-mono font-semibold text-blue-700">
+                            {r.doc}
+                          </td>
+                          <td className="px-3 py-2">{r.detail}</td>
+                          <td
+                            className={`px-3 py-2 text-right font-mono font-semibold ${
+                              r.totalDoc < 0 ? 'text-red-600' : 'text-gray-900'
+                            }`}
+                          >
+                            {formatSignedCOP(r.totalDoc)}
+                          </td>
+                          {detailedStatementData.columns.map(col => {
+                            const v = roundMoney(r.conceptValues[col.key] || 0);
+                            return (
+                              <td
+                                key={col.key}
+                                className={`px-3 py-2 text-right font-mono ${
+                                  v < 0 ? 'text-red-600' : 'text-gray-900'
+                                }`}
+                              >
+                                {formatSignedCOP(v)}
+                              </td>
+                            );
+                          })}
+                          <td
+                            className={`px-3 py-2 text-right font-mono font-bold ${
+                              r.balance < 0 ? 'text-red-600' : 'text-gray-900'
+                            }`}
+                          >
+                            {formatSignedCOP(r.balance)}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           ) : activeReport === 'by_concept' ? (
             <div className="overflow-x-auto">
@@ -1477,9 +1965,15 @@ export function PortfolioReportsTab() {
                         <td className="px-3 py-2 font-mono">{r.code}</td>
                         <td className="px-3 py-2 font-medium">{r.name}</td>
                         <td className="px-3 py-2 text-right font-mono">{r.unitsCount}</td>
-                        <td className="px-3 py-2 text-right font-mono">{formatCOP(r.currentAmt)}</td>
-                        <td className="px-3 py-2 text-right font-mono text-red-700">{formatCOP(r.overdueAmt)}</td>
-                        <td className="px-3 py-2 text-right font-mono font-bold">{formatCOP(r.totalAmt)}</td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {formatCOP(r.currentAmt)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono text-red-700">
+                          {formatCOP(r.overdueAmt)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono font-bold">
+                          {formatCOP(r.totalAmt)}
+                        </td>
                       </tr>
                     ))
                   )}
@@ -1513,12 +2007,20 @@ export function PortfolioReportsTab() {
                       <tr key={r.unitId} className="hover:bg-gray-50">
                         <td className="px-3 py-2 font-mono font-medium">{r.unitLabel}</td>
                         <td className="px-3 py-2">{r.ownerName}</td>
-                        <td className="px-3 py-2 text-right font-mono">{formatCOP(r.currentAmt)}</td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {formatCOP(r.currentAmt)}
+                        </td>
                         <td className="px-3 py-2 text-right font-mono">{formatCOP(r.d1_30)}</td>
                         <td className="px-3 py-2 text-right font-mono">{formatCOP(r.d31_60)}</td>
-                        <td className="px-3 py-2 text-right font-mono text-amber-700">{formatCOP(r.d61_90)}</td>
-                        <td className="px-3 py-2 text-right font-mono text-red-700">{formatCOP(r.d90_plus)}</td>
-                        <td className="px-3 py-2 text-right font-mono font-bold">{formatCOP(r.totalAmt)}</td>
+                        <td className="px-3 py-2 text-right font-mono text-amber-700">
+                          {formatCOP(r.d61_90)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono text-red-700">
+                          {formatCOP(r.d90_plus)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono font-bold">
+                          {formatCOP(r.totalAmt)}
+                        </td>
                       </tr>
                     ))
                   )}
@@ -1544,19 +2046,27 @@ export function PortfolioReportsTab() {
                   {receiptRows.length === 0 ? (
                     <tr>
                       <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
-                        No hay recibos de caja en el rango seleccionado.
+                        No hay recibos de caja con los filtros seleccionados.
                       </td>
                     </tr>
                   ) : (
                     receiptRows.map(r => (
                       <tr key={r.id} className="hover:bg-gray-50">
-                        <td className="px-3 py-2 font-mono font-semibold text-blue-700">{r.receiptNumber}</td>
+                        <td className="px-3 py-2 font-mono font-semibold text-blue-700">
+                          {r.receiptNumber}
+                        </td>
                         <td className="px-3 py-2 font-mono">{r.paymentDate}</td>
                         <td className="px-3 py-2 font-mono">{r.unitLabel}</td>
                         <td className="px-3 py-2">{r.paymentMethod}</td>
-                        <td className="px-3 py-2 text-right font-mono font-bold">{formatCOP(r.totalAmount)}</td>
-                        <td className="px-3 py-2 text-right font-mono">{formatCOP(r.appliedAmount)}</td>
-                        <td className="px-3 py-2 text-right font-mono text-blue-700">{formatCOP(r.advanceAmount)}</td>
+                        <td className="px-3 py-2 text-right font-mono font-bold">
+                          {formatCOP(r.totalAmount)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {formatCOP(r.appliedAmount)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono text-blue-700">
+                          {formatCOP(r.advanceAmount)}
+                        </td>
                         <td className="px-3 py-2 uppercase text-[11px]">{r.status}</td>
                       </tr>
                     ))
@@ -1581,7 +2091,7 @@ export function PortfolioReportsTab() {
                   {collectionSummaryRows.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="px-4 py-8 text-center text-gray-500">
-                        No hay recaudos en el rango seleccionado.
+                        No hay recaudos con los filtros seleccionados.
                       </td>
                     </tr>
                   ) : (
@@ -1590,9 +2100,15 @@ export function PortfolioReportsTab() {
                         <td className="px-3 py-2 font-mono">{r.date}</td>
                         <td className="px-3 py-2 font-medium">{r.method}</td>
                         <td className="px-3 py-2 text-right font-mono">{r.count}</td>
-                        <td className="px-3 py-2 text-right font-mono font-bold text-emerald-700">{formatCOP(r.totalAmount)}</td>
-                        <td className="px-3 py-2 text-right font-mono">{formatCOP(r.appliedAmount)}</td>
-                        <td className="px-3 py-2 text-right font-mono text-blue-700">{formatCOP(r.advanceAmount)}</td>
+                        <td className="px-3 py-2 text-right font-mono font-bold text-emerald-700">
+                          {formatCOP(r.totalAmount)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {formatCOP(r.appliedAmount)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono text-blue-700">
+                          {formatCOP(r.advanceAmount)}
+                        </td>
                       </tr>
                     ))
                   )}
@@ -1615,7 +2131,7 @@ export function PortfolioReportsTab() {
                   {advancesRows.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="px-4 py-8 text-center text-gray-500">
-                        No hay saldos a favor o anticipos registrados a la fecha de corte.
+                        No hay saldos a favor o anticipos con los filtros seleccionados.
                       </td>
                     </tr>
                   ) : (
@@ -1623,9 +2139,15 @@ export function PortfolioReportsTab() {
                       <tr key={r.unitId} className="hover:bg-gray-50">
                         <td className="px-3 py-2 font-mono font-medium">{r.unitLabel}</td>
                         <td className="px-3 py-2">{r.ownerName}</td>
-                        <td className="px-3 py-2 text-right font-mono">{formatCOP(r.fromReceipts)}</td>
-                        <td className="px-3 py-2 text-right font-mono">{formatCOP(r.fromNotes)}</td>
-                        <td className="px-3 py-2 text-right font-mono font-bold text-blue-700">{formatCOP(r.totalAdvance)}</td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {formatCOP(r.fromReceipts)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {formatCOP(r.fromNotes)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono font-bold text-blue-700">
+                          {formatCOP(r.totalAdvance)}
+                        </td>
                       </tr>
                     ))
                   )}
@@ -1658,8 +2180,12 @@ export function PortfolioReportsTab() {
                         <td className="px-3 py-2 font-mono font-medium">{r.unitLabel}</td>
                         <td className="px-3 py-2">{r.ownerName}</td>
                         <td className="px-3 py-2 font-mono">{r.ownerDoc}</td>
-                        <td className="px-3 py-2 text-right font-mono text-red-700">{formatCOP(r.overdueBalance)}</td>
-                        <td className="px-3 py-2 text-right font-mono font-bold">{formatCOP(r.totalBalance)}</td>
+                        <td className="px-3 py-2 text-right font-mono text-red-700">
+                          {formatCOP(r.overdueBalance)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono font-bold">
+                          {formatCOP(r.totalBalance)}
+                        </td>
                         <td className="px-3 py-2">
                           <span
                             className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold ${
@@ -1696,18 +2222,22 @@ export function PortfolioReportsTab() {
                   {treasuryNotesRows.length === 0 ? (
                     <tr>
                       <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
-                        No hay notas de tesorería en el rango seleccionado.
+                        No hay notas de tesorería con los filtros seleccionados.
                       </td>
                     </tr>
                   ) : (
                     treasuryNotesRows.map(r => (
                       <tr key={r.id} className="hover:bg-gray-50">
-                        <td className="px-3 py-2 font-mono font-semibold text-blue-700">{r.noteNumber}</td>
+                        <td className="px-3 py-2 font-mono font-semibold text-blue-700">
+                          {r.noteNumber}
+                        </td>
                         <td className="px-3 py-2 font-mono font-bold">{r.noteType}</td>
                         <td className="px-3 py-2 font-mono">{r.date}</td>
                         <td className="px-3 py-2 font-mono">{r.period}</td>
                         <td className="px-3 py-2 font-mono">{r.unitLabel}</td>
-                        <td className="px-3 py-2 text-right font-mono font-bold">{formatCOP(r.totalAmount)}</td>
+                        <td className="px-3 py-2 text-right font-mono font-bold">
+                          {formatCOP(r.totalAmount)}
+                        </td>
                         <td className="px-3 py-2 uppercase text-[11px]">{r.status}</td>
                         <td className="px-3 py-2">{r.description || '—'}</td>
                       </tr>
@@ -1732,7 +2262,7 @@ export function PortfolioReportsTab() {
                   {delinquencyRows.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="px-4 py-8 text-center text-gray-500">
-                        No hay inmuebles en mora a la fecha de corte.
+                        No hay inmuebles en mora con los filtros seleccionados.
                       </td>
                     </tr>
                   ) : (
@@ -1741,8 +2271,12 @@ export function PortfolioReportsTab() {
                         <td className="px-3 py-2 font-mono font-medium">{r.unitLabel}</td>
                         <td className="px-3 py-2">{r.ownerName}</td>
                         <td className="px-3 py-2 font-mono">{r.ownerPhone}</td>
-                        <td className="px-3 py-2 text-right font-mono text-amber-700">{r.maxDaysPastDue}</td>
-                        <td className="px-3 py-2 text-right font-mono font-bold text-red-700">{formatCOP(r.overdueBalance)}</td>
+                        <td className="px-3 py-2 text-right font-mono text-amber-700">
+                          {r.maxDaysPastDue}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono font-bold text-red-700">
+                          {formatCOP(r.overdueBalance)}
+                        </td>
                       </tr>
                     ))
                   )}
