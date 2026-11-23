@@ -2563,4 +2563,3 @@ export function PortfolioReportsTab() {
       </Card>
     </div>
   );
-}
