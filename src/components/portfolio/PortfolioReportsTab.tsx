@@ -436,7 +436,7 @@ export function PortfolioReportsTab() {
       if (!isDateAllowed(parentNote.accounting_date || parentNote.application_date)) return;
       if (
         selectedConceptId !== 'ALL' &&
-        String(ln.concept_id || '') !== selectedConceptId
+        String(ln.concept_id || ln.conceptId || '') !== selectedConceptId
       ) {
         return;
       }
@@ -470,7 +470,7 @@ export function PortfolioReportsTab() {
     selectedConceptId,
   ]);
 
-  // 1. Estado de Cuenta Resumido (lee items_snapshot en camelCase o snake_case + interest_amount + dues + recibos + notas)
+  // 1. Estado de Cuenta Resumido
   const summaryStatementRows = useMemo(() => {
     const targetUnitId =
       selectedUnitId || (filteredUnits.length === 1 ? String(filteredUnits[0].id) : '');
@@ -538,7 +538,6 @@ export function PortfolioReportsTab() {
       else row.otros = roundMoney(row.otros + amount);
     };
 
-    // Facturas / cuentas de cobro
     invoices
       .filter(
         inv =>
@@ -567,16 +566,17 @@ export function PortfolioReportsTab() {
             );
           });
 
-          // Si la factura tiene interest_amount y no venía ya desglosado en items_snapshot
           const intr = Number(inv.interest_amount || 0);
           const alreadyHasInterestInSnap = snapItems.some((it: any) => {
             const cid = String(it.conceptId ?? it.concept_id ?? '');
             const cObj = cid ? conceptMap.get(cid) : undefined;
-            return classifyConcept(
-              cObj?.code || it.conceptCode || it.concept_code,
-              cObj?.name || it.conceptName || it.concept_name,
-              Boolean(cObj?.is_late_interest)
-            ) === 'intereses';
+            return (
+              classifyConcept(
+                cObj?.code || it.conceptCode || it.concept_code,
+                cObj?.name || it.conceptName || it.concept_name,
+                Boolean(cObj?.is_late_interest)
+              ) === 'intereses'
+            );
           });
           if (intr > 0 && !alreadyHasInterestInSnap) {
             addDiscriminatedAmount(row, null, 'MORA_ADM', 'Intereses de Mora', intr, true);
@@ -589,7 +589,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // Cuotas (dues) sin factura asociada en el período o con intereses propios
     dues
       .filter(
         d =>
@@ -626,7 +625,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // Recibos de caja
     receipts
       .filter(
         r =>
@@ -647,7 +645,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // Notas NC / ND / NT
     noteLines.forEach(ln => {
       const parent = notes.find(n => String(n.id) === String(ln.note_id));
       if (!parent || !isStatusAllowed(parent.status)) return;
@@ -708,18 +705,23 @@ export function PortfolioReportsTab() {
     selectedConceptId,
   ]);
 
-  // 2. Estado de Cuenta Detallado: columnas dinámicas SOLO de conceptos activos con movimiento/saldo en el inmueble
+  // 2. Estado de Cuenta Detallado + Saldo Final por cada columna de concepto y Saldo acumulado
   const detailedStatementData = useMemo(() => {
     const targetUnitId =
       selectedUnitId || (filteredUnits.length === 1 ? String(filteredUnits[0].id) : '');
     if (!targetUnitId) {
-      return { columns: [] as ConceptColumnDef[], rows: [] as any[] };
+      return {
+        columns: [] as ConceptColumnDef[],
+        rows: [] as any[],
+        finalTotalDoc: 0,
+        finalConceptTotals: {} as Record<string, number>,
+        finalBalance: 0,
+      };
     }
 
     const uObj = unitMap.get(targetUnitId);
     const tpObj = uObj?.third_party_id ? tpMap.get(String(uObj.third_party_id)) : null;
 
-    // Saldos pendientes actuales del inmueble por concepto (de allDetailedItems)
     const unitBalancesByConcept = new Map<string, number>();
     allDetailedItems
       .filter(it => String(it.unitId) === targetUnitId)
@@ -762,7 +764,7 @@ export function PortfolioReportsTab() {
       movementSumByCol.set(colKey, roundMoney((movementSumByCol.get(colKey) || 0) + rounded));
     };
 
-    // Facturas / cuentas de cobro
+    // Cuentas de cobro / facturas
     invoices
       .filter(
         inv =>
@@ -892,7 +894,7 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // Notas NC / ND / NT (incluyendo traslado de cartera)
+    // Notas NC / ND / NT
     const linesByNote = new Map<string, any[]>();
     noteLines.forEach(ln => {
       const nid = String(ln.note_id || '');
@@ -979,7 +981,6 @@ export function PortfolioReportsTab() {
 
     rawEvents.sort((a, b) => a.date.localeCompare(b.date));
 
-    // Filtrar columnas: solo conceptos activos que tengan movimiento o saldo en el inmueble
     const columns = Array.from(candidateCols.values()).filter(col => {
       const movTotal = Math.abs(roundMoney(movementSumByCol.get(col.key) || 0));
       const unitConceptBal = col.conceptId
@@ -989,12 +990,20 @@ export function PortfolioReportsTab() {
     });
 
     let runningSaldo = 0;
+    let finalTotalDoc = 0;
+    const finalConceptTotals: Record<string, number> = {};
+    columns.forEach(col => {
+      finalConceptTotals[col.key] = 0;
+    });
 
     const rows = rawEvents.map(ev => {
       runningSaldo = roundMoney(runningSaldo + ev.totalDoc);
+      finalTotalDoc = roundMoney(finalTotalDoc + ev.totalDoc);
       const conceptValues: Record<string, number> = {};
       columns.forEach(col => {
-        conceptValues[col.key] = roundMoney(ev.byConceptKey[col.key] || 0);
+        const v = roundMoney(ev.byConceptKey[col.key] || 0);
+        conceptValues[col.key] = v;
+        finalConceptTotals[col.key] = roundMoney((finalConceptTotals[col.key] || 0) + v);
       });
       return {
         date: ev.date,
@@ -1009,7 +1018,13 @@ export function PortfolioReportsTab() {
       };
     });
 
-    return { columns, rows };
+    return {
+      columns,
+      rows,
+      finalTotalDoc,
+      finalConceptTotals,
+      finalBalance: runningSaldo,
+    };
   }, [
     selectedUnitId,
     filteredUnits,
@@ -1410,6 +1425,26 @@ export function PortfolioReportsTab() {
         ])
       );
     } else if (activeReport === 'statement_detailed') {
+      const csvRows: (string | number)[][] = detailedStatementData.rows.map(r => [
+        r.date,
+        r.doc,
+        r.detail,
+        r.totalDoc,
+        ...detailedStatementData.columns.map(c => r.conceptValues[c.key] || 0),
+        r.balance,
+      ]);
+      if (detailedStatementData.rows.length > 0) {
+        csvRows.push([
+          '',
+          'SALDO FINAL',
+          'Saldo neto acumulado por concepto',
+          detailedStatementData.finalTotalDoc,
+          ...detailedStatementData.columns.map(
+            c => detailedStatementData.finalConceptTotals[c.key] || 0
+          ),
+          detailedStatementData.finalBalance,
+        ]);
+      }
       downloadCsv(
         `estado-cuenta-detallado-${stamp}.csv`,
         [
@@ -1420,14 +1455,7 @@ export function PortfolioReportsTab() {
           ...detailedStatementData.columns.map(c => c.label.toUpperCase()),
           'SALDO',
         ],
-        detailedStatementData.rows.map(r => [
-          r.date,
-          r.doc,
-          r.detail,
-          r.totalDoc,
-          ...detailedStatementData.columns.map(c => r.conceptValues[c.key] || 0),
-          r.balance,
-        ])
+        csvRows
       );
     } else if (activeReport === 'by_concept') {
       downloadCsv(
@@ -1593,7 +1621,7 @@ export function PortfolioReportsTab() {
         ...detailedStatementData.columns.map(c => c.label),
         'Saldo',
       ];
-      tableRowsHtml = detailedStatementData.rows
+      const bodyHtml = detailedStatementData.rows
         .map(r => {
           const conceptCells = detailedStatementData.columns
             .map(c => {
@@ -1611,6 +1639,23 @@ export function PortfolioReportsTab() {
           </tr>`;
         })
         .join('');
+
+      const finalRowHtml =
+        detailedStatementData.rows.length > 0
+          ? `<tr class="final-row">
+              <td colspan="3"><strong>SALDO FINAL POR CONCEPTO</strong></td>
+              <td class="num ${detailedStatementData.finalTotalDoc < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(detailedStatementData.finalTotalDoc))}</strong></td>
+              ${detailedStatementData.columns
+                .map(c => {
+                  const v = roundMoney(detailedStatementData.finalConceptTotals[c.key] || 0);
+                  return `<td class="num ${v < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(v))}</strong></td>`;
+                })
+                .join('')}
+              <td class="num ${detailedStatementData.finalBalance < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(detailedStatementData.finalBalance))}</strong></td>
+            </tr>`
+          : '';
+
+      tableRowsHtml = bodyHtml + finalRowHtml;
     } else if (activeReport === 'by_concept') {
       tableHeaders = ['Código', 'Concepto', 'Inmuebles', 'Por Vencer', 'Vencida', 'Total'];
       tableRowsHtml = byConceptRows
@@ -1683,6 +1728,7 @@ export function PortfolioReportsTab() {
       th { background: #f3f4f6; font-weight: 700; }
       .num { text-align: right; font-variant-numeric: tabular-nums; }
       .neg { color: #b91c1c; }
+      .final-row td { background: #f9fafb; border-top: 2px solid #374151; }
     </style></head><body>
       <h1>${escapeHtml(activeOrg?.name || 'Copropiedad')} — ${escapeHtml(reportTitle)}</h1>
       <div class="sub">${rangeSub}</div>
@@ -2070,6 +2116,48 @@ export function PortfolioReportsTab() {
                       ))
                     )}
                   </tbody>
+                  {detailedStatementData.rows.length > 0 && (
+                    <tfoot className="bg-gray-100 border-t-2 border-gray-300 text-xs">
+                      <tr>
+                        <td colSpan={3} className="px-3 py-2.5 font-bold text-gray-800 uppercase">
+                          Saldo Final por Concepto
+                        </td>
+                        <td
+                          className={`px-3 py-2.5 text-right font-mono font-bold ${
+                            detailedStatementData.finalTotalDoc < 0
+                              ? 'text-red-600'
+                              : 'text-gray-900'
+                          }`}
+                        >
+                          {formatCOP(detailedStatementData.finalTotalDoc)}
+                        </td>
+                        {detailedStatementData.columns.map(col => {
+                          const v = roundMoney(
+                            detailedStatementData.finalConceptTotals[col.key] || 0
+                          );
+                          return (
+                            <td
+                              key={col.key}
+                              className={`px-3 py-2.5 text-right font-mono font-bold ${
+                                v < 0 ? 'text-red-600' : 'text-gray-900'
+                              }`}
+                            >
+                              {formatCOP(v)}
+                            </td>
+                          );
+                        })}
+                        <td
+                          className={`px-3 py-2.5 text-right font-mono font-bold ${
+                            detailedStatementData.finalBalance < 0
+                              ? 'text-red-600'
+                              : 'text-gray-900'
+                          }`}
+                        >
+                          {formatCOP(detailedStatementData.finalBalance)}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  )}
                 </table>
               </div>
             </div>
