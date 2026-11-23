@@ -102,6 +102,23 @@ function classifyConcept(
   return 'other';
 }
 
+function noteLineSignedDelta(parentNote: any, line: any): number {
+  const val = roundMoney(
+    Number(line?.amount || 0) +
+      Number(line?.discount_amount || 0) +
+      Number(line?.advance_amount || 0)
+  );
+  const noteType = String(parentNote?.note_type || '').toUpperCase().trim();
+  const section = String(line?.section || '').toLowerCase().trim();
+
+  if (section === 'abono') return -val;
+  if (section === 'cargo') return val;
+
+  if (noteType === 'ND') return val;
+  if (noteType === 'NC') return -val;
+  return 0;
+}
+
 function escapeHtml(text: string): string {
   return String(text ?? '')
     .replace(/&/g, '&amp;')
@@ -166,6 +183,7 @@ export function PortfolioReportsTab() {
   const [dues, setDues] = useState<any[]>([]);
   const [invoices, setInvoices] = useState<any[]>([]);
   const [receipts, setReceipts] = useState<any[]>([]);
+  const [receiptAllocations, setReceiptAllocations] = useState<any[]>([]);
   const [notes, setNotes] = useState<any[]>([]);
   const [noteLines, setNoteLines] = useState<any[]>([]);
 
@@ -183,6 +201,7 @@ export function PortfolioReportsTab() {
       duesRes,
       invRes,
       recRes,
+      allocRes,
       notesRes,
       noteLinesRes,
     ] = await Promise.all([
@@ -228,6 +247,7 @@ export function PortfolioReportsTab() {
         .select('*')
         .eq('organization_id', activeOrg.id)
         .order('payment_date', { ascending: true }),
+      supabase.from('receipt_allocations').select('*'),
       supabase
         .from('treasury_notes')
         .select('*')
@@ -253,6 +273,7 @@ export function PortfolioReportsTab() {
     setDues(duesRes.data || []);
     setInvoices(invRes.data || []);
     setReceipts(recRes.data || []);
+    setReceiptAllocations(allocRes.data || []);
     setNotes(notesRes.data || []);
     setNoteLines(noteLinesRes.data || []);
     setLoading(false);
@@ -262,7 +283,6 @@ export function PortfolioReportsTab() {
     loadData();
   }, [loadData]);
 
-  // Filtro unificado de fechas para todos los cálculos (KPIs y reportes)
   const isDateAllowed = useCallback(
     (docDateStr?: string | null) => {
       const dt = String(docDateStr || '').slice(0, 10);
@@ -344,7 +364,145 @@ export function PortfolioReportsTab() {
     return m;
   }, [thirdParties]);
 
-  // Ítems detallados de cartera filtrados por unidad, fecha y concepto
+  const dueByIdMap = useMemo(() => {
+    const m = new Map<string, any>();
+    dues.forEach(d => m.set(String(d.id), d));
+    return m;
+  }, [dues]);
+
+  const dueByUnitPeriodMap = useMemo(() => {
+    const m = new Map<string, any>();
+    dues.forEach(d => {
+      const k = `${String(d.unit_id || '')}_${String(d.period || '')}`;
+      if (!m.has(k)) m.set(k, d);
+    });
+    return m;
+  }, [dues]);
+
+  const noteByIdMap = useMemo(() => {
+    const m = new Map<string, any>();
+    notes.forEach(n => m.set(String(n.id), n));
+    return m;
+  }, [notes]);
+
+  const allocsByReceiptId = useMemo(() => {
+    const m = new Map<string, any[]>();
+    receiptAllocations.forEach(al => {
+      const rid = String(al.receipt_id || '');
+      if (!m.has(rid)) m.set(rid, []);
+      m.get(rid)!.push(al);
+    });
+    return m;
+  }, [receiptAllocations]);
+
+  const getInvoiceOriginalConceptAmounts = useCallback(
+    (inv: any) => {
+      const uid = String(inv.unit_id || '');
+      const period = String(inv.period || '');
+      const matchingDue = dueByUnitPeriodMap.get(`${uid}_${period}`);
+      const matchingDueId = matchingDue ? String(matchingDue.id) : '';
+
+      const appliedByConcept = new Map<string, number>();
+      receipts.forEach(r => {
+        if (!isStatusAllowed(r.status)) return;
+        if (!isDateAllowed(r.payment_date || r.accounting_date)) return;
+        const rAllocs = allocsByReceiptId.get(String(r.id)) || [];
+        rAllocs.forEach(al => {
+          const sameDue = matchingDueId && String(al.due_id || '') === matchingDueId;
+          const sameUnitAndPeriod =
+            !matchingDueId &&
+            String(r.unit_id || '') === uid &&
+            (!al.period || String(al.period) === period);
+          if (!sameDue && !sameUnitAndPeriod) return;
+
+          const cid = String(al.concept_id || '');
+          const cap = Number(al.capital_applied || 0);
+          const intr = Number(al.interest_applied || 0);
+          const totAl = roundMoney(cap + intr);
+          if (cid && totAl > 0) {
+            appliedByConcept.set(cid, roundMoney((appliedByConcept.get(cid) || 0) + totAl));
+          }
+        });
+      });
+
+      const snapItems = Array.isArray(inv.items_snapshot) ? inv.items_snapshot : [];
+      const result: {
+        conceptId?: string;
+        code: string;
+        name: string;
+        originalAmount: number;
+        isLateInterest: boolean;
+      }[] = [];
+
+      if (snapItems.length > 0) {
+        snapItems.forEach((it: any) => {
+          const cid = String(it.conceptId ?? it.concept_id ?? it.billing_concept_id ?? '');
+          const cObj = cid ? conceptMap.get(cid) : undefined;
+          const snapAmt = Number(it.amount ?? it.total ?? it.value ?? 0);
+          const appliedForThis = cid ? appliedByConcept.get(cid) || 0 : 0;
+
+          const dueBal = matchingDue ? Number(matchingDue.balance ?? matchingDue.amount ?? 0) : 0;
+          const dueAmt = matchingDue ? Number(matchingDue.amount ?? 0) : 0;
+          const hasPartialPaymentOnDue =
+            matchingDue && dueBal < dueAmt - 0.01 && appliedForThis > 0;
+
+          const originalAmt = hasPartialPaymentOnDue
+            ? roundMoney(snapAmt + appliedForThis)
+            : roundMoney(snapAmt > 0 ? snapAmt : snapAmt + appliedForThis);
+
+          result.push({
+            conceptId: cid || undefined,
+            code: cObj?.code || String(it.conceptCode ?? it.concept_code ?? ''),
+            name:
+              cObj?.name ||
+              String(it.conceptName ?? it.concept_name ?? it.name ?? 'Concepto'),
+            originalAmount: originalAmt,
+            isLateInterest: Boolean(
+              cObj?.is_late_interest ?? it.isLateInterest ?? it.is_late_interest
+            ),
+          });
+        });
+
+        const intr = Number(inv.interest_amount || 0);
+        const hasInterestInSnap = result.some(r =>
+          classifyConcept(r.code, r.name, r.isLateInterest) === 'intereses'
+        );
+        if (intr > 0 && !hasInterestInSnap) {
+          const moraConcept = concepts.find(c => c.is_late_interest);
+          result.push({
+            conceptId: moraConcept?.id ? String(moraConcept.id) : undefined,
+            code: moraConcept?.code || 'MORA_ADM',
+            name: moraConcept?.name || 'Intereses de Mora',
+            originalAmount: roundMoney(intr),
+            isLateInterest: true,
+          });
+        }
+      } else {
+        const sub = Number(inv.subtotal || 0);
+        const intr = Number(inv.interest_amount || 0);
+        if (sub > 0) {
+          result.push({
+            code: 'ADM',
+            name: 'Cuota de Administración',
+            originalAmount: roundMoney(sub),
+            isLateInterest: false,
+          });
+        }
+        if (intr > 0) {
+          result.push({
+            code: 'MORA_ADM',
+            name: 'Intereses de Mora',
+            originalAmount: roundMoney(intr),
+            isLateInterest: true,
+          });
+        }
+      }
+
+      return result;
+    },
+    [dueByUnitPeriodMap, receipts, allocsByReceiptId, conceptMap, concepts, isStatusAllowed, isDateAllowed]
+  );
+
   const allDetailedItems = useMemo(() => {
     const items: (DetailedDueItem & { unitId: string })[] = [];
     const duesByUnit = new Map<string, any[]>();
@@ -403,69 +561,6 @@ export function PortfolioReportsTab() {
     isDateAllowed,
     hierarchy,
     concepts,
-    effectiveCutoff,
-    selectedConceptId,
-  ]);
-
-  // KPIs calculados con EXACTAMENTE los mismos filtros activos
-  const kpis = useMemo(() => {
-    let totalPortfolio = 0;
-    let overduePortfolio = 0;
-    let advanceTotal = 0;
-
-    allDetailedItems.forEach(it => {
-      const bal = roundMoney(Number(it.balance || 0));
-      totalPortfolio = roundMoney(totalPortfolio + bal);
-      if (bal > 0 && daysPastDue(it.dueDate, effectiveCutoff) > 0) {
-        overduePortfolio = roundMoney(overduePortfolio + bal);
-      }
-    });
-
-    receipts.forEach(r => {
-      if (!isStatusAllowed(r.status)) return;
-      if (!allowedUnitIds.has(String(r.unit_id || ''))) return;
-      if (!isDateAllowed(r.payment_date || r.accounting_date)) return;
-      advanceTotal = roundMoney(advanceTotal + Number(r.advance_amount || 0));
-    });
-
-    noteLines.forEach(ln => {
-      const parentNote = notes.find(n => String(n.id) === String(ln.note_id));
-      if (!parentNote || !isStatusAllowed(parentNote.status)) return;
-      const uid = String(ln.unit_id || parentNote.unit_id || '');
-      if (!allowedUnitIds.has(uid)) return;
-      if (!isDateAllowed(parentNote.accounting_date || parentNote.application_date)) return;
-      if (
-        selectedConceptId !== 'ALL' &&
-        String(ln.concept_id || ln.conceptId || '') !== selectedConceptId
-      ) {
-        return;
-      }
-      advanceTotal = roundMoney(advanceTotal + Number(ln.advance_amount || 0));
-    });
-
-    const collectedInRange = roundMoney(
-      receipts.reduce((sum, r) => {
-        if (!isStatusAllowed(r.status)) return sum;
-        if (!allowedUnitIds.has(String(r.unit_id || ''))) return sum;
-        if (!isDateAllowed(r.payment_date || r.accounting_date)) return sum;
-        return sum + Number(r.total_amount || 0);
-      }, 0)
-    );
-
-    return {
-      totalPortfolio,
-      overduePortfolio,
-      collectedInRange,
-      advanceTotal,
-    };
-  }, [
-    allDetailedItems,
-    receipts,
-    notes,
-    noteLines,
-    allowedUnitIds,
-    isStatusAllowed,
-    isDateAllowed,
     effectiveCutoff,
     selectedConceptId,
   ]);
@@ -548,45 +643,17 @@ export function PortfolioReportsTab() {
       .forEach(inv => {
         const p = String(inv.period || 'SIN PERIODO');
         const row = getOrCreate(p);
-        const snapItems = Array.isArray(inv.items_snapshot) ? inv.items_snapshot : [];
-
-        if (snapItems.length > 0) {
-          snapItems.forEach((it: any) => {
-            const cid = String(it.conceptId ?? it.concept_id ?? it.billing_concept_id ?? '');
-            const cCode = String(it.conceptCode ?? it.concept_code ?? '');
-            const cName = String(it.conceptName ?? it.concept_name ?? it.name ?? '');
-            const val = Number(it.amount ?? it.total ?? it.value ?? 0);
-            addDiscriminatedAmount(
-              row,
-              cid || null,
-              cCode,
-              cName,
-              val,
-              Boolean(it.isLateInterest ?? it.is_late_interest)
-            );
-          });
-
-          const intr = Number(inv.interest_amount || 0);
-          const alreadyHasInterestInSnap = snapItems.some((it: any) => {
-            const cid = String(it.conceptId ?? it.concept_id ?? '');
-            const cObj = cid ? conceptMap.get(cid) : undefined;
-            return (
-              classifyConcept(
-                cObj?.code || it.conceptCode || it.concept_code,
-                cObj?.name || it.conceptName || it.concept_name,
-                Boolean(cObj?.is_late_interest)
-              ) === 'intereses'
-            );
-          });
-          if (intr > 0 && !alreadyHasInterestInSnap) {
-            addDiscriminatedAmount(row, null, 'MORA_ADM', 'Intereses de Mora', intr, true);
-          }
-        } else {
-          const sub = Number(inv.subtotal || 0);
-          const intr = Number(inv.interest_amount || 0);
-          if (sub > 0) addDiscriminatedAmount(row, null, 'ADM', 'Cuota de Administración', sub, false);
-          if (intr > 0) addDiscriminatedAmount(row, null, 'MORA_ADM', 'Intereses de Mora', intr, true);
-        }
+        const origLines = getInvoiceOriginalConceptAmounts(inv);
+        origLines.forEach(line => {
+          addDiscriminatedAmount(
+            row,
+            line.conceptId,
+            line.code,
+            line.name,
+            line.originalAmount,
+            line.isLateInterest
+          );
+        });
       });
 
     dues
@@ -606,10 +673,7 @@ export function PortfolioReportsTab() {
             isStatusAllowed(inv.status) &&
             isDateAllowed(inv.issue_date || inv.due_date)
         );
-
         const dueAmt = Number(d.amount ?? d.base_amount ?? 0);
-        const dueInterest = Number(d.interest_amount ?? d.late_interest ?? 0);
-
         if (!hasInvoiceForPeriod && dueAmt > 0) {
           addDiscriminatedAmount(
             row,
@@ -619,9 +683,6 @@ export function PortfolioReportsTab() {
             dueAmt,
             false
           );
-        }
-        if (!hasInvoiceForPeriod && dueInterest > 0) {
-          addDiscriminatedAmount(row, null, 'MORA_ADM', 'Intereses de Mora', dueInterest, true);
         }
       });
 
@@ -634,19 +695,44 @@ export function PortfolioReportsTab() {
       )
       .forEach(r => {
         const dt = String(r.payment_date || r.accounting_date || '');
-        const pKey = dt ? dt.slice(0, 7) : 'GENERAL';
-        const target = byPeriod.has(pKey)
-          ? byPeriod.get(pKey)!
-          : Array.from(byPeriod.values()).slice(-1)[0] || getOrCreate(pKey);
-        const amt = Number(r.total_amount || 0);
-        target.pagos = roundMoney(target.pagos - amt);
-        if (dt && (!target.lastPaymentDate || dt > target.lastPaymentDate)) {
-          target.lastPaymentDate = dt;
+        const rAllocs = allocsByReceiptId.get(String(r.id)) || [];
+
+        if (rAllocs.length > 0) {
+          rAllocs.forEach(al => {
+            if (
+              selectedConceptId !== 'ALL' &&
+              String(al.concept_id || '') !== selectedConceptId
+            ) {
+              return;
+            }
+            const dueObj = al.due_id ? dueByIdMap.get(String(al.due_id)) : null;
+            const pKey = String(
+              dueObj?.period || al.period || (dt ? dt.slice(0, 7) : 'GENERAL')
+            );
+            const target = getOrCreate(pKey);
+            const appliedAmt = roundMoney(
+              Number(al.capital_applied || 0) + Number(al.interest_applied || 0)
+            );
+            target.pagos = roundMoney(target.pagos - appliedAmt);
+            if (dt && (!target.lastPaymentDate || dt > target.lastPaymentDate)) {
+              target.lastPaymentDate = dt;
+            }
+          });
+        } else if (selectedConceptId === 'ALL') {
+          const pKey = dt ? dt.slice(0, 7) : 'GENERAL';
+          const target = byPeriod.has(pKey)
+            ? byPeriod.get(pKey)!
+            : Array.from(byPeriod.values()).slice(-1)[0] || getOrCreate(pKey);
+          const amt = Number(r.total_amount || 0);
+          target.pagos = roundMoney(target.pagos - amt);
+          if (dt && (!target.lastPaymentDate || dt > target.lastPaymentDate)) {
+            target.lastPaymentDate = dt;
+          }
         }
       });
 
     noteLines.forEach(ln => {
-      const parent = notes.find(n => String(n.id) === String(ln.note_id));
+      const parent = noteByIdMap.get(String(ln.note_id));
       if (!parent || !isStatusAllowed(parent.status)) return;
       const lineUnit = String(ln.unit_id || parent.unit_id || '');
       if (lineUnit !== targetUnitId) return;
@@ -658,20 +744,15 @@ export function PortfolioReportsTab() {
         return;
       }
 
+      const dueObj = ln.due_id ? dueByIdMap.get(String(ln.due_id)) : null;
       const pKey = String(
-        ln.period || parent.period || parent.accounting_date?.slice(0, 7) || 'GENERAL'
+        dueObj?.period ||
+          ln.period ||
+          (parent.accounting_date ? parent.accounting_date.slice(0, 7) : 'GENERAL')
       );
-      const target = byPeriod.has(pKey) ? byPeriod.get(pKey)! : getOrCreate(pKey);
-      const val =
-        Number(ln.amount || 0) +
-        Number(ln.discount_amount || 0) +
-        Number(ln.advance_amount || 0);
-
-      if (parent.note_type === 'ND' || ln.section === 'cargo') {
-        target.ajustes = roundMoney(target.ajustes + val);
-      } else {
-        target.ajustes = roundMoney(target.ajustes - val);
-      }
+      const target = getOrCreate(pKey);
+      const delta = noteLineSignedDelta(parent, ln);
+      target.ajustes = roundMoney(target.ajustes + delta);
     });
 
     const sorted = Array.from(byPeriod.values()).sort((a, b) =>
@@ -697,15 +778,18 @@ export function PortfolioReportsTab() {
     invoices,
     dues,
     receipts,
-    notes,
+    allocsByReceiptId,
+    dueByIdMap,
+    noteByIdMap,
     noteLines,
     conceptMap,
+    getInvoiceOriginalConceptAmounts,
     isStatusAllowed,
     isDateAllowed,
     selectedConceptId,
   ]);
 
-  // 2. Estado de Cuenta Detallado + Saldo Final por cada columna de concepto y Saldo acumulado
+  // 2. Estado de Cuenta Detallado
   const detailedStatementData = useMemo(() => {
     const targetUnitId =
       selectedUnitId || (filteredUnits.length === 1 ? String(filteredUnits[0].id) : '');
@@ -721,15 +805,6 @@ export function PortfolioReportsTab() {
 
     const uObj = unitMap.get(targetUnitId);
     const tpObj = uObj?.third_party_id ? tpMap.get(String(uObj.third_party_id)) : null;
-
-    const unitBalancesByConcept = new Map<string, number>();
-    allDetailedItems
-      .filter(it => String(it.unitId) === targetUnitId)
-      .forEach(it => {
-        const cid = String(it.conceptId || '');
-        const bal = roundMoney(Number(it.balance || 0));
-        unitBalancesByConcept.set(cid, roundMoney((unitBalancesByConcept.get(cid) || 0) + bal));
-      });
 
     const rawEvents: {
       date: string;
@@ -751,7 +826,7 @@ export function PortfolioReportsTab() {
     ) => {
       const rounded = roundMoney(amount);
       if (Math.abs(rounded) < 0.005) return;
-      if (conceptId && !activeConceptById.has(conceptId)) return;
+      if (conceptId && activeConceptById.size > 0 && !activeConceptById.has(conceptId)) return;
 
       if (!candidateCols.has(colKey)) {
         candidateCols.set(colKey, {
@@ -764,7 +839,6 @@ export function PortfolioReportsTab() {
       movementSumByCol.set(colKey, roundMoney((movementSumByCol.get(colKey) || 0) + rounded));
     };
 
-    // Cuentas de cobro / facturas
     invoices
       .filter(
         inv =>
@@ -774,64 +848,21 @@ export function PortfolioReportsTab() {
       )
       .forEach(inv => {
         const byConceptKey: Record<string, number> = {};
-        const snapItems = Array.isArray(inv.items_snapshot) ? inv.items_snapshot : [];
+        const origLines = getInvoiceOriginalConceptAmounts(inv);
 
-        if (snapItems.length > 0) {
-          snapItems.forEach((it: any) => {
-            const cid = String(it.conceptId ?? it.concept_id ?? it.billing_concept_id ?? '');
-            const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
-            if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
-            if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
+        origLines.forEach(line => {
+          const cid = line.conceptId ? String(line.conceptId) : '';
+          if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
+          if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
 
-            const label =
-              cObj?.name ||
-              it.conceptName ||
-              it.concept_name ||
-              it.name ||
-              (cid ? `Concepto ${cid}` : 'Administración');
-            const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
-            const val = Number(it.amount ?? it.total ?? it.value ?? 0);
-            addMovementToConcept(byConceptKey, key, label, cid || undefined, val);
-          });
-
-          const intr = Number(inv.interest_amount || 0);
-          const alreadyHasInterestInSnap = snapItems.some((it: any) => {
-            const cid = String(it.conceptId ?? it.concept_id ?? '');
-            const cObj = cid ? conceptMap.get(cid) : undefined;
-            return (
-              classifyConcept(
-                cObj?.code || it.conceptCode || it.concept_code,
-                cObj?.name || it.conceptName || it.concept_name,
-                Boolean(cObj?.is_late_interest)
-              ) === 'intereses'
-            );
-          });
-
-          if (intr > 0 && !alreadyHasInterestInSnap) {
-            const moraConcept = concepts.find(
-              c => c.is_active !== false && c.is_late_interest
-            );
-            const moraCid = moraConcept?.id ? String(moraConcept.id) : undefined;
-            if (selectedConceptId === 'ALL' || (moraCid && selectedConceptId === moraCid)) {
-              const label = moraConcept?.name || 'Intereses de Mora';
-              const key = moraCid ? `cid_${moraCid}` : 'lbl_INTERESES_MORA';
-              addMovementToConcept(byConceptKey, key, label, moraCid, intr);
-            }
-          }
-        } else {
-          const sub = Number(inv.subtotal || 0);
-          const intr = Number(inv.interest_amount || 0);
-          if (sub > 0 && selectedConceptId === 'ALL') {
-            addMovementToConcept(byConceptKey, 'lbl_ADMON', 'Cuota de Administración', undefined, sub);
-          }
-          if (intr > 0 && selectedConceptId === 'ALL') {
-            addMovementToConcept(byConceptKey, 'lbl_MORA', 'Intereses de Mora', undefined, intr);
-          }
-        }
+          const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
+          const label = cObj?.name || line.name || 'Concepto';
+          const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
+          addMovementToConcept(byConceptKey, key, label, cid || undefined, line.originalAmount);
+        });
 
         const totalDoc = roundMoney(
-          Object.values(byConceptKey).reduce((s, v) => s + v, 0) ||
-            Number(inv.total_amount ?? Number(inv.subtotal || 0) + Number(inv.interest_amount || 0))
+          Object.values(byConceptKey).reduce((s, v) => s + v, 0)
         );
 
         if (selectedConceptId === 'ALL' || Math.abs(totalDoc) > 0) {
@@ -845,7 +876,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // Recibos de caja
     receipts
       .filter(
         r =>
@@ -857,23 +887,23 @@ export function PortfolioReportsTab() {
         const amt = roundMoney(Number(r.total_amount || 0));
         const pmName = r.payment_method_id ? pmMap.get(String(r.payment_method_id)) : '';
         const byConceptKey: Record<string, number> = {};
-        const allocs = Array.isArray(r.allocations) ? r.allocations : [];
+        const rAllocs = allocsByReceiptId.get(String(r.id)) || [];
 
-        if (allocs.length > 0) {
-          allocs.forEach((al: any) => {
-            const cid = String(al.conceptId ?? al.concept_id ?? '');
+        if (rAllocs.length > 0) {
+          rAllocs.forEach(al => {
+            const cid = String(al.concept_id || '');
             if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
             if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
-            const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
-            const label = cObj?.name || al.conceptName || al.concept_name || 'Recaudo';
-            const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
-            addMovementToConcept(
-              byConceptKey,
-              key,
-              label,
-              cid || undefined,
-              -Math.abs(Number(al.amount || 0))
+
+            const appliedVal = roundMoney(
+              Number(al.capital_applied || 0) + Number(al.interest_applied || 0)
             );
+            if (Math.abs(appliedVal) < 0.005) return;
+
+            const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
+            const label = cObj?.name || 'Concepto';
+            const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
+            addMovementToConcept(byConceptKey, key, label, cid || undefined, -appliedVal);
           });
         } else if (selectedConceptId === 'ALL') {
           addMovementToConcept(byConceptKey, 'lbl_RECAUDO', 'Recaudo / Pago', undefined, -Math.abs(amt));
@@ -894,7 +924,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // Notas NC / ND / NT
     const linesByNote = new Map<string, any[]>();
     noteLines.forEach(ln => {
       const nid = String(ln.note_id || '');
@@ -916,9 +945,7 @@ export function PortfolioReportsTab() {
       })
       .forEach(parent => {
         const nLines = (linesByNote.get(String(parent.id)) || []).filter(l => {
-          const lineUid = String(
-            l.unit_id || parent.unit_id || parent.charged_unit_id || parent.beneficiary_unit_id || ''
-          );
+          const lineUid = String(l.unit_id || parent.unit_id || '');
           return lineUid === targetUnitId;
         });
 
@@ -932,27 +959,19 @@ export function PortfolioReportsTab() {
             const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
             const label = cObj?.name || 'Ajuste Nota';
             const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
-            const val =
-              Number(ln.amount || 0) +
-              Number(ln.discount_amount || 0) +
-              Number(ln.advance_amount || 0);
-            const isDebit =
-              parent.note_type === 'ND' ||
-              ln.section === 'cargo' ||
-              (parent.note_type === 'NT' && String(parent.charged_unit_id || '') === targetUnitId);
-            addMovementToConcept(byConceptKey, key, label, cid || undefined, isDebit ? val : -val);
+            const delta = noteLineSignedDelta(parent, ln);
+            addMovementToConcept(byConceptKey, key, label, cid || undefined, delta);
           });
         } else if (selectedConceptId === 'ALL') {
-          const val = Number(parent.total_amount || 0);
-          const isDebit =
-            parent.note_type === 'ND' ||
-            (parent.note_type === 'NT' && String(parent.charged_unit_id || '') === targetUnitId);
+          const val = roundMoney(Number(parent.total_amount || 0));
+          const delta =
+            String(parent.note_type || '').toUpperCase() === 'ND' ? val : -val;
           addMovementToConcept(
             byConceptKey,
             `lbl_NOTA_${parent.note_type || 'ADJ'}`,
             `Nota ${parent.note_type || 'Ajuste'}`,
             undefined,
-            isDebit ? val : -val
+            delta
           );
         }
 
@@ -981,13 +1000,9 @@ export function PortfolioReportsTab() {
 
     rawEvents.sort((a, b) => a.date.localeCompare(b.date));
 
-    const columns = Array.from(candidateCols.values()).filter(col => {
-      const movTotal = Math.abs(roundMoney(movementSumByCol.get(col.key) || 0));
-      const unitConceptBal = col.conceptId
-        ? Math.abs(roundMoney(unitBalancesByConcept.get(col.conceptId) || 0))
-        : 0;
-      return movTotal > 0.005 || unitConceptBal > 0.005;
-    });
+    const columns = Array.from(candidateCols.values()).filter(col =>
+      rawEvents.some(ev => Math.abs(roundMoney(ev.byConceptKey[col.key] || 0)) > 0.005)
+    );
 
     let runningSaldo = 0;
     let finalTotalDoc = 0;
@@ -1033,14 +1048,87 @@ export function PortfolioReportsTab() {
     pmMap,
     conceptMap,
     activeConceptById,
-    concepts,
-    allDetailedItems,
+    getInvoiceOriginalConceptAmounts,
     invoices,
     receipts,
+    allocsByReceiptId,
     notes,
     noteLines,
     isStatusAllowed,
     isDateAllowed,
+    selectedConceptId,
+  ]);
+
+  // KPIs sincronizados con los filtros activos
+  const kpis = useMemo(() => {
+    const isSingleUnit = Boolean(selectedUnitId) || filteredUnits.length === 1;
+
+    let totalPortfolio = 0;
+    let overduePortfolio = 0;
+
+    if (isSingleUnit && detailedStatementData.rows.length > 0) {
+      totalPortfolio = roundMoney(Math.max(0, detailedStatementData.finalBalance));
+      overduePortfolio = roundMoney(Math.max(0, detailedStatementData.finalBalance));
+    } else {
+      allDetailedItems.forEach(it => {
+        const bal = roundMoney(Number(it.balance || 0));
+        totalPortfolio = roundMoney(totalPortfolio + bal);
+        if (bal > 0 && daysPastDue(it.dueDate, effectiveCutoff) > 0) {
+          overduePortfolio = roundMoney(overduePortfolio + bal);
+        }
+      });
+    }
+
+    let advanceTotal = 0;
+    receipts.forEach(r => {
+      if (!isStatusAllowed(r.status)) return;
+      if (!allowedUnitIds.has(String(r.unit_id || ''))) return;
+      if (!isDateAllowed(r.payment_date || r.accounting_date)) return;
+      advanceTotal = roundMoney(advanceTotal + Number(r.advance_amount || 0));
+    });
+
+    noteLines.forEach(ln => {
+      const parentNote = noteByIdMap.get(String(ln.note_id));
+      if (!parentNote || !isStatusAllowed(parentNote.status)) return;
+      const uid = String(ln.unit_id || parentNote.unit_id || '');
+      if (!allowedUnitIds.has(uid)) return;
+      if (!isDateAllowed(parentNote.accounting_date || parentNote.application_date)) return;
+      if (
+        selectedConceptId !== 'ALL' &&
+        String(ln.concept_id || ln.conceptId || '') !== selectedConceptId
+      ) {
+        return;
+      }
+      advanceTotal = roundMoney(advanceTotal + Number(ln.advance_amount || 0));
+    });
+
+    const collectedInRange = roundMoney(
+      receipts.reduce((sum, r) => {
+        if (!isStatusAllowed(r.status)) return sum;
+        if (!allowedUnitIds.has(String(r.unit_id || ''))) return sum;
+        if (!isDateAllowed(r.payment_date || r.accounting_date)) return sum;
+        return sum + Number(r.total_amount || 0);
+      }, 0)
+    );
+
+    return {
+      totalPortfolio,
+      overduePortfolio,
+      collectedInRange,
+      advanceTotal,
+    };
+  }, [
+    selectedUnitId,
+    filteredUnits,
+    detailedStatementData,
+    allDetailedItems,
+    receipts,
+    noteByIdMap,
+    noteLines,
+    allowedUnitIds,
+    isStatusAllowed,
+    isDateAllowed,
+    effectiveCutoff,
     selectedConceptId,
   ]);
 
@@ -1160,6 +1248,15 @@ export function PortfolioReportsTab() {
       })
       .map(r => {
         const uObj = unitMap.get(String(r.unit_id || ''));
+        const rAllocs = allocsByReceiptId.get(String(r.id)) || [];
+        const allocSum = roundMoney(
+          rAllocs.reduce(
+            (s, a) => s + Number(a.capital_applied || 0) + Number(a.interest_applied || 0),
+            0
+          )
+        );
+        const appliedAmt =
+          r.applied_amount != null ? roundMoney(Number(r.applied_amount)) : allocSum;
         return {
           id: String(r.id),
           receiptNumber: String(r.receipt_number || 'RC'),
@@ -1171,13 +1268,13 @@ export function PortfolioReportsTab() {
             ? pmMap.get(String(r.payment_method_id)) || '—'
             : '—',
           totalAmount: roundMoney(Number(r.total_amount || 0)),
-          appliedAmount: roundMoney(Number(r.applied_amount || 0)),
+          appliedAmount: appliedAmt,
           advanceAmount: roundMoney(Number(r.advance_amount || 0)),
           status: String(r.status || 'contabilizado'),
           notes: String(r.notes || ''),
         };
       });
-  }, [receipts, allowedUnitIds, isDateAllowed, isStatusAllowed, unitMap, pmMap]);
+  }, [receipts, allocsByReceiptId, allowedUnitIds, isDateAllowed, isStatusAllowed, unitMap, pmMap]);
 
   // 6. Recaudo por Fecha o Medio de Pago
   const collectionSummaryRows = useMemo(() => {
@@ -1257,7 +1354,7 @@ export function PortfolioReportsTab() {
     });
 
     noteLines.forEach(ln => {
-      const parent = notes.find(n => String(n.id) === String(ln.note_id));
+      const parent = noteByIdMap.get(String(ln.note_id));
       if (!parent || !isStatusAllowed(parent.status)) return;
       const uid = String(ln.unit_id || parent.unit_id || '');
       if (!allowedUnitIds.has(uid)) return;
@@ -1279,7 +1376,7 @@ export function PortfolioReportsTab() {
   }, [
     receipts,
     noteLines,
-    notes,
+    noteByIdMap,
     allowedUnitIds,
     isStatusAllowed,
     isDateAllowed,
@@ -1329,14 +1426,18 @@ export function PortfolioReportsTab() {
   const treasuryNotesRows = useMemo(() => {
     return notes
       .filter(n => {
-        const uid = String(n.unit_id || n.charged_unit_id || n.beneficiary_unit_id || '');
-        if (uid && !allowedUnitIds.has(uid)) return false;
+        const nLines = noteLines.filter(l => String(l.note_id) === String(n.id));
+        const matchesUnit =
+          allowedUnitIds.size === 0 ||
+          (n.unit_id && allowedUnitIds.has(String(n.unit_id))) ||
+          nLines.some(l => l.unit_id && allowedUnitIds.has(String(l.unit_id)));
+        if (!matchesUnit) return false;
         if (!isDateAllowed(n.accounting_date || n.application_date)) return false;
         if (!isStatusAllowed(n.status)) return false;
         return true;
       })
       .map(n => {
-        const uObj = unitMap.get(String(n.unit_id || n.charged_unit_id || ''));
+        const uObj = unitMap.get(String(n.unit_id || ''));
         return {
           id: String(n.id),
           noteNumber: String(n.note_number || '—'),
@@ -1350,7 +1451,7 @@ export function PortfolioReportsTab() {
           description: String(n.description || ''),
         };
       });
-  }, [notes, allowedUnitIds, isDateAllowed, isStatusAllowed, unitMap]);
+  }, [notes, noteLines, allowedUnitIds, isDateAllowed, isStatusAllowed, unitMap]);
 
   // 10. Cartera Morosa
   const delinquencyRows = useMemo(() => {
@@ -1437,7 +1538,7 @@ export function PortfolioReportsTab() {
         csvRows.push([
           '',
           'SALDO FINAL',
-          'Saldo neto acumulado por concepto',
+          'Saldo final por concepto',
           detailedStatementData.finalTotalDoc,
           ...detailedStatementData.columns.map(
             c => detailedStatementData.finalConceptTotals[c.key] || 0
@@ -1831,7 +1932,6 @@ export function PortfolioReportsTab() {
             })}
           </div>
 
-          {/* 7 Filtros compartidos */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-3 items-end pt-1">
             <Input
               label="Fecha de corte"
@@ -1904,7 +2004,6 @@ export function PortfolioReportsTab() {
         </div>
       </Card>
 
-      {/* KPIs sincronizados con los filtros activos */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <Card>
           <div className="p-4">
@@ -1940,7 +2039,6 @@ export function PortfolioReportsTab() {
         </Card>
       </div>
 
-      {/* Tablas por reporte */}
       <Card>
         <div className="p-6">
           {requiresSingleUnit && !selectedUnitId ? (
