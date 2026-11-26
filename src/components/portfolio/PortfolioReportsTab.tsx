@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
-  CreditCard,
   Download,
   FileSpreadsheet,
   FileText,
@@ -13,7 +12,6 @@ import {
   RotateCcw,
   Scale,
   Table as TableIcon,
-  Wallet,
 } from 'lucide-react';
 import {
   supabase,
@@ -39,8 +37,6 @@ type ReportKey =
   | 'by_concept'
   | 'by_aging'
   | 'receipts_list'
-  | 'collection_summary'
-  | 'advances'
   | 'paz_y_salvo'
   | 'treasury_notes'
   | 'delinquency';
@@ -191,9 +187,7 @@ const REPORT_TABS: { key: ReportKey; label: string; icon: any }[] = [
   { key: 'statement_detailed', label: 'Estado de Cuenta Detallado', icon: FileText },
   { key: 'by_concept', label: 'Cartera por Conceptos', icon: Layers },
   { key: 'by_aging', label: 'Cartera por Edades', icon: FileSpreadsheet },
-  { key: 'receipts_list', label: 'Relación de Recibos', icon: Receipt },
-  { key: 'collection_summary', label: 'Recaudo Fecha / Medio', icon: CreditCard },
-  { key: 'advances', label: 'Saldos a Favor / Anticipos', icon: Wallet },
+  { key: 'receipts_list', label: 'Relación de Recaudos', icon: Receipt },
   { key: 'paz_y_salvo', label: 'Paz y Salvo', icon: CheckCircle2 },
   { key: 'treasury_notes', label: 'Notas NC / ND / NT', icon: Scale },
   { key: 'delinquency', label: 'Cartera Morosa', icon: AlertTriangle },
@@ -1553,8 +1547,8 @@ export function PortfolioReportsTab() {
     tpMap,
   ]);
 
-  // 4. Cartera por Edades
-  const byAgingRows = useMemo(() => {
+  // 4. Cartera por Edades + Totales
+  const byAgingData = useMemo(() => {
     const map = new Map<
       string,
       {
@@ -1614,10 +1608,22 @@ export function PortfolioReportsTab() {
       }
     });
 
-    return Array.from(map.values()).sort((a, b) => b.totalAmt - a.totalAmt);
+    const rows = Array.from(map.values()).sort((a, b) => b.totalAmt - a.totalAmt);
+    const totals = {
+      currentAmt: roundMoney(rows.reduce((s, r) => s + r.currentAmt, 0)),
+      d1_30: roundMoney(rows.reduce((s, r) => s + r.d1_30, 0)),
+      d31_60: roundMoney(rows.reduce((s, r) => s + r.d31_60, 0)),
+      d61_90: roundMoney(rows.reduce((s, r) => s + r.d61_90, 0)),
+      d90_plus: roundMoney(rows.reduce((s, r) => s + r.d90_plus, 0)),
+      totalAmt: roundMoney(rows.reduce((s, r) => s + r.totalAmt, 0)),
+    };
+
+    return { rows, totals };
   }, [filteredUnits, reconciledItemsByUnit, effectiveCutoff, tpMap]);
 
-  // 5. Relación de Recibos de Caja (discriminado por concepto aplicado sin descuento + descuento + anticipo + totales)
+  const byAgingRows = byAgingData.rows;
+
+  // 5. Relación de Recaudos
   const receiptsReportData = useMemo(() => {
     const colMetaMap = new Map<string, ConceptColumnDef>();
 
@@ -1750,114 +1756,7 @@ export function PortfolioReportsTab() {
 
   const receiptRows = receiptsReportData.rows;
 
-  // 6. Recaudo por Fecha o Medio de Pago
-  const collectionSummaryRows = useMemo(() => {
-    const map = new Map<
-      string,
-      {
-        date: string;
-        method: string;
-        count: number;
-        totalAmount: number;
-        appliedAmount: number;
-        advanceAmount: number;
-      }
-    >();
-
-    receiptRows.forEach(r => {
-      const key = `${r.paymentDate}__${r.paymentMethod}`;
-      if (!map.has(key)) {
-        map.set(key, {
-          date: r.paymentDate,
-          method: r.paymentMethod,
-          count: 0,
-          totalAmount: 0,
-          appliedAmount: 0,
-          advanceAmount: 0,
-        });
-      }
-      const row = map.get(key)!;
-      row.count += 1;
-      row.totalAmount = roundMoney(row.totalAmount + r.totalAmount);
-      row.appliedAmount = roundMoney(row.appliedAmount + r.appliedAmount);
-      row.advanceAmount = roundMoney(row.advanceAmount + r.advanceAmount);
-    });
-
-    return Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
-  }, [receiptRows]);
-
-  // 7. Saldos a Favor / Anticipos
-  const advancesRows = useMemo(() => {
-    const map = new Map<
-      string,
-      {
-        unitId: string;
-        unitLabel: string;
-        ownerName: string;
-        fromReceipts: number;
-        fromNotes: number;
-        totalAdvance: number;
-      }
-    >();
-
-    const ensureUnit = (uid: string) => {
-      if (!map.has(uid)) {
-        const uObj = unitMap.get(uid);
-        map.set(uid, {
-          unitId: uid,
-          unitLabel: unitLabelText(uObj),
-          ownerName: formatOwnerNamesSlash(uObj, tpMap),
-          fromReceipts: 0,
-          fromNotes: 0,
-          totalAdvance: 0,
-        });
-      }
-      return map.get(uid)!;
-    };
-
-    receipts.forEach(r => {
-      if (!isStatusAllowed(r.status)) return;
-      const uid = String(r.unit_id || '');
-      if (!allowedUnitIds.has(uid)) return;
-      if (!isDateAllowed(r.accounting_date || r.payment_date)) return;
-      const adv = roundMoney(Number(r.advance_amount || 0));
-      if (adv <= 0) return;
-      const row = ensureUnit(uid);
-      row.fromReceipts = roundMoney(row.fromReceipts + adv);
-      row.totalAdvance = roundMoney(row.totalAdvance + adv);
-    });
-
-    noteLines.forEach(ln => {
-      const parent = noteByIdMap.get(String(ln.note_id));
-      if (!parent || !isStatusAllowed(parent.status)) return;
-      const uid = String(ln.unit_id || parent.unit_id || '');
-      if (!allowedUnitIds.has(uid)) return;
-      if (!isDateAllowed(parent.accounting_date || parent.application_date)) return;
-      const cid = String(ln.conceptId ?? ln.concept_id ?? '');
-      if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) {
-        return;
-      }
-      const adv = roundMoney(Number(ln.advance_amount || 0));
-      if (adv <= 0) return;
-      const row = ensureUnit(uid);
-      row.fromNotes = roundMoney(row.fromNotes + adv);
-      row.totalAdvance = roundMoney(row.totalAdvance + adv);
-    });
-
-    return Array.from(map.values()).sort((a, b) => b.totalAdvance - a.totalAdvance);
-  }, [
-    receipts,
-    noteLines,
-    noteByIdMap,
-    allowedUnitIds,
-    isStatusAllowed,
-    isDateAllowed,
-    selectedConceptId,
-    unitMap,
-    tpMap,
-  ]);
-
-  // 8. Paz y Salvo de Cartera
+  // 6. Paz y Salvo de Cartera
   const pazYSalvoRows = useMemo(() => {
     const balanceByUnit = new Map<string, { current: number; overdue: number; total: number }>();
 
@@ -1900,7 +1799,7 @@ export function PortfolioReportsTab() {
     });
   }, [filteredUnits, reconciledItemsByUnit, effectiveCutoff, tpMap]);
 
-  // 9. Relación de Notas NC / ND / NT
+  // 7. Relación de Notas NC / ND / NT
   const treasuryNotesRows = useMemo(() => {
     return notes
       .filter(n => {
@@ -1931,7 +1830,7 @@ export function PortfolioReportsTab() {
       });
   }, [notes, noteLines, allowedUnitIds, isDateAllowed, isStatusAllowed, unitMap, tpMap]);
 
-  // 10. Cartera Morosa
+  // 8. Cartera Morosa
   const delinquencyRows = useMemo(() => {
     const map = new Map<
       string,
@@ -2136,6 +2035,28 @@ export function PortfolioReportsTab() {
       }
       downloadCsv(`cartera-por-conceptos-${stamp}.csv`, headers, csvRows);
     } else if (activeReport === 'by_aging') {
+      const csvRows: (string | number)[][] = byAgingRows.map(r => [
+        r.unitLabel,
+        ...(includeNames ? [r.ownerName] : []),
+        r.currentAmt,
+        r.d1_30,
+        r.d31_60,
+        r.d61_90,
+        r.d90_plus,
+        r.totalAmt,
+      ]);
+      if (byAgingRows.length > 0) {
+        csvRows.push([
+          'TOTALES',
+          ...(includeNames ? [''] : []),
+          byAgingData.totals.currentAmt,
+          byAgingData.totals.d1_30,
+          byAgingData.totals.d31_60,
+          byAgingData.totals.d61_90,
+          byAgingData.totals.d90_plus,
+          byAgingData.totals.totalAmt,
+        ]);
+      }
       downloadCsv(
         `cartera-por-edades-${stamp}.csv`,
         [
@@ -2148,16 +2069,7 @@ export function PortfolioReportsTab() {
           '+90 DIAS',
           'TOTAL',
         ],
-        byAgingRows.map(r => [
-          r.unitLabel,
-          ...(includeNames ? [r.ownerName] : []),
-          r.currentAmt,
-          r.d1_30,
-          r.d31_60,
-          r.d61_90,
-          r.d90_plus,
-          r.totalAmt,
-        ])
+        csvRows
       );
     } else if (activeReport === 'receipts_list') {
       const headers = [
@@ -2200,38 +2112,7 @@ export function PortfolioReportsTab() {
           '',
         ]);
       }
-      downloadCsv(`relacion-recibos-${stamp}.csv`, headers, csvRows);
-    } else if (activeReport === 'collection_summary') {
-      downloadCsv(
-        `recaudo-fecha-medio-${stamp}.csv`,
-        ['FECHA', 'MEDIO PAGO', 'RECIBOS', 'TOTAL RECAUDO', 'APLICADO', 'ANTICIPO'],
-        collectionSummaryRows.map(r => [
-          r.date,
-          r.method,
-          r.count,
-          r.totalAmount,
-          r.appliedAmount,
-          r.advanceAmount,
-        ])
-      );
-    } else if (activeReport === 'advances') {
-      downloadCsv(
-        `saldos-a-favor-${stamp}.csv`,
-        [
-          'INMUEBLE',
-          ...(includeNames ? ['NOMBRE'] : []),
-          'ANTICIPO RECIBOS',
-          'ANTICIPO NOTAS',
-          'TOTAL SALDO A FAVOR',
-        ],
-        advancesRows.map(r => [
-          r.unitLabel,
-          ...(includeNames ? [r.ownerName] : []),
-          r.fromReceipts,
-          r.fromNotes,
-          r.totalAdvance,
-        ])
-      );
+      downloadCsv(`relacion-recaudos-${stamp}.csv`, headers, csvRows);
     } else if (activeReport === 'paz_y_salvo') {
       downloadCsv(
         `paz-y-salvo-${stamp}.csv`,
@@ -2446,7 +2327,7 @@ export function PortfolioReportsTab() {
         '+90 Días',
         'Total',
       ];
-      tableRowsHtml = byAgingRows
+      const bodyHtml = byAgingRows
         .map(
           r => `<tr>
             <td>${escapeHtml(r.unitLabel)}</td>
@@ -2460,6 +2341,22 @@ export function PortfolioReportsTab() {
           </tr>`
         )
         .join('');
+
+      const totalsRowHtml =
+        byAgingRows.length > 0
+          ? `<tr class="final-row">
+              <td><strong>Totales</strong></td>
+              ${includeNames ? `<td></td>` : ''}
+              <td class="num"><strong>${escapeHtml(formatCOP(byAgingData.totals.currentAmt))}</strong></td>
+              <td class="num"><strong>${escapeHtml(formatCOP(byAgingData.totals.d1_30))}</strong></td>
+              <td class="num"><strong>${escapeHtml(formatCOP(byAgingData.totals.d31_60))}</strong></td>
+              <td class="num"><strong>${escapeHtml(formatCOP(byAgingData.totals.d61_90))}</strong></td>
+              <td class="num"><strong>${escapeHtml(formatCOP(byAgingData.totals.d90_plus))}</strong></td>
+              <td class="num"><strong>${escapeHtml(formatCOP(byAgingData.totals.totalAmt))}</strong></td>
+            </tr>`
+          : '';
+
+      tableRowsHtml = bodyHtml + totalsRowHtml;
     } else if (activeReport === 'receipts_list') {
       tableHeaders = [
         'Recibo',
@@ -2514,32 +2411,6 @@ export function PortfolioReportsTab() {
           : '';
 
       tableRowsHtml = bodyHtml + totalsRowHtml;
-    } else if (activeReport === 'collection_summary') {
-      tableHeaders = ['Fecha', 'Medio de Pago', 'Recibos', 'Total Recaudo', 'Aplicado', 'Anticipo'];
-      tableRowsHtml = collectionSummaryRows
-        .map(
-          r => `<tr><td>${escapeHtml(r.date)}</td><td>${escapeHtml(r.method)}</td><td class="num">${r.count}</td><td class="num"><strong>${escapeHtml(formatCOP(r.totalAmount))}</strong></td><td class="num">${escapeHtml(formatCOP(r.appliedAmount))}</td><td class="num">${escapeHtml(formatCOP(r.advanceAmount))}</td></tr>`
-        )
-        .join('');
-    } else if (activeReport === 'advances') {
-      tableHeaders = [
-        'Inmueble',
-        ...(includeNames ? ['Nombre'] : []),
-        'Anticipo Recibos',
-        'Anticipo Notas',
-        'Total Saldo a Favor',
-      ];
-      tableRowsHtml = advancesRows
-        .map(
-          r => `<tr>
-            <td>${escapeHtml(r.unitLabel)}</td>
-            ${includeNames ? `<td>${escapeHtml(r.ownerName)}</td>` : ''}
-            <td class="num">${escapeHtml(formatCOP(r.fromReceipts))}</td>
-            <td class="num">${escapeHtml(formatCOP(r.fromNotes))}</td>
-            <td class="num"><strong>${escapeHtml(formatCOP(r.totalAdvance))}</strong></td>
-          </tr>`
-        )
-        .join('');
     } else if (activeReport === 'paz_y_salvo') {
       tableHeaders = [
         'Inmueble',
@@ -2690,7 +2561,7 @@ export function PortfolioReportsTab() {
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 pb-4">
             <div>
               <h2 className="text-base font-semibold text-gray-900">
-                MOD-07 · Reportes de Cartera
+                Reportes de Cartera
               </h2>
               <p className="text-xs text-gray-500 mt-0.5">
                 Consultas, estados de cuenta, recaudos, paz y salvo y cartera morosa.
@@ -3262,7 +3133,7 @@ export function PortfolioReportsTab() {
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {byAgingRows.length === 0 ? (
                     <tr>
-                      <td colSpan={includeNames ? 9 : 8} className="px-4 py-8 text-center text-gray-500">
+                      <td colSpan={includeNames ? 8 : 7} className="px-4 py-8 text-center text-gray-500">
                         No hay cartera pendiente para mostrar por edades.
                       </td>
                     </tr>
@@ -3289,6 +3160,34 @@ export function PortfolioReportsTab() {
                     ))
                   )}
                 </tbody>
+                {byAgingRows.length > 0 && (
+                  <tfoot className="bg-gray-100 border-t-2 border-gray-300 text-xs">
+                    <tr>
+                      <td className="px-3 py-2.5 font-bold text-gray-800 uppercase">
+                        Totales
+                      </td>
+                      {includeNames && <td className="px-3 py-2.5" />}
+                      <td className="px-3 py-2.5 text-right font-mono font-bold text-gray-900">
+                        {formatCOP(byAgingData.totals.currentAmt)}
+                      </td>
+                      <td className="px-3 py-2.5 text-right font-mono font-bold text-gray-900">
+                        {formatCOP(byAgingData.totals.d1_30)}
+                      </td>
+                      <td className="px-3 py-2.5 text-right font-mono font-bold text-gray-900">
+                        {formatCOP(byAgingData.totals.d31_60)}
+                      </td>
+                      <td className="px-3 py-2.5 text-right font-mono font-bold text-amber-700">
+                        {formatCOP(byAgingData.totals.d61_90)}
+                      </td>
+                      <td className="px-3 py-2.5 text-right font-mono font-bold text-red-700">
+                        {formatCOP(byAgingData.totals.d90_plus)}
+                      </td>
+                      <td className="px-3 py-2.5 text-right font-mono font-bold text-gray-900">
+                        {formatCOP(byAgingData.totals.totalAmt)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                )}
               </table>
             </div>
           ) : activeReport === 'receipts_list' ? (
@@ -3321,7 +3220,7 @@ export function PortfolioReportsTab() {
                         }
                         className="px-4 py-8 text-center text-gray-500"
                       >
-                        No hay recibos de caja con los filtros seleccionados.
+                        No hay recaudos con los filtros seleccionados.
                       </td>
                     </tr>
                   ) : (
@@ -3368,7 +3267,6 @@ export function PortfolioReportsTab() {
                       >
                         Totales
                       </td>
-                      <td className="px-3 py-2.5" />
                       <td className="px-3 py-2.5 text-right font-mono font-bold text-gray-900">
                         {formatCOP(receiptsReportData.totals.totalAmount)}
                       </td>
@@ -3395,86 +3293,6 @@ export function PortfolioReportsTab() {
                     </tr>
                   </tfoot>
                 )}
-              </table>
-            </div>
-          ) : activeReport === 'collection_summary' ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase">
-                  <tr>
-                    <th className="px-3 py-2.5">Fecha Pago</th>
-                    <th className="px-3 py-2.5">Medio de Pago</th>
-                    <th className="px-3 py-2.5 text-right">Recibos</th>
-                    <th className="px-3 py-2.5 text-right">Total Recaudo</th>
-                    <th className="px-3 py-2.5 text-right">Aplicado</th>
-                    <th className="px-3 py-2.5 text-right">Anticipo</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100 bg-white">
-                  {collectionSummaryRows.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="px-4 py-8 text-center text-gray-500">
-                        No hay recaudos con los filtros seleccionados.
-                      </td>
-                    </tr>
-                  ) : (
-                    collectionSummaryRows.map((r, idx) => (
-                      <tr key={`${r.date}-${r.method}-${idx}`} className="hover:bg-gray-50">
-                        <td className="px-3 py-2 font-mono">{r.date}</td>
-                        <td className="px-3 py-2 font-medium">{r.method}</td>
-                        <td className="px-3 py-2 text-right font-mono">{r.count}</td>
-                        <td className="px-3 py-2 text-right font-mono font-bold text-emerald-700">
-                          {formatCOP(r.totalAmount)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          {formatCOP(r.appliedAmount)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono text-blue-700">
-                          {formatCOP(r.advanceAmount)}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          ) : activeReport === 'advances' ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase">
-                  <tr>
-                    <th className="px-3 py-2.5">Inmueble</th>
-                    {includeNames && <th className="px-3 py-2.5">Nombre</th>}
-                    <th className="px-3 py-2.5 text-right">Anticipo Recibos</th>
-                    <th className="px-3 py-2.5 text-right">Anticipo Notas</th>
-                    <th className="px-3 py-2.5 text-right">Total Saldo a Favor</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100 bg-white">
-                  {advancesRows.length === 0 ? (
-                    <tr>
-                      <td colSpan={includeNames ? 5 : 4} className="px-4 py-8 text-center text-gray-500">
-                        No hay saldos a favor o anticipos con los filtros seleccionados.
-                      </td>
-                    </tr>
-                  ) : (
-                    advancesRows.map(r => (
-                      <tr key={r.unitId} className="hover:bg-gray-50">
-                        <td className="px-3 py-2 font-mono font-medium">{r.unitLabel}</td>
-                        {includeNames && <td className="px-3 py-2">{r.ownerName}</td>}
-                        <td className="px-3 py-2 text-right font-mono">
-                          {formatCOP(r.fromReceipts)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          {formatCOP(r.fromNotes)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono font-bold text-blue-700">
-                          {formatCOP(r.totalAdvance)}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
               </table>
             </div>
           ) : activeReport === 'paz_y_salvo' ? (
@@ -3586,7 +3404,7 @@ export function PortfolioReportsTab() {
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {delinquencyRows.length === 0 ? (
                     <tr>
-                      <td colSpan={includeNames ? 6 : 5} className="px-4 py-8 text-center text-gray-500">
+                      <td colSpan={includeNames ? 5 : 4} className="px-4 py-8 text-center text-gray-500">
                         No hay inmuebles en mora con los filtros seleccionados.
                       </td>
                     </tr>
