@@ -102,12 +102,6 @@ function classifyConcept(
   return 'other';
 }
 
-/**
- * Calcula el impacto neto de una línea de nota (NC, ND, NT) de forma aislada:
- * - section === 'abono' => resta (-val)
- * - section === 'cargo' => suma (+val)
- * - section === 'principal' o vacío => ND suma (+val), NC resta (-val)
- */
 function noteLineSignedDelta(parentNote: any, line: any): number {
   const val = roundMoney(
     Number(line?.amount || 0) +
@@ -400,11 +394,6 @@ export function PortfolioReportsTab() {
     return m;
   }, [receiptAllocations]);
 
-  /**
-   * Reconstruye el valor ORIGINAL facturado por concepto para una cuenta de cobro,
-   * compensando las reducciones o ajustes que haya sufrido items_snapshot al aplicar
-   * recibos de caja o notas de tesorería, para evitar el doble descuento/cargo.
-   */
   const getInvoiceBaseConceptAmounts = useCallback(
     (inv: any) => {
       const uid = String(inv.unit_id || '');
@@ -596,10 +585,12 @@ export function PortfolioReportsTab() {
   ]);
 
   // 1. Estado de Cuenta Resumido
-  const summaryStatementRows = useMemo(() => {
+  const summaryStatementData = useMemo(() => {
     const targetUnitId =
       selectedUnitId || (filteredUnits.length === 1 ? String(filteredUnits[0].id) : '');
-    if (!targetUnitId) return [];
+    if (!targetUnitId) {
+      return { rows: [] as any[], hasAnyDiscount: false };
+    }
 
     const byPeriod = new Map<
       string,
@@ -613,6 +604,7 @@ export function PortfolioReportsTab() {
         totalCobro: number;
         ajustes: number;
         pagos: number;
+        descuento: number;
         saldo: number;
         lastPaymentDate: string;
       }
@@ -630,6 +622,7 @@ export function PortfolioReportsTab() {
           totalCobro: 0,
           ajustes: 0,
           pagos: 0,
+          descuento: 0,
           saldo: 0,
           lastPaymentDate: '',
         });
@@ -718,7 +711,7 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // 1.3 Pagos / Recibos de caja
+    // 1.3 Pagos / Recibos de caja (pagos efectivos y descuento por pronto pago por separado)
     receipts
       .filter(
         r =>
@@ -743,12 +736,12 @@ export function PortfolioReportsTab() {
               dueObj?.period || al.period || (dt ? dt.slice(0, 7) : 'GENERAL')
             );
             const target = getOrCreate(pKey);
-            const appliedAmt = roundMoney(
-              Number(al.capital_applied || 0) +
-                Number(al.interest_applied || 0) +
-                Number(al.discount_applied || 0)
+            const paidAmt = roundMoney(
+              Number(al.capital_applied || 0) + Number(al.interest_applied || 0)
             );
-            target.pagos = roundMoney(target.pagos - appliedAmt);
+            const discAmt = roundMoney(Number(al.discount_applied || 0));
+            target.pagos = roundMoney(target.pagos - paidAmt);
+            target.descuento = roundMoney(target.descuento - discAmt);
             if (dt && (!target.lastPaymentDate || dt > target.lastPaymentDate)) {
               target.lastPaymentDate = dt;
             }
@@ -794,11 +787,15 @@ export function PortfolioReportsTab() {
     );
 
     let runningSaldo = 0;
-    return sorted.map(r => {
+    let hasAnyDiscount = false;
+    const rows = sorted.map(r => {
       const totalCobro = roundMoney(
         r.admon + r.intereses + r.retroactivo + r.cuotaExtra + r.otros
       );
-      const netPeriod = roundMoney(totalCobro + r.ajustes + r.pagos);
+      if (Math.abs(r.descuento) >= 0.005) {
+        hasAnyDiscount = true;
+      }
+      const netPeriod = roundMoney(totalCobro + r.ajustes + r.pagos + r.descuento);
       runningSaldo = roundMoney(runningSaldo + netPeriod);
       return {
         ...r,
@@ -806,6 +803,8 @@ export function PortfolioReportsTab() {
         saldo: runningSaldo,
       };
     });
+
+    return { rows, hasAnyDiscount };
   }, [
     selectedUnitId,
     filteredUnits,
@@ -823,6 +822,9 @@ export function PortfolioReportsTab() {
     selectedConceptId,
   ]);
 
+  const summaryStatementRows = summaryStatementData.rows;
+  const hasSummaryDiscount = summaryStatementData.hasAnyDiscount;
+
   // 2. Estado de Cuenta Detallado
   const detailedStatementData = useMemo(() => {
     const targetUnitId =
@@ -833,7 +835,9 @@ export function PortfolioReportsTab() {
         rows: [] as any[],
         finalTotalDoc: 0,
         finalConceptTotals: {} as Record<string, number>,
+        finalDiscountTotal: 0,
         finalBalance: 0,
+        hasAnyDiscount: false,
       };
     }
 
@@ -845,6 +849,7 @@ export function PortfolioReportsTab() {
       doc: string;
       detail: string;
       totalDoc: number;
+      discountApplied: number;
       byConceptKey: Record<string, number>;
     }[] = [];
 
@@ -904,12 +909,13 @@ export function PortfolioReportsTab() {
             doc: String(inv.invoice_number || `CC-${inv.period || ''}`),
             detail: `Cuenta de cobro período ${inv.period || ''}`,
             totalDoc,
+            discountApplied: 0,
             byConceptKey,
           });
         }
       });
 
-    // 2.2 Recibos de caja
+    // 2.2 Recibos de caja: totalDoc = valor pagado (-117.000), discountApplied = descuento (-10.000)
     receipts
       .filter(
         r =>
@@ -923,23 +929,26 @@ export function PortfolioReportsTab() {
         const byConceptKey: Record<string, number> = {};
         const rAllocs = allocsByReceiptId.get(String(r.id)) || [];
 
+        let receiptDiscount = 0;
+
         if (rAllocs.length > 0) {
           rAllocs.forEach(al => {
             const cid = String(al.concept_id || '');
             if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
             if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
 
-            const appliedVal = roundMoney(
-              Number(al.capital_applied || 0) +
-                Number(al.interest_applied || 0) +
-                Number(al.discount_applied || 0)
+            const paidVal = roundMoney(
+              Number(al.capital_applied || 0) + Number(al.interest_applied || 0)
             );
-            if (Math.abs(appliedVal) < 0.005) return;
+            const discVal = roundMoney(Number(al.discount_applied || 0));
+            receiptDiscount = roundMoney(receiptDiscount - discVal);
 
-            const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
-            const label = cObj?.name || 'Concepto';
-            const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
-            addMovementToConcept(byConceptKey, key, label, cid || undefined, -appliedVal);
+            if (Math.abs(paidVal) >= 0.005) {
+              const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
+              const label = cObj?.name || 'Concepto';
+              const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
+              addMovementToConcept(byConceptKey, key, label, cid || undefined, -paidVal);
+            }
           });
         } else if (selectedConceptId === 'ALL') {
           addMovementToConcept(byConceptKey, 'lbl_RECAUDO', 'Recaudo / Pago', undefined, -Math.abs(amt));
@@ -954,22 +963,24 @@ export function PortfolioReportsTab() {
           addMovementToConcept(byConceptKey, advKey, advLabel, advCid || undefined, -adv);
         }
 
-        const totalDoc = roundMoney(
-          Object.values(byConceptKey).reduce((s, v) => s + v, 0) || -Math.abs(amt)
-        );
+        const totalDoc =
+          rAllocs.length > 0 && selectedConceptId === 'ALL'
+            ? -Math.abs(amt)
+            : roundMoney(Object.values(byConceptKey).reduce((s, v) => s + v, 0) || -Math.abs(amt));
 
-        if (selectedConceptId === 'ALL' || Math.abs(totalDoc) > 0) {
+        if (selectedConceptId === 'ALL' || Math.abs(totalDoc) > 0 || Math.abs(receiptDiscount) > 0) {
           rawEvents.push({
             date: String(r.payment_date || r.accounting_date || ''),
             doc: String(r.receipt_number || 'RC'),
             detail: `Recibo de caja${pmName ? ` (${pmName})` : ''}${r.notes ? ` · ${r.notes}` : ''}`,
             totalDoc,
+            discountApplied: receiptDiscount,
             byConceptKey,
           });
         }
       });
 
-    // 2.3 Notas (NC, ND, NT) como filas independientes con su propio efecto
+    // 2.3 Notas (NC, ND, NT)
     const linesByNote = new Map<string, any[]>();
     noteLines.forEach(ln => {
       const nid = String(ln.note_id || '');
@@ -1020,6 +1031,7 @@ export function PortfolioReportsTab() {
             doc: String(parent.note_number || parent.note_type),
             detail: `${typeLabel}${parent.description ? ` · ${parent.description}` : ''}`,
             totalDoc,
+            discountApplied: 0,
             byConceptKey,
           });
         }
@@ -1031,16 +1043,22 @@ export function PortfolioReportsTab() {
       rawEvents.some(ev => Math.abs(roundMoney(ev.byConceptKey[col.key] || 0)) > 0.005)
     );
 
+    const hasAnyDiscount = rawEvents.some(ev => Math.abs(roundMoney(ev.discountApplied)) >= 0.005);
+
     let runningSaldo = 0;
     let finalTotalDoc = 0;
+    let finalDiscountTotal = 0;
     const finalConceptTotals: Record<string, number> = {};
     columns.forEach(col => {
       finalConceptTotals[col.key] = 0;
     });
 
     const rows = rawEvents.map(ev => {
-      runningSaldo = roundMoney(runningSaldo + ev.totalDoc);
+      const disc = roundMoney(ev.discountApplied || 0);
+      runningSaldo = roundMoney(runningSaldo + ev.totalDoc + disc);
       finalTotalDoc = roundMoney(finalTotalDoc + ev.totalDoc);
+      finalDiscountTotal = roundMoney(finalDiscountTotal + disc);
+
       const conceptValues: Record<string, number> = {};
       columns.forEach(col => {
         const v = roundMoney(ev.byConceptKey[col.key] || 0);
@@ -1052,6 +1070,7 @@ export function PortfolioReportsTab() {
         doc: ev.doc,
         detail: ev.detail,
         totalDoc: ev.totalDoc,
+        discountApplied: disc,
         conceptValues,
         balance: runningSaldo,
         code: unitLabelText(uObj),
@@ -1065,7 +1084,9 @@ export function PortfolioReportsTab() {
       rows,
       finalTotalDoc,
       finalConceptTotals,
+      finalDiscountTotal,
       finalBalance: runningSaldo,
+      hasAnyDiscount,
     };
   }, [
     selectedUnitId,
@@ -1519,41 +1540,42 @@ export function PortfolioReportsTab() {
   function handleExportCsv() {
     const stamp = dateTo || cutoffDate || today;
     if (activeReport === 'statement_summary') {
-      downloadCsv(
-        `estado-cuenta-resumido-${stamp}.csv`,
-        [
-          'PERIODO',
-          'ADMON',
-          'INTERESES',
-          'RETROACTIVO',
-          'CUOTA EXTRA',
-          'OTROS',
-          'TOTAL COBRO MES',
-          'AJUSTES',
-          'PAGOS',
-          'SALDO',
-          'FECHA PAGO',
-        ],
-        summaryStatementRows.map(r => [
-          r.period,
-          r.admon,
-          r.intereses,
-          r.retroactivo,
-          r.cuotaExtra,
-          r.otros,
-          r.totalCobro,
-          r.ajustes,
-          r.pagos,
-          r.saldo,
-          r.lastPaymentDate,
-        ])
-      );
+      const headers = [
+        'PERIODO',
+        'ADMON',
+        'INTERESES',
+        'RETROACTIVO',
+        'CUOTA EXTRA',
+        'OTROS',
+        'TOTAL COBRO MES',
+        'AJUSTES',
+        'PAGOS',
+        ...(hasSummaryDiscount ? ['DESCUENTO'] : []),
+        'SALDO',
+        'FECHA PAGO',
+      ];
+      const rows = summaryStatementRows.map(r => [
+        r.period,
+        r.admon,
+        r.intereses,
+        r.retroactivo,
+        r.cuotaExtra,
+        r.otros,
+        r.totalCobro,
+        r.ajustes,
+        r.pagos,
+        ...(hasSummaryDiscount ? [r.descuento] : []),
+        r.saldo,
+        r.lastPaymentDate,
+      ]);
+      downloadCsv(`estado-cuenta-resumido-${stamp}.csv`, headers, rows);
     } else if (activeReport === 'statement_detailed') {
       const csvRows: (string | number)[][] = detailedStatementData.rows.map(r => [
         r.date,
         r.doc,
         r.detail,
         r.totalDoc,
+        ...(detailedStatementData.hasAnyDiscount ? [r.discountApplied] : []),
         ...detailedStatementData.columns.map(c => r.conceptValues[c.key] || 0),
         r.balance,
       ]);
@@ -1563,6 +1585,9 @@ export function PortfolioReportsTab() {
           'SALDO FINAL',
           'Saldo final por concepto',
           detailedStatementData.finalTotalDoc,
+          ...(detailedStatementData.hasAnyDiscount
+            ? [detailedStatementData.finalDiscountTotal]
+            : []),
           ...detailedStatementData.columns.map(
             c => detailedStatementData.finalConceptTotals[c.key] || 0
           ),
@@ -1576,6 +1601,7 @@ export function PortfolioReportsTab() {
           'DOCUMENTO',
           'DETALLE',
           'TOTAL DOCUMENTO',
+          ...(detailedStatementData.hasAnyDiscount ? ['DESCUENTO APLICADO'] : []),
           ...detailedStatementData.columns.map(c => c.label.toUpperCase()),
           'SALDO',
         ],
@@ -1716,6 +1742,7 @@ export function PortfolioReportsTab() {
         'Total Cobro',
         'Ajustes',
         'Pagos',
+        ...(hasSummaryDiscount ? ['Descuento'] : []),
         'Saldo',
         'Fecha Pago',
       ];
@@ -1731,6 +1758,11 @@ export function PortfolioReportsTab() {
             <td class="num">${escapeHtml(formatCOP(r.totalCobro))}</td>
             <td class="num ${r.ajustes < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(r.ajustes))}</td>
             <td class="num ${r.pagos < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(r.pagos))}</td>
+            ${
+              hasSummaryDiscount
+                ? `<td class="num ${r.descuento < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(r.descuento))}</td>`
+                : ''
+            }
             <td class="num ${r.saldo < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(r.saldo))}</strong></td>
             <td>${escapeHtml(r.lastPaymentDate || '—')}</td>
           </tr>`
@@ -1742,6 +1774,7 @@ export function PortfolioReportsTab() {
         'Documento',
         'Detalle',
         'Total Documento',
+        ...(detailedStatementData.hasAnyDiscount ? ['Descuento Aplicado'] : []),
         ...detailedStatementData.columns.map(c => c.label),
         'Saldo',
       ];
@@ -1753,11 +1786,15 @@ export function PortfolioReportsTab() {
               return `<td class="num ${v < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(v))}</td>`;
             })
             .join('');
+          const discCell = detailedStatementData.hasAnyDiscount
+            ? `<td class="num ${r.discountApplied < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(r.discountApplied))}</td>`
+            : '';
           return `<tr>
             <td>${escapeHtml(r.date || '—')}</td>
             <td>${escapeHtml(r.doc)}</td>
             <td>${escapeHtml(r.detail)}</td>
             <td class="num ${r.totalDoc < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(r.totalDoc))}</td>
+            ${discCell}
             ${conceptCells}
             <td class="num ${r.balance < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(r.balance))}</strong></td>
           </tr>`;
@@ -1769,6 +1806,11 @@ export function PortfolioReportsTab() {
           ? `<tr class="final-row">
               <td colspan="3"><strong>SALDO FINAL POR CONCEPTO</strong></td>
               <td class="num ${detailedStatementData.finalTotalDoc < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(detailedStatementData.finalTotalDoc))}</strong></td>
+              ${
+                detailedStatementData.hasAnyDiscount
+                  ? `<td class="num ${detailedStatementData.finalDiscountTotal < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(detailedStatementData.finalDiscountTotal))}</strong></td>`
+                  : ''
+              }
               ${detailedStatementData.columns
                 .map(c => {
                   const v = roundMoney(detailedStatementData.finalConceptTotals[c.key] || 0);
@@ -2101,6 +2143,9 @@ export function PortfolioReportsTab() {
                       <th className="px-3 py-2.5 text-right">Total Cobro Mes</th>
                       <th className="px-3 py-2.5 text-right">Ajustes</th>
                       <th className="px-3 py-2.5 text-right">Pagos</th>
+                      {hasSummaryDiscount && (
+                        <th className="px-3 py-2.5 text-right">Descuento</th>
+                      )}
                       <th className="px-3 py-2.5 text-right">Saldo</th>
                       <th className="px-3 py-2.5">Fecha Pago</th>
                     </tr>
@@ -2108,7 +2153,10 @@ export function PortfolioReportsTab() {
                   <tbody className="divide-y divide-gray-100 bg-white">
                     {summaryStatementRows.length === 0 ? (
                       <tr>
-                        <td colSpan={11} className="px-4 py-8 text-center text-gray-500">
+                        <td
+                          colSpan={hasSummaryDiscount ? 12 : 11}
+                          className="px-4 py-8 text-center text-gray-500"
+                        >
                           No hay movimientos registrados para este inmueble con los filtros seleccionados.
                         </td>
                       </tr>
@@ -2138,6 +2186,15 @@ export function PortfolioReportsTab() {
                           >
                             {formatCOP(r.pagos)}
                           </td>
+                          {hasSummaryDiscount && (
+                            <td
+                              className={`px-3 py-2 text-right font-mono ${
+                                r.descuento < 0 ? 'text-red-600' : 'text-gray-900'
+                              }`}
+                            >
+                              {formatCOP(r.descuento)}
+                            </td>
+                          )}
                           <td
                             className={`px-3 py-2 text-right font-mono font-bold ${
                               r.saldo < 0 ? 'text-red-600' : 'text-gray-900'
@@ -2180,6 +2237,9 @@ export function PortfolioReportsTab() {
                       <th className="px-3 py-2.5">Documento</th>
                       <th className="px-3 py-2.5">Detalle</th>
                       <th className="px-3 py-2.5 text-right">Total Documento</th>
+                      {detailedStatementData.hasAnyDiscount && (
+                        <th className="px-3 py-2.5 text-right">Descuento Aplicado</th>
+                      )}
                       {detailedStatementData.columns.map(col => (
                         <th key={col.key} className="px-3 py-2.5 text-right">
                           {col.label}
@@ -2192,7 +2252,11 @@ export function PortfolioReportsTab() {
                     {detailedStatementData.rows.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={5 + detailedStatementData.columns.length}
+                          colSpan={
+                            5 +
+                            detailedStatementData.columns.length +
+                            (detailedStatementData.hasAnyDiscount ? 1 : 0)
+                          }
                           className="px-4 py-8 text-center text-gray-500"
                         >
                           Sin movimientos detallados con los filtros seleccionados.
@@ -2213,6 +2277,15 @@ export function PortfolioReportsTab() {
                           >
                             {formatCOP(r.totalDoc)}
                           </td>
+                          {detailedStatementData.hasAnyDiscount && (
+                            <td
+                              className={`px-3 py-2 text-right font-mono ${
+                                r.discountApplied < 0 ? 'text-red-600' : 'text-gray-900'
+                              }`}
+                            >
+                              {formatCOP(r.discountApplied)}
+                            </td>
+                          )}
                           {detailedStatementData.columns.map(col => {
                             const v = roundMoney(r.conceptValues[col.key] || 0);
                             return (
@@ -2252,6 +2325,17 @@ export function PortfolioReportsTab() {
                         >
                           {formatCOP(detailedStatementData.finalTotalDoc)}
                         </td>
+                        {detailedStatementData.hasAnyDiscount && (
+                          <td
+                            className={`px-3 py-2.5 text-right font-mono font-bold ${
+                              detailedStatementData.finalDiscountTotal < 0
+                                ? 'text-red-600'
+                                : 'text-gray-900'
+                            }`}
+                          >
+                            {formatCOP(detailedStatementData.finalDiscountTotal)}
+                          </td>
+                        )}
                         {detailedStatementData.columns.map(col => {
                           const v = roundMoney(
                             detailedStatementData.finalConceptTotals[col.key] || 0
