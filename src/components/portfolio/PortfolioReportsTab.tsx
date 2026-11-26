@@ -935,13 +935,20 @@ export function PortfolioReportsTab() {
               Number(al.capital_applied || 0) + Number(al.interest_applied || 0)
             );
             const discVal = roundMoney(Number(al.discount_applied || 0));
+            const totalConceptReduction = roundMoney(paidVal + discVal);
             receiptDiscount = roundMoney(receiptDiscount - discVal);
 
-            if (Math.abs(paidVal) >= 0.005) {
+            if (Math.abs(totalConceptReduction) >= 0.005) {
               const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
               const label = cObj?.name || 'Concepto';
               const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
-              addMovementToConcept(byConceptKey, key, label, cid || undefined, -paidVal);
+              addMovementToConcept(
+                byConceptKey,
+                key,
+                label,
+                cid || undefined,
+                -totalConceptReduction
+              );
             }
           });
         } else if (selectedConceptId === 'ALL') {
