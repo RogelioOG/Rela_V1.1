@@ -59,6 +59,7 @@ interface ConceptColumnDef {
   key: string;
   label: string;
   conceptId?: string;
+  isAdvance?: boolean;
 }
 
 function todayISO(): string {
@@ -70,6 +71,42 @@ function todayISO(): string {
 function unitLabelText(u: any): string {
   if (!u) return '—';
   return u.tower ? `Torre ${u.tower} · ${u.unit_label}` : String(u.unit_label || '—');
+}
+
+function formatOwnerNamesSlash(
+  u: any,
+  tpMap: Map<string, ThirdPartyOption>
+): string {
+  const names: string[] = [];
+  const pushName = (val?: string | null) => {
+    const clean = String(val || '').trim();
+    if (!clean) return;
+    clean
+      .split(/[\/,&;]+|\s+\by\b\s+/i)
+      .map(s => s.trim())
+      .filter(Boolean)
+      .forEach(part => {
+        if (!names.some(existing => existing.toLowerCase() === part.toLowerCase())) {
+          names.push(part);
+        }
+      });
+  };
+
+  if (u?.third_party_id) {
+    const tp = tpMap.get(String(u.third_party_id));
+    if (tp?.name) pushName(tp.name);
+  }
+  if (Array.isArray(u?.owner_names)) {
+    u.owner_names.forEach((n: any) => pushName(n));
+  }
+  if (u?.owner_name) {
+    pushName(u.owner_name);
+  }
+  if (u?.secondary_owner_name) {
+    pushName(u.secondary_owner_name);
+  }
+
+  return names.length > 0 ? names.join(' / ') : '—';
 }
 
 function daysPastDue(dueDateStr: string | null | undefined, cutoffDateStr: string): number {
@@ -176,6 +213,10 @@ export function PortfolioReportsTab() {
   const [selectedTower, setSelectedTower] = useState<string>('ALL');
   const [selectedConceptId, setSelectedConceptId] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
+  const [includeNames, setIncludeNames] = useState<boolean>(false);
+
+  const [excludeAdvancesInConcept, setExcludeAdvancesInConcept] = useState<boolean>(false);
+  const [onlyAdvancesInConcept, setOnlyAdvancesInConcept] = useState<boolean>(false);
 
   const [units, setUnits] = useState<Unit[]>([]);
   const [concepts, setConcepts] = useState<BillingConcept[]>([]);
@@ -881,7 +922,6 @@ export function PortfolioReportsTab() {
       eventMap[colKey] = roundMoney((eventMap[colKey] || 0) + rounded);
     };
 
-    // 2.1 Cuentas de cobro originales
     invoices
       .filter(
         inv =>
@@ -920,7 +960,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // 2.2 Recibos de caja
     receipts
       .filter(
         r =>
@@ -992,7 +1031,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // 2.3 Notas (NC, ND, NT)
     const linesByNote = new Map<string, any[]>();
     noteLines.forEach(ln => {
       const nid = String(ln.note_id || '');
@@ -1113,126 +1151,248 @@ export function PortfolioReportsTab() {
     selectedConceptId,
   ]);
 
-  // KPIs sincronizados con los filtros activos
-  const kpis = useMemo(() => {
-    const isSingleUnit = Boolean(selectedUnitId) || filteredUnits.length === 1;
+  // 3. Cartera por Conceptos (Matriz por Inmueble + Conceptos Activos con Saldo + Anticipos)
+  const byConceptMatrixData = useMemo(() => {
+    const showAdvanceColumn =
+      selectedConceptId === 'ALL' && !excludeAdvancesInConcept;
 
-    let totalPortfolio = 0;
-    let overduePortfolio = 0;
+    const unitConceptBalances = new Map<string, Record<string, number>>();
+    const unitAdvanceBalances = new Map<string, number>();
 
-    if (isSingleUnit && detailedStatementData.rows.length > 0) {
-      totalPortfolio = roundMoney(Math.max(0, detailedStatementData.finalBalance));
-      overduePortfolio = roundMoney(Math.max(0, detailedStatementData.finalBalance));
-    } else {
-      allDetailedItems.forEach(it => {
-        const bal = roundMoney(Number(it.balance || 0));
-        totalPortfolio = roundMoney(totalPortfolio + bal);
-        if (bal > 0 && daysPastDue(it.dueDate, effectiveCutoff) > 0) {
-          overduePortfolio = roundMoney(overduePortfolio + bal);
+    filteredUnits.forEach(u => {
+      unitConceptBalances.set(String(u.id), {});
+      unitAdvanceBalances.set(String(u.id), 0);
+    });
+
+    // Cargos base desde facturas/cuentas de cobro
+    invoices
+      .filter(
+        inv =>
+          allowedUnitIds.has(String(inv.unit_id || '')) &&
+          isStatusAllowed(inv.status) &&
+          isDateAllowed(inv.issue_date || inv.due_date)
+      )
+      .forEach(inv => {
+        const uid = String(inv.unit_id || '');
+        const uMap = unitConceptBalances.get(uid);
+        if (!uMap) return;
+        const baseLines = getInvoiceBaseConceptAmounts(inv);
+        baseLines.forEach(line => {
+          const cid = line.conceptId ? String(line.conceptId) : '';
+          if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
+          if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
+          const key = cid ? `cid_${cid}` : `lbl_${String(line.name || 'CONCEPTO').toUpperCase()}`;
+          uMap[key] = roundMoney((uMap[key] || 0) + Number(line.baseAmount || 0));
+        });
+      });
+
+    // Cuotas sin factura asociada en el rango
+    dues
+      .filter(
+        d =>
+          allowedUnitIds.has(String(d.unit_id || '')) &&
+          isStatusAllowed(d.status) &&
+          isDateAllowed(d.due_date || d.period_start)
+      )
+      .forEach(d => {
+        const uid = String(d.unit_id || '');
+        const p = String(d.period || 'SIN PERIODO');
+        const uMap = unitConceptBalances.get(uid);
+        if (!uMap) return;
+        const hasInvoiceForPeriod = invoices.some(
+          inv =>
+            String(inv.unit_id) === uid &&
+            String(inv.period || '') === p &&
+            isStatusAllowed(inv.status) &&
+            isDateAllowed(inv.issue_date || inv.due_date)
+        );
+        const dueAmt = roundMoney(Number(d.amount ?? d.base_amount ?? 0));
+        if (!hasInvoiceForPeriod && dueAmt > 0) {
+          const cid = String(d.conceptId ?? d.concept_id ?? d.billing_concept_id ?? '');
+          if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
+          if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
+          const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
+          const key = cid
+            ? `cid_${cid}`
+            : `lbl_${String(cObj?.name || d.conceptName || 'CUOTA DE ADMINISTRACION').toUpperCase()}`;
+          uMap[key] = roundMoney((uMap[key] || 0) + dueAmt);
         }
       });
-    }
 
-    let advanceTotal = 0;
-    receipts.forEach(r => {
-      if (!isStatusAllowed(r.status)) return;
-      if (!allowedUnitIds.has(String(r.unit_id || ''))) return;
-      if (!isDateAllowed(r.payment_date || r.accounting_date)) return;
-      advanceTotal = roundMoney(advanceTotal + Number(r.advance_amount || 0));
-    });
+    // Reducciones por recibos (pagos + descuentos aplicados en conceptos) y anticipos
+    receipts
+      .filter(
+        r =>
+          allowedUnitIds.has(String(r.unit_id || '')) &&
+          isStatusAllowed(r.status) &&
+          isDateAllowed(r.payment_date || r.accounting_date)
+      )
+      .forEach(r => {
+        const uid = String(r.unit_id || '');
+        const uMap = unitConceptBalances.get(uid);
+        if (!uMap) return;
 
+        const rAllocs = allocsByReceiptId.get(String(r.id)) || [];
+        if (rAllocs.length > 0) {
+          rAllocs.forEach(al => {
+            const cid = String(al.concept_id || '');
+            if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
+            if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
+            const red = roundMoney(
+              Number(al.capital_applied || 0) +
+                Number(al.interest_applied || 0) +
+                Number(al.discount_applied || 0)
+            );
+            if (Math.abs(red) >= 0.005) {
+              const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
+              const key = cid ? `cid_${cid}` : `lbl_${String(cObj?.name || 'CONCEPTO').toUpperCase()}`;
+              uMap[key] = roundMoney((uMap[key] || 0) - red);
+            }
+          });
+        } else if (selectedConceptId === 'ALL') {
+          const amt = roundMoney(Number(r.total_amount || 0));
+          if (amt > 0) {
+            uMap['lbl_RECAUDO'] = roundMoney((uMap['lbl_RECAUDO'] || 0) - amt);
+          }
+        }
+
+        const adv = roundMoney(Number(r.advance_amount || 0));
+        if (adv > 0 && selectedConceptId === 'ALL') {
+          unitAdvanceBalances.set(uid, roundMoney((unitAdvanceBalances.get(uid) || 0) - adv));
+        }
+      });
+
+    // Ajustes por notas (NC, ND, NT)
     noteLines.forEach(ln => {
-      const parentNote = noteByIdMap.get(String(ln.note_id));
-      if (!parentNote || !isStatusAllowed(parentNote.status)) return;
-      const uid = String(ln.unit_id || parentNote.unit_id || '');
+      const parent = noteByIdMap.get(String(ln.note_id));
+      if (!parent || !isStatusAllowed(parent.status)) return;
+      if (!isDateAllowed(parent.accounting_date || parent.application_date)) return;
+      const uid = String(ln.unit_id || parent.unit_id || '');
       if (!allowedUnitIds.has(uid)) return;
-      if (!isDateAllowed(parentNote.accounting_date || parentNote.application_date)) return;
+      const uMap = unitConceptBalances.get(uid);
+      if (!uMap) return;
+
       const cid = String(ln.conceptId ?? ln.concept_id ?? '');
-      if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) {
-        return;
+      const delta = noteLineSignedDelta(parent, ln);
+      if (Math.abs(delta) >= 0.005) {
+        if (cid && activeConceptById.size > 0 && !activeConceptById.has(cid)) return;
+        if (selectedConceptId === 'ALL' || cid === selectedConceptId) {
+          const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
+          const key = cid ? `cid_${cid}` : `lbl_${String(cObj?.name || 'AJUSTE NOTA').toUpperCase()}`;
+          uMap[key] = roundMoney((uMap[key] || 0) + delta);
+        }
       }
-      advanceTotal = roundMoney(advanceTotal + Number(ln.advance_amount || 0));
+
+      const lnAdv = roundMoney(Number(ln.advance_amount || 0));
+      if (lnAdv > 0 && selectedConceptId === 'ALL') {
+        unitAdvanceBalances.set(uid, roundMoney((unitAdvanceBalances.get(uid) || 0) - lnAdv));
+      }
     });
 
-    const collectedInRange = roundMoney(
-      receipts.reduce((sum, r) => {
-        if (!isStatusAllowed(r.status)) return sum;
-        if (!allowedUnitIds.has(String(r.unit_id || ''))) return sum;
-        if (!isDateAllowed(r.payment_date || r.accounting_date)) return sum;
-        return sum + Number(r.total_amount || 0);
-      }, 0)
+    const conceptKeyMeta = new Map<string, ConceptColumnDef>();
+    filteredUnits.forEach(u => {
+      const uid = String(u.id);
+      const uMap = unitConceptBalances.get(uid) || {};
+      Object.entries(uMap).forEach(([key, val]) => {
+        if (Math.abs(roundMoney(val)) >= 0.005 && !conceptKeyMeta.has(key)) {
+          const cid = key.startsWith('cid_') ? key.slice(4) : undefined;
+          const cObj = cid ? activeConceptById.get(cid) || conceptMap.get(cid) : undefined;
+          const fallbackLbl = key.startsWith('lbl_') ? key.slice(4) : 'Concepto';
+          conceptKeyMeta.set(key, {
+            key,
+            label: cObj?.name || fallbackLbl,
+            conceptId: cid,
+          });
+        }
+      });
+    });
+
+    const activeConceptColumns: ConceptColumnDef[] = Array.from(conceptKeyMeta.values()).sort(
+      (a, b) => a.label.localeCompare(b.label)
     );
 
+    const advanceCol: ConceptColumnDef = {
+      key: '__ADVANCE__',
+      label: 'Anticipo / Saldo a Favor',
+      isAdvance: true,
+    };
+
+    const columns: ConceptColumnDef[] = showAdvanceColumn
+      ? [advanceCol, ...activeConceptColumns]
+      : activeConceptColumns;
+
+    const rows = filteredUnits
+      .map(u => {
+        const uid = String(u.id);
+        const uMap = unitConceptBalances.get(uid) || {};
+        const advVal = roundMoney(unitAdvanceBalances.get(uid) || 0);
+        const hasAdvance = Math.abs(advVal) >= 0.005;
+
+        const values: Record<string, number> = {};
+        if (showAdvanceColumn) {
+          values[advanceCol.key] = advVal;
+        }
+        activeConceptColumns.forEach(col => {
+          values[col.key] = roundMoney(uMap[col.key] || 0);
+        });
+
+        const total = roundMoney(
+          (showAdvanceColumn ? advVal : 0) +
+            activeConceptColumns.reduce((sum, col) => sum + (values[col.key] || 0), 0)
+        );
+
+        return {
+          unitId: uid,
+          unitLabel: unitLabelText(u),
+          ownerName: formatOwnerNamesSlash(u, tpMap),
+          values,
+          total,
+          hasAdvance,
+        };
+      })
+      .filter(r => {
+        if (onlyAdvancesInConcept) {
+          return r.hasAdvance;
+        }
+        const hasAnyNonZero =
+          columns.some(col => Math.abs(roundMoney(r.values[col.key] || 0)) >= 0.005) ||
+          Math.abs(roundMoney(r.total)) >= 0.005;
+        return hasAnyNonZero;
+      });
+
+    const columnTotals: Record<string, number> = {};
+    columns.forEach(col => {
+      columnTotals[col.key] = roundMoney(
+        rows.reduce((sum, r) => sum + (r.values[col.key] || 0), 0)
+      );
+    });
+    const grandTotal = roundMoney(rows.reduce((sum, r) => sum + (r.total || 0), 0));
+
     return {
-      totalPortfolio,
-      overduePortfolio,
-      collectedInRange,
-      advanceTotal,
+      columns,
+      rows,
+      columnTotals,
+      grandTotal,
     };
   }, [
-    selectedUnitId,
     filteredUnits,
-    detailedStatementData,
-    allDetailedItems,
-    receipts,
-    noteByIdMap,
-    noteLines,
     allowedUnitIds,
+    invoices,
+    dues,
+    receipts,
+    allocsByReceiptId,
+    noteLines,
+    noteByIdMap,
+    conceptMap,
+    activeConceptById,
+    getInvoiceBaseConceptAmounts,
     isStatusAllowed,
     isDateAllowed,
-    effectiveCutoff,
     selectedConceptId,
+    excludeAdvancesInConcept,
+    onlyAdvancesInConcept,
+    tpMap,
   ]);
-
-  // 3. Cartera por Conceptos
-  const byConceptRows = useMemo(() => {
-    const map = new Map<
-      string,
-      {
-        conceptId: string;
-        code: string;
-        name: string;
-        currentAmt: number;
-        overdueAmt: number;
-        totalAmt: number;
-        unitSet: Set<string>;
-      }
-    >();
-
-    allDetailedItems.forEach(it => {
-      const bal = roundMoney(Number(it.balance || 0));
-      if (bal <= 0) return;
-      const cid = String(it.conceptId);
-      const cObj = conceptMap.get(cid);
-      if (!map.has(cid)) {
-        map.set(cid, {
-          conceptId: cid,
-          code: cObj?.code || it.conceptCode || '—',
-          name: cObj?.name || it.conceptName || 'Concepto',
-          currentAmt: 0,
-          overdueAmt: 0,
-          totalAmt: 0,
-          unitSet: new Set<string>(),
-        });
-      }
-      const row = map.get(cid)!;
-      const past = daysPastDue(it.dueDate, effectiveCutoff);
-      if (past > 0) {
-        row.overdueAmt = roundMoney(row.overdueAmt + bal);
-      } else {
-        row.currentAmt = roundMoney(row.currentAmt + bal);
-      }
-      row.totalAmt = roundMoney(row.totalAmt + bal);
-      row.unitSet.add(String(it.unitId));
-    });
-
-    return Array.from(map.values())
-      .map(r => ({
-        ...r,
-        unitsCount: r.unitSet.size,
-      }))
-      .sort((a, b) => b.totalAmt - a.totalAmt);
-  }, [allDetailedItems, conceptMap, effectiveCutoff]);
 
   // 4. Cartera por Edades
   const byAgingRows = useMemo(() => {
@@ -1543,6 +1703,77 @@ export function PortfolioReportsTab() {
     return Array.from(map.values()).sort((a, b) => b.overdueBalance - a.overdueBalance);
   }, [allDetailedItems, unitMap, effectiveCutoff]);
 
+  // KPIs sincronizados con los filtros activos
+  const kpis = useMemo(() => {
+    const isSingleUnit = Boolean(selectedUnitId) || filteredUnits.length === 1;
+
+    let totalPortfolio = 0;
+    let overduePortfolio = 0;
+
+    if (isSingleUnit && detailedStatementData.rows.length > 0) {
+      totalPortfolio = roundMoney(Math.max(0, detailedStatementData.finalBalance));
+      overduePortfolio = roundMoney(Math.max(0, detailedStatementData.finalBalance));
+    } else {
+      allDetailedItems.forEach(it => {
+        const bal = roundMoney(Number(it.balance || 0));
+        totalPortfolio = roundMoney(totalPortfolio + bal);
+        if (bal > 0 && daysPastDue(it.dueDate, effectiveCutoff) > 0) {
+          overduePortfolio = roundMoney(overduePortfolio + bal);
+        }
+      });
+    }
+
+    let advanceTotal = 0;
+    receipts.forEach(r => {
+      if (!isStatusAllowed(r.status)) return;
+      if (!allowedUnitIds.has(String(r.unit_id || ''))) return;
+      if (!isDateAllowed(r.payment_date || r.accounting_date)) return;
+      advanceTotal = roundMoney(advanceTotal + Number(r.advance_amount || 0));
+    });
+
+    noteLines.forEach(ln => {
+      const parentNote = noteByIdMap.get(String(ln.note_id));
+      if (!parentNote || !isStatusAllowed(parentNote.status)) return;
+      const uid = String(ln.unit_id || parentNote.unit_id || '');
+      if (!allowedUnitIds.has(uid)) return;
+      if (!isDateAllowed(parentNote.accounting_date || parentNote.application_date)) return;
+      const cid = String(ln.conceptId ?? ln.concept_id ?? '');
+      if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) {
+        return;
+      }
+      advanceTotal = roundMoney(advanceTotal + Number(ln.advance_amount || 0));
+    });
+
+    const collectedInRange = roundMoney(
+      receipts.reduce((sum, r) => {
+        if (!isStatusAllowed(r.status)) return sum;
+        if (!allowedUnitIds.has(String(r.unit_id || ''))) return sum;
+        if (!isDateAllowed(r.payment_date || r.accounting_date)) return sum;
+        return sum + Number(r.total_amount || 0);
+      }, 0)
+    );
+
+    return {
+      totalPortfolio,
+      overduePortfolio,
+      collectedInRange,
+      advanceTotal,
+    };
+  }, [
+    selectedUnitId,
+    filteredUnits,
+    detailedStatementData,
+    allDetailedItems,
+    receipts,
+    noteByIdMap,
+    noteLines,
+    allowedUnitIds,
+    isStatusAllowed,
+    isDateAllowed,
+    effectiveCutoff,
+    selectedConceptId,
+  ]);
+
   function handleExportCsv() {
     const stamp = dateTo || cutoffDate || today;
     if (activeReport === 'statement_summary') {
@@ -1615,18 +1846,27 @@ export function PortfolioReportsTab() {
         csvRows
       );
     } else if (activeReport === 'by_concept') {
-      downloadCsv(
-        `cartera-por-conceptos-${stamp}.csv`,
-        ['CODIGO', 'CONCEPTO', 'INMUEBLES', 'POR VENCER', 'VENCIDA', 'TOTAL CARTERA'],
-        byConceptRows.map(r => [
-          r.code,
-          r.name,
-          r.unitsCount,
-          r.currentAmt,
-          r.overdueAmt,
-          r.totalAmt,
-        ])
-      );
+      const headers = [
+        'INMUEBLE',
+        ...(includeNames ? ['NOMBRE'] : []),
+        ...byConceptMatrixData.columns.map(c => c.label.toUpperCase()),
+        'TOTAL',
+      ];
+      const csvRows: (string | number)[][] = byConceptMatrixData.rows.map(r => [
+        r.unitLabel,
+        ...(includeNames ? [r.ownerName] : []),
+        ...byConceptMatrixData.columns.map(c => r.values[c.key] || 0),
+        r.total,
+      ]);
+      if (byConceptMatrixData.rows.length > 0) {
+        csvRows.push([
+          'TOTALES',
+          ...(includeNames ? [''] : []),
+          ...byConceptMatrixData.columns.map(c => byConceptMatrixData.columnTotals[c.key] || 0),
+          byConceptMatrixData.grandTotal,
+        ]);
+      }
+      downloadCsv(`cartera-por-conceptos-${stamp}.csv`, headers, csvRows);
     } else if (activeReport === 'by_aging') {
       downloadCsv(
         `cartera-por-edades-${stamp}.csv`,
@@ -1732,7 +1972,7 @@ export function PortfolioReportsTab() {
     const reportTitle = activeTabObj ? activeTabObj.label.toUpperCase() : 'REPORTE DE CARTERA';
     const targetUnit = selectedUnitId ? unitMap.get(selectedUnitId) : null;
     const unitHeaderHtml = targetUnit
-      ? `<p style="margin:4px 0 0 0;font-size:12px;"><strong>Inmueble:</strong> ${escapeHtml(unitLabelText(targetUnit))} &nbsp;|&nbsp; <strong>Propietario:</strong> ${escapeHtml(targetUnit.owner_name || '—')}</p>`
+      ? `<p style="margin:4px 0 0 0;font-size:12px;"><strong>Inmueble:</strong> ${escapeHtml(unitLabelText(targetUnit))} &nbsp;|&nbsp; <strong>Propietario:</strong> ${escapeHtml(formatOwnerNamesSlash(targetUnit, tpMap))}</p>`
       : '';
 
     let tableHeaders: string[] = [];
@@ -1824,12 +2064,45 @@ export function PortfolioReportsTab() {
 
       tableRowsHtml = bodyHtml + finalRowHtml;
     } else if (activeReport === 'by_concept') {
-      tableHeaders = ['Código', 'Concepto', 'Inmuebles', 'Por Vencer', 'Vencida', 'Total'];
-      tableRowsHtml = byConceptRows
-        .map(
-          r => `<tr><td>${escapeHtml(r.code)}</td><td>${escapeHtml(r.name)}</td><td class="num">${r.unitsCount}</td><td class="num">${escapeHtml(formatCOP(r.currentAmt))}</td><td class="num">${escapeHtml(formatCOP(r.overdueAmt))}</td><td class="num"><strong>${escapeHtml(formatCOP(r.totalAmt))}</strong></td></tr>`
-        )
+      tableHeaders = [
+        'Inmueble',
+        ...(includeNames ? ['Nombre'] : []),
+        ...byConceptMatrixData.columns.map(c => c.label),
+        'Total',
+      ];
+      const bodyHtml = byConceptMatrixData.rows
+        .map(r => {
+          const cells = byConceptMatrixData.columns
+            .map(c => {
+              const v = roundMoney(r.values[c.key] || 0);
+              return `<td class="num ${v < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(v))}</td>`;
+            })
+            .join('');
+          return `<tr>
+            <td>${escapeHtml(r.unitLabel)}</td>
+            ${includeNames ? `<td>${escapeHtml(r.ownerName)}</td>` : ''}
+            ${cells}
+            <td class="num ${r.total < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(r.total))}</strong></td>
+          </tr>`;
+        })
         .join('');
+
+      const totalsRowHtml =
+        byConceptMatrixData.rows.length > 0
+          ? `<tr class="final-row">
+              <td><strong>Totales</strong></td>
+              ${includeNames ? `<td></td>` : ''}
+              ${byConceptMatrixData.columns
+                .map(c => {
+                  const v = roundMoney(byConceptMatrixData.columnTotals[c.key] || 0);
+                  return `<td class="num ${v < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(v))}</strong></td>`;
+                })
+                .join('')}
+              <td class="num ${byConceptMatrixData.grandTotal < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(byConceptMatrixData.grandTotal))}</strong></td>
+            </tr>`
+          : '';
+
+      tableRowsHtml = bodyHtml + totalsRowHtml;
     } else if (activeReport === 'by_aging') {
       tableHeaders = ['Inmueble', 'Propietario', 'Por Vencer', '1-30 Días', '31-60 Días', '61-90 Días', '+90 Días', 'Total'];
       tableRowsHtml = byAgingRows
@@ -2068,6 +2341,50 @@ export function PortfolioReportsTab() {
               <option value="anulado">Anulado</option>
             </Select>
           </div>
+
+          <div className="flex flex-wrap items-center gap-5 pt-2 border-t border-gray-100">
+            <label className="inline-flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={includeNames}
+                onChange={e => setIncludeNames(e.target.checked)}
+                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              />
+              Incluir nombres
+            </label>
+
+            {activeReport === 'by_concept' && (
+              <>
+                <label className="inline-flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={excludeAdvancesInConcept}
+                    onChange={e => {
+                      const checked = e.target.checked;
+                      setExcludeAdvancesInConcept(checked);
+                      if (checked) setOnlyAdvancesInConcept(false);
+                    }}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  No incluir anticipos / saldos a favor
+                </label>
+
+                <label className="inline-flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={onlyAdvancesInConcept}
+                    onChange={e => {
+                      const checked = e.target.checked;
+                      setOnlyAdvancesInConcept(checked);
+                      if (checked) setExcludeAdvancesInConcept(false);
+                    }}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  Solo los Anticipos / Saldo a Favor
+                </label>
+              </>
+            )}
+          </div>
         </div>
       </Card>
 
@@ -2121,7 +2438,9 @@ export function PortfolioReportsTab() {
                 </div>
                 <div>
                   <span className="text-gray-500">PROPIETARIO: </span>
-                  <strong className="text-gray-900">{activeUnitObj?.owner_name || '—'}</strong>
+                  <strong className="text-gray-900">
+                    {formatOwnerNamesSlash(activeUnitObj, tpMap)}
+                  </strong>
                 </div>
                 <div>
                   <span className="text-gray-500">CORTE / RANGO: </span>
@@ -2227,7 +2546,9 @@ export function PortfolioReportsTab() {
                 </div>
                 <div>
                   <span className="text-gray-500">PROPIETARIO: </span>
-                  <strong className="text-gray-900">{activeUnitObj?.owner_name || '—'}</strong>
+                  <strong className="text-gray-900">
+                    {formatOwnerNamesSlash(activeUnitObj, tpMap)}
+                  </strong>
                 </div>
               </div>
 
@@ -2354,40 +2675,95 @@ export function PortfolioReportsTab() {
               <table className="w-full text-left text-xs">
                 <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase">
                   <tr>
-                    <th className="px-3 py-2.5">Código</th>
-                    <th className="px-3 py-2.5">Concepto</th>
-                    <th className="px-3 py-2.5 text-right">Inmuebles</th>
-                    <th className="px-3 py-2.5 text-right">Por Vencer</th>
-                    <th className="px-3 py-2.5 text-right">Vencida</th>
-                    <th className="px-3 py-2.5 text-right">Total Cartera</th>
+                    <th className="px-3 py-2.5">Inmueble</th>
+                    {includeNames && <th className="px-3 py-2.5">Nombre</th>}
+                    {byConceptMatrixData.columns.map(col => (
+                      <th key={col.key} className="px-3 py-2.5 text-right">
+                        {col.label}
+                      </th>
+                    ))}
+                    <th className="px-3 py-2.5 text-right">Total</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 bg-white">
-                  {byConceptRows.length === 0 ? (
+                  {byConceptMatrixData.rows.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="px-4 py-8 text-center text-gray-500">
-                        No hay saldos pendientes por concepto.
+                      <td
+                        colSpan={
+                          (includeNames ? 2 : 1) +
+                          byConceptMatrixData.columns.length +
+                          1
+                        }
+                        className="px-4 py-8 text-center text-gray-500"
+                      >
+                        No hay saldos para mostrar con los filtros seleccionados.
                       </td>
                     </tr>
                   ) : (
-                    byConceptRows.map(r => (
-                      <tr key={r.conceptId} className="hover:bg-gray-50">
-                        <td className="px-3 py-2 font-mono">{r.code}</td>
-                        <td className="px-3 py-2 font-medium">{r.name}</td>
-                        <td className="px-3 py-2 text-right font-mono">{r.unitsCount}</td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          {formatCOP(r.currentAmt)}
+                    byConceptMatrixData.rows.map(r => (
+                      <tr key={r.unitId} className="hover:bg-gray-50">
+                        <td className="px-3 py-2 font-mono font-medium">
+                          {r.unitLabel}
                         </td>
-                        <td className="px-3 py-2 text-right font-mono text-red-700">
-                          {formatCOP(r.overdueAmt)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono font-bold">
-                          {formatCOP(r.totalAmt)}
+                        {includeNames && (
+                          <td className="px-3 py-2 text-gray-700">{r.ownerName}</td>
+                        )}
+                        {byConceptMatrixData.columns.map(col => {
+                          const v = roundMoney(r.values[col.key] || 0);
+                          return (
+                            <td
+                              key={col.key}
+                              className={`px-3 py-2 text-right font-mono ${
+                                v < 0 ? 'text-red-600' : 'text-gray-900'
+                              }`}
+                            >
+                              {formatCOP(v)}
+                            </td>
+                          );
+                        })}
+                        <td
+                          className={`px-3 py-2 text-right font-mono font-bold ${
+                            r.total < 0 ? 'text-red-600' : 'text-gray-900'
+                          }`}
+                        >
+                          {formatCOP(r.total)}
                         </td>
                       </tr>
                     ))
                   )}
                 </tbody>
+                {byConceptMatrixData.rows.length > 0 && (
+                  <tfoot className="bg-gray-100 border-t-2 border-gray-300 text-xs">
+                    <tr>
+                      <td className="px-3 py-2.5 font-bold text-gray-800 uppercase">
+                        Totales
+                      </td>
+                      {includeNames && <td className="px-3 py-2.5" />}
+                      {byConceptMatrixData.columns.map(col => {
+                        const v = roundMoney(byConceptMatrixData.columnTotals[col.key] || 0);
+                        return (
+                          <td
+                            key={col.key}
+                            className={`px-3 py-2.5 text-right font-mono font-bold ${
+                              v < 0 ? 'text-red-600' : 'text-gray-900'
+                            }`}
+                          >
+                            {formatCOP(v)}
+                          </td>
+                        );
+                      })}
+                      <td
+                        className={`px-3 py-2.5 text-right font-mono font-bold ${
+                          byConceptMatrixData.grandTotal < 0
+                            ? 'text-red-600'
+                            : 'text-gray-900'
+                        }`}
+                      >
+                        {formatCOP(byConceptMatrixData.grandTotal)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                )}
               </table>
             </div>
           ) : activeReport === 'by_aging' ? (
@@ -2396,7 +2772,7 @@ export function PortfolioReportsTab() {
                 <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase">
                   <tr>
                     <th className="px-3 py-2.5">Inmueble</th>
-                    <th className="px-3 py-2.5">Propietario</th>
+                    {includeNames && <th className="px-3 py-2.5">Nombre</th>}
                     <th className="px-3 py-2.5 text-right">Por Vencer</th>
                     <th className="px-3 py-2.5 text-right">1–30 Días</th>
                     <th className="px-3 py-2.5 text-right">31–60 Días</th>
@@ -2408,7 +2784,7 @@ export function PortfolioReportsTab() {
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {byAgingRows.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
+                      <td colSpan={includeNames ? 9 : 8} className="px-4 py-8 text-center text-gray-500">
                         No hay cartera pendiente para mostrar por edades.
                       </td>
                     </tr>
@@ -2416,7 +2792,7 @@ export function PortfolioReportsTab() {
                     byAgingRows.map(r => (
                       <tr key={r.unitId} className="hover:bg-gray-50">
                         <td className="px-3 py-2 font-mono font-medium">{r.unitLabel}</td>
-                        <td className="px-3 py-2">{r.ownerName}</td>
+                        {includeNames && <td className="px-3 py-2">{r.ownerName}</td>}
                         <td className="px-3 py-2 text-right font-mono">
                           {formatCOP(r.currentAmt)}
                         </td>
@@ -2445,6 +2821,7 @@ export function PortfolioReportsTab() {
                     <th className="px-3 py-2.5">Recibo</th>
                     <th className="px-3 py-2.5">Fecha Pago</th>
                     <th className="px-3 py-2.5">Inmueble</th>
+                    {includeNames && <th className="px-3 py-2.5">Nombre</th>}
                     <th className="px-3 py-2.5">Medio Pago</th>
                     <th className="px-3 py-2.5 text-right">Total</th>
                     <th className="px-3 py-2.5 text-right">Aplicado</th>
@@ -2455,7 +2832,7 @@ export function PortfolioReportsTab() {
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {receiptRows.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
+                      <td colSpan={includeNames ? 9 : 8} className="px-4 py-8 text-center text-gray-500">
                         No hay recibos de caja con los filtros seleccionados.
                       </td>
                     </tr>
@@ -2467,6 +2844,7 @@ export function PortfolioReportsTab() {
                         </td>
                         <td className="px-3 py-2 font-mono">{r.paymentDate}</td>
                         <td className="px-3 py-2 font-mono">{r.unitLabel}</td>
+                        {includeNames && <td className="px-3 py-2">{r.ownerName}</td>}
                         <td className="px-3 py-2">{r.paymentMethod}</td>
                         <td className="px-3 py-2 text-right font-mono font-bold">
                           {formatCOP(r.totalAmount)}
@@ -2531,7 +2909,7 @@ export function PortfolioReportsTab() {
                 <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase">
                   <tr>
                     <th className="px-3 py-2.5">Inmueble</th>
-                    <th className="px-3 py-2.5">Propietario</th>
+                    {includeNames && <th className="px-3 py-2.5">Nombre</th>}
                     <th className="px-3 py-2.5 text-right">Anticipo Recibos</th>
                     <th className="px-3 py-2.5 text-right">Anticipo Notas</th>
                     <th className="px-3 py-2.5 text-right">Total Saldo a Favor</th>
@@ -2540,7 +2918,7 @@ export function PortfolioReportsTab() {
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {advancesRows.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="px-4 py-8 text-center text-gray-500">
+                      <td colSpan={includeNames ? 5 : 4} className="px-4 py-8 text-center text-gray-500">
                         No hay saldos a favor o anticipos con los filtros seleccionados.
                       </td>
                     </tr>
@@ -2548,7 +2926,7 @@ export function PortfolioReportsTab() {
                     advancesRows.map(r => (
                       <tr key={r.unitId} className="hover:bg-gray-50">
                         <td className="px-3 py-2 font-mono font-medium">{r.unitLabel}</td>
-                        <td className="px-3 py-2">{r.ownerName}</td>
+                        {includeNames && <td className="px-3 py-2">{r.ownerName}</td>}
                         <td className="px-3 py-2 text-right font-mono">
                           {formatCOP(r.fromReceipts)}
                         </td>
@@ -2570,7 +2948,7 @@ export function PortfolioReportsTab() {
                 <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase">
                   <tr>
                     <th className="px-3 py-2.5">Inmueble</th>
-                    <th className="px-3 py-2.5">Propietario</th>
+                    {includeNames && <th className="px-3 py-2.5">Nombre</th>}
                     <th className="px-3 py-2.5">Documento</th>
                     <th className="px-3 py-2.5 text-right">Saldo Vencido</th>
                     <th className="px-3 py-2.5 text-right">Saldo Total</th>
@@ -2580,7 +2958,7 @@ export function PortfolioReportsTab() {
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {pazYSalvoRows.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="px-4 py-8 text-center text-gray-500">
+                      <td colSpan={includeNames ? 6 : 5} className="px-4 py-8 text-center text-gray-500">
                         No hay inmuebles para evaluar.
                       </td>
                     </tr>
@@ -2588,7 +2966,7 @@ export function PortfolioReportsTab() {
                     pazYSalvoRows.map(r => (
                       <tr key={r.unitId} className="hover:bg-gray-50">
                         <td className="px-3 py-2 font-mono font-medium">{r.unitLabel}</td>
-                        <td className="px-3 py-2">{r.ownerName}</td>
+                        {includeNames && <td className="px-3 py-2">{r.ownerName}</td>}
                         <td className="px-3 py-2 font-mono">{r.ownerDoc}</td>
                         <td className="px-3 py-2 text-right font-mono text-red-700">
                           {formatCOP(r.overdueBalance)}
@@ -2623,6 +3001,7 @@ export function PortfolioReportsTab() {
                     <th className="px-3 py-2.5">Fecha</th>
                     <th className="px-3 py-2.5">Período</th>
                     <th className="px-3 py-2.5">Inmueble</th>
+                    {includeNames && <th className="px-3 py-2.5">Nombre</th>}
                     <th className="px-3 py-2.5 text-right">Valor</th>
                     <th className="px-3 py-2.5">Estado</th>
                     <th className="px-3 py-2.5">Detalle</th>
@@ -2631,7 +3010,7 @@ export function PortfolioReportsTab() {
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {treasuryNotesRows.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
+                      <td colSpan={includeNames ? 9 : 8} className="px-4 py-8 text-center text-gray-500">
                         No hay notas de tesorería con los filtros seleccionados.
                       </td>
                     </tr>
@@ -2645,6 +3024,7 @@ export function PortfolioReportsTab() {
                         <td className="px-3 py-2 font-mono">{r.date}</td>
                         <td className="px-3 py-2 font-mono">{r.period}</td>
                         <td className="px-3 py-2 font-mono">{r.unitLabel}</td>
+                        {includeNames && <td className="px-3 py-2">{r.ownerName}</td>}
                         <td className="px-3 py-2 text-right font-mono font-bold">
                           {formatCOP(r.totalAmount)}
                         </td>
@@ -2662,7 +3042,7 @@ export function PortfolioReportsTab() {
                 <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 uppercase">
                   <tr>
                     <th className="px-3 py-2.5">Inmueble</th>
-                    <th className="px-3 py-2.5">Propietario</th>
+                    {includeNames && <th className="px-3 py-2.5">Nombre</th>}
                     <th className="px-3 py-2.5">Teléfono</th>
                     <th className="px-3 py-2.5 text-right">Días Mora Máx.</th>
                     <th className="px-3 py-2.5 text-right">Saldo Vencido</th>
@@ -2671,7 +3051,7 @@ export function PortfolioReportsTab() {
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {delinquencyRows.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="px-4 py-8 text-center text-gray-500">
+                      <td colSpan={includeNames ? 6 : 5} className="px-4 py-8 text-center text-gray-500">
                         No hay inmuebles en mora con los filtros seleccionados.
                       </td>
                     </tr>
@@ -2679,7 +3059,7 @@ export function PortfolioReportsTab() {
                     delinquencyRows.map(r => (
                       <tr key={r.unitId} className="hover:bg-gray-50">
                         <td className="px-3 py-2 font-mono font-medium">{r.unitLabel}</td>
-                        <td className="px-3 py-2">{r.ownerName}</td>
+                        {includeNames && <td className="px-3 py-2">{r.ownerName}</td>}
                         <td className="px-3 py-2 font-mono">{r.ownerPhone}</td>
                         <td className="px-3 py-2 text-right font-mono text-amber-700">
                           {r.maxDaysPastDue}
