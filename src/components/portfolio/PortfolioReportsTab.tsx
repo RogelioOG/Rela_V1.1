@@ -719,37 +719,48 @@ export function PortfolioReportsTab() {
       .forEach(r => {
         const dt = String(r.payment_date || r.accounting_date || '');
         const rAllocs = allocsByReceiptId.get(String(r.id)) || [];
+        const totalReceiptAmt = roundMoney(Number(r.total_amount || 0));
 
         if (rAllocs.length > 0) {
-          rAllocs.forEach(al => {
-            if (
-              selectedConceptId !== 'ALL' &&
-              String(al.concept_id || '') !== selectedConceptId
-            ) {
-              return;
-            }
-            const dueObj = al.due_id ? dueByIdMap.get(String(al.due_id)) : null;
-            const pKey = String(
-              dueObj?.period || al.period || (dt ? dt.slice(0, 7) : 'GENERAL')
+          const matchingAllocs = rAllocs.filter(
+            al => selectedConceptId === 'ALL' || String(al.concept_id || '') === selectedConceptId
+          );
+          if (matchingAllocs.length > 0) {
+            const firstAl = matchingAllocs[0];
+            const firstDue = firstAl.due_id ? dueByIdMap.get(String(firstAl.due_id)) : null;
+            const defaultPKey = String(
+              firstDue?.period || firstAl.period || (dt ? dt.slice(0, 7) : 'GENERAL')
             );
-            const target = getOrCreate(pKey);
-            const paidAmt = roundMoney(
-              Number(al.capital_applied || 0) + Number(al.interest_applied || 0)
-            );
-            const discAmt = roundMoney(Number(al.discount_applied || 0));
-            target.pagos = roundMoney(target.pagos - paidAmt);
-            target.descuento = roundMoney(target.descuento - discAmt);
-            if (dt && (!target.lastPaymentDate || dt > target.lastPaymentDate)) {
-              target.lastPaymentDate = dt;
+            const defaultTarget = getOrCreate(defaultPKey);
+            if (selectedConceptId === 'ALL' && totalReceiptAmt > 0) {
+              defaultTarget.pagos = roundMoney(defaultTarget.pagos - totalReceiptAmt);
             }
-          });
+
+            matchingAllocs.forEach(al => {
+              const dueObj = al.due_id ? dueByIdMap.get(String(al.due_id)) : null;
+              const pKey = String(
+                dueObj?.period || al.period || (dt ? dt.slice(0, 7) : 'GENERAL')
+              );
+              const target = getOrCreate(pKey);
+              const paidAmt = roundMoney(
+                Number(al.capital_applied || 0) + Number(al.interest_applied || 0)
+              );
+              if (selectedConceptId !== 'ALL') {
+                target.pagos = roundMoney(target.pagos - paidAmt);
+              }
+              const discAmt = roundMoney(Number(al.discount_applied || 0));
+              target.descuento = roundMoney(target.descuento - discAmt);
+              if (dt && (!target.lastPaymentDate || dt > target.lastPaymentDate)) {
+                target.lastPaymentDate = dt;
+              }
+            });
+          }
         } else if (selectedConceptId === 'ALL') {
           const pKey = dt ? dt.slice(0, 7) : 'GENERAL';
           const target = byPeriod.has(pKey)
             ? byPeriod.get(pKey)!
             : Array.from(byPeriod.values()).slice(-1)[0] || getOrCreate(pKey);
-          const amt = Number(r.total_amount || 0);
-          target.pagos = roundMoney(target.pagos - amt);
+          target.pagos = roundMoney(target.pagos - totalReceiptAmt);
           if (dt && (!target.lastPaymentDate || dt > target.lastPaymentDate)) {
             target.lastPaymentDate = dt;
           }
