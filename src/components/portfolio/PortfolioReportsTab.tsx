@@ -103,11 +103,10 @@ function classifyConcept(
 }
 
 /**
- * Impacto de cada línea de nota (NC, ND, NT) en su propio movimiento/ajuste:
+ * Calcula el impacto neto de una línea de nota (NC, ND, NT):
  * - section === 'abono' => resta (-val)
  * - section === 'cargo' => suma (+val)
- * - ND => suma (+val)
- * - NC => resta (-val)
+ * - en otros casos: ND suma (+val), NC resta (-val)
  */
 function noteLineSignedDelta(parentNote: any, line: any): number {
   const val = roundMoney(
@@ -225,6 +224,7 @@ export function PortfolioReportsTab() {
         .from('billing_concepts')
         .select('*')
         .eq('organization_id', activeOrg.id)
+        .eq('is_active', true)
         .order('name', { ascending: true }),
       supabase
         .from('payment_hierarchy_configs')
@@ -385,18 +385,12 @@ export function PortfolioReportsTab() {
   }, [receiptAllocations]);
 
   /**
-   * Reconstruye el valor ORIGINAL de la cuenta de cobro por concepto:
-   * Si `items_snapshot` ya fue alterado por una nota (por ejemplo, quedó en 40.000
-   * cuando `subtotal` es 120.000), restaura la diferencia al concepto principal (ADM)
-   * para que la Cuenta de Cobro muestre su valor real original.
+   * Lee los conceptos de una cuenta de cobro tal como vienen en su `items_snapshot`
+   * (más `interest_amount` si no viene en el snapshot), sin alterar ni inventar montos.
    */
-  const getInvoiceOriginalConceptAmounts = useCallback(
+  const getInvoiceSnapshotConcepts = useCallback(
     (inv: any) => {
       const snapItems = Array.isArray(inv.items_snapshot) ? inv.items_snapshot : [];
-      const subtotal = roundMoney(Number(inv.subtotal || 0));
-      const disc = roundMoney(Number(inv.discount_amount || 0));
-      const intr = roundMoney(Number(inv.interest_amount || 0));
-
       const result: {
         conceptId?: string;
         code: string;
@@ -409,7 +403,7 @@ export function PortfolioReportsTab() {
         snapItems.forEach((it: any) => {
           const cid = String(it.conceptId ?? it.concept_id ?? it.billing_concept_id ?? '');
           const cObj = cid ? conceptMap.get(cid) : undefined;
-          const snapAmt = roundMoney(Number(it.amount ?? it.total ?? it.value ?? 0));
+          const amt = roundMoney(Number(it.amount ?? it.total ?? it.value ?? 0));
           const isLate = Boolean(
             cObj?.is_late_interest ?? it.isLateInterest ?? it.is_late_interest
           );
@@ -420,51 +414,12 @@ export function PortfolioReportsTab() {
             name:
               cObj?.name ||
               String(it.conceptName ?? it.concept_name ?? it.name ?? 'Concepto'),
-            amount: snapAmt,
+            amount: amt,
             isLateInterest: isLate,
           });
         });
 
-        const nonInterestSnapSum = roundMoney(
-          result
-            .filter(r => classifyConcept(r.code, r.name, r.isLateInterest) !== 'intereses')
-            .reduce((s, r) => s + r.amount, 0)
-        );
-
-        // Si el snapshot está por debajo del subtotal de la factura (porque una nota lo modificó),
-        // completamos la diferencia en ADM para conservar el valor real de la cuenta de cobro.
-        if (subtotal > 0 && nonInterestSnapSum < subtotal) {
-          const diff = roundMoney(subtotal - nonInterestSnapSum);
-          const admIdx = result.findIndex(
-            r => classifyConcept(r.code, r.name, r.isLateInterest) === 'admon'
-          );
-          if (admIdx >= 0) {
-            result[admIdx].amount = roundMoney(result[admIdx].amount + diff);
-          } else {
-            const admConcept = concepts.find(
-              c => classifyConcept(c.code, c.name, c.is_late_interest) === 'admon'
-            );
-            result.unshift({
-              conceptId: admConcept?.id ? String(admConcept.id) : undefined,
-              code: admConcept?.code || 'ADM',
-              name: admConcept?.name || 'Cuota de Administración',
-              amount: diff,
-              isLateInterest: false,
-            });
-          }
-        }
-
-        // Aplicar descuento de pronto pago si existe en la factura
-        if (disc > 0) {
-          const admIdx = result.findIndex(
-            r => classifyConcept(r.code, r.name, r.isLateInterest) === 'admon'
-          );
-          if (admIdx >= 0) {
-            result[admIdx].amount = roundMoney(result[admIdx].amount - disc);
-          }
-        }
-
-        // Agregar intereses de mora si la factura los tiene
+        const intr = roundMoney(Number(inv.interest_amount || 0));
         const hasInterestInSnap = result.some(
           r => classifyConcept(r.code, r.name, r.isLateInterest) === 'intereses'
         );
@@ -479,12 +434,13 @@ export function PortfolioReportsTab() {
           });
         }
       } else {
-        const netSub = roundMoney(subtotal - disc);
-        if (netSub > 0) {
+        const sub = roundMoney(Number(inv.subtotal || 0));
+        const intr = roundMoney(Number(inv.interest_amount || 0));
+        if (sub > 0) {
           result.push({
             code: 'ADM',
             name: 'Cuota de Administración',
-            amount: netSub,
+            amount: sub,
             isLateInterest: false,
           });
         }
@@ -643,8 +599,8 @@ export function PortfolioReportsTab() {
       .forEach(inv => {
         const p = String(inv.period || 'SIN PERIODO');
         const row = getOrCreate(p);
-        const baseLines = getInvoiceOriginalConceptAmounts(inv);
-        baseLines.forEach(line => {
+        const lines = getInvoiceSnapshotConcepts(inv);
+        lines.forEach(line => {
           addDiscriminatedAmount(
             row,
             line.conceptId,
@@ -781,7 +737,7 @@ export function PortfolioReportsTab() {
     noteByIdMap,
     noteLines,
     conceptMap,
-    getInvoiceOriginalConceptAmounts,
+    getInvoiceSnapshotConcepts,
     isStatusAllowed,
     isDateAllowed,
     selectedConceptId,
@@ -834,7 +790,6 @@ export function PortfolioReportsTab() {
       eventMap[colKey] = roundMoney((eventMap[colKey] || 0) + rounded);
     };
 
-    // Cuentas de cobro con su valor real original
     invoices
       .filter(
         inv =>
@@ -844,9 +799,9 @@ export function PortfolioReportsTab() {
       )
       .forEach(inv => {
         const byConceptKey: Record<string, number> = {};
-        const baseLines = getInvoiceOriginalConceptAmounts(inv);
+        const lines = getInvoiceSnapshotConcepts(inv);
 
-        baseLines.forEach(line => {
+        lines.forEach(line => {
           const cid = line.conceptId ? String(line.conceptId) : '';
           if (selectedConceptId !== 'ALL' && cid !== selectedConceptId) return;
 
@@ -871,7 +826,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // Recibos de caja
     receipts
       .filter(
         r =>
@@ -919,7 +873,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // Notas NC, ND y NT como movimientos propios
     const linesByNote = new Map<string, any[]>();
     noteLines.forEach(ln => {
       const nid = String(ln.note_id || '');
@@ -1023,7 +976,7 @@ export function PortfolioReportsTab() {
     tpMap,
     pmMap,
     conceptMap,
-    getInvoiceOriginalConceptAmounts,
+    getInvoiceSnapshotConcepts,
     invoices,
     receipts,
     allocsByReceiptId,
@@ -1034,7 +987,6 @@ export function PortfolioReportsTab() {
     selectedConceptId,
   ]);
 
-  // KPIs sincronizados con los filtros activos
   const kpis = useMemo(() => {
     const isSingleUnit = Boolean(selectedUnitId) || filteredUnits.length === 1;
 
@@ -1105,7 +1057,6 @@ export function PortfolioReportsTab() {
     selectedConceptId,
   ]);
 
-  // 3. Cartera por Conceptos
   const byConceptRows = useMemo(() => {
     const map = new Map<
       string,
@@ -1155,7 +1106,6 @@ export function PortfolioReportsTab() {
       .sort((a, b) => b.totalAmt - a.totalAmt);
   }, [allDetailedItems, conceptMap, effectiveCutoff]);
 
-  // 4. Cartera por Edades
   const byAgingRows = useMemo(() => {
     const map = new Map<
       string,
@@ -1210,7 +1160,6 @@ export function PortfolioReportsTab() {
     return Array.from(map.values()).sort((a, b) => b.totalAmt - a.totalAmt);
   }, [allDetailedItems, unitMap, effectiveCutoff]);
 
-  // 5. Relación de Recibos de Caja
   const receiptRows = useMemo(() => {
     return receipts
       .filter(r => {
@@ -1249,7 +1198,6 @@ export function PortfolioReportsTab() {
       });
   }, [receipts, allocsByReceiptId, allowedUnitIds, isDateAllowed, isStatusAllowed, unitMap, pmMap]);
 
-  // 6. Recaudo por Fecha o Medio de Pago
   const collectionSummaryRows = useMemo(() => {
     const map = new Map<
       string,
@@ -1285,7 +1233,6 @@ export function PortfolioReportsTab() {
     return Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
   }, [receiptRows]);
 
-  // 7. Saldos a Favor / Anticipos
   const advancesRows = useMemo(() => {
     const map = new Map<
       string,
@@ -1355,7 +1302,6 @@ export function PortfolioReportsTab() {
     unitMap,
   ]);
 
-  // 8. Paz y Salvo de Cartera
   const pazYSalvoRows = useMemo(() => {
     const balanceByUnit = new Map<string, { current: number; overdue: number; total: number }>();
 
@@ -1393,7 +1339,6 @@ export function PortfolioReportsTab() {
     });
   }, [filteredUnits, allDetailedItems, effectiveCutoff]);
 
-  // 9. Relación de Notas NC / ND / NT
   const treasuryNotesRows = useMemo(() => {
     return notes
       .filter(n => {
@@ -1424,7 +1369,6 @@ export function PortfolioReportsTab() {
       });
   }, [notes, noteLines, allowedUnitIds, isDateAllowed, isStatusAllowed, unitMap]);
 
-  // 10. Cartera Morosa
   const delinquencyRows = useMemo(() => {
     const map = new Map<
       string,
