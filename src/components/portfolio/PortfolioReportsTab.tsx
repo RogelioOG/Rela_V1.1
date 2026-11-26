@@ -10,6 +10,7 @@ import {
   Loader2,
   Printer,
   Receipt,
+  RotateCcw,
   Scale,
   Table as TableIcon,
   Wallet,
@@ -217,6 +218,7 @@ export function PortfolioReportsTab() {
 
   const [excludeAdvancesInConcept, setExcludeAdvancesInConcept] = useState<boolean>(false);
   const [onlyAdvancesInConcept, setOnlyAdvancesInConcept] = useState<boolean>(false);
+  const [sortReceiptsByDate, setSortReceiptsByDate] = useState<boolean>(false);
 
   const [units, setUnits] = useState<Unit[]>([]);
   const [concepts, setConcepts] = useState<BillingConcept[]>([]);
@@ -229,6 +231,20 @@ export function PortfolioReportsTab() {
   const [receiptAllocations, setReceiptAllocations] = useState<any[]>([]);
   const [notes, setNotes] = useState<any[]>([]);
   const [noteLines, setNoteLines] = useState<any[]>([]);
+
+  const handleClearFilters = useCallback(() => {
+    setCutoffDate(today);
+    setDateFrom('');
+    setDateTo('');
+    setSelectedTower('ALL');
+    setSelectedUnitId('');
+    setSelectedConceptId('ALL');
+    setStatusFilter('ALL');
+    setIncludeNames(false);
+    setExcludeAdvancesInConcept(false);
+    setOnlyAdvancesInConcept(false);
+    setSortReceiptsByDate(false);
+  }, [today]);
 
   const loadData = useCallback(async () => {
     if (!activeOrg) return;
@@ -623,7 +639,6 @@ export function PortfolioReportsTab() {
       return ent;
     };
 
-    // 1. Cargos base de facturas/cuentas de cobro
     invoices
       .filter(
         inv =>
@@ -654,7 +669,6 @@ export function PortfolioReportsTab() {
         });
       });
 
-    // 2. Cuotas sin factura asociada en el rango
     dues
       .filter(
         d =>
@@ -692,7 +706,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // 3. Cruces de recibos de caja (pagos + descuentos aplicados)
     receipts
       .filter(
         r =>
@@ -744,7 +757,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // 4. Cruces de notas de tesorería (NC, ND, NT)
     noteLines.forEach(ln => {
       const parent = noteByIdMap.get(String(ln.note_id));
       if (!parent || !isStatusAllowed(parent.status)) return;
@@ -1541,7 +1553,7 @@ export function PortfolioReportsTab() {
     tpMap,
   ]);
 
-  // 4. Cartera por Edades (con cruces reales de facturas/cuotas, recibos y notas)
+  // 4. Cartera por Edades
   const byAgingRows = useMemo(() => {
     const map = new Map<
       string,
@@ -1605,9 +1617,11 @@ export function PortfolioReportsTab() {
     return Array.from(map.values()).sort((a, b) => b.totalAmt - a.totalAmt);
   }, [filteredUnits, reconciledItemsByUnit, effectiveCutoff, tpMap]);
 
-  // 5. Relación de Recibos de Caja
-  const receiptRows = useMemo(() => {
-    return receipts
+  // 5. Relación de Recibos de Caja (discriminado por concepto aplicado sin descuento + descuento + anticipo + totales)
+  const receiptsReportData = useMemo(() => {
+    const colMetaMap = new Map<string, ConceptColumnDef>();
+
+    const baseList = receipts
       .filter(r => {
         if (!allowedUnitIds.has(String(r.unit_id || ''))) return false;
         if (!isDateAllowed(r.payment_date || r.accounting_date)) return false;
@@ -1617,14 +1631,39 @@ export function PortfolioReportsTab() {
       .map(r => {
         const uObj = unitMap.get(String(r.unit_id || ''));
         const rAllocs = allocsByReceiptId.get(String(r.id)) || [];
-        const allocSum = roundMoney(
-          rAllocs.reduce(
-            (s, a) => s + Number(a.capital_applied || 0) + Number(a.interest_applied || 0),
-            0
-          )
-        );
+
+        const appliedByConcept: Record<string, number> = {};
+        let receiptDiscount = 0;
+        let allocAppliedSum = 0;
+
+        rAllocs.forEach(al => {
+          const cid = al.concept_id ? String(al.concept_id) : '';
+          const pureApplied = roundMoney(
+            Number(al.capital_applied || 0) + Number(al.interest_applied || 0)
+          );
+          const discApplied = roundMoney(Number(al.discount_applied || 0));
+          receiptDiscount = roundMoney(receiptDiscount + discApplied);
+
+          if (Math.abs(pureApplied) >= 0.005) {
+            allocAppliedSum = roundMoney(allocAppliedSum + pureApplied);
+            const cObj = cid ? conceptMap.get(cid) : undefined;
+            const label = cObj?.name || 'Concepto';
+            const key = cid ? `cid_${cid}` : `lbl_${label.toUpperCase()}`;
+            appliedByConcept[key] = roundMoney((appliedByConcept[key] || 0) + pureApplied);
+
+            if (!colMetaMap.has(key)) {
+              colMetaMap.set(key, {
+                key,
+                label,
+                conceptId: cid || undefined,
+              });
+            }
+          }
+        });
+
         const appliedAmt =
-          r.applied_amount != null ? roundMoney(Number(r.applied_amount)) : allocSum;
+          r.applied_amount != null ? roundMoney(Number(r.applied_amount)) : allocAppliedSum;
+
         return {
           id: String(r.id),
           receiptNumber: String(r.receipt_number || 'RC'),
@@ -1637,11 +1676,64 @@ export function PortfolioReportsTab() {
             : '—',
           totalAmount: roundMoney(Number(r.total_amount || 0)),
           appliedAmount: appliedAmt,
+          appliedByConcept,
+          discountAmount: receiptDiscount,
           advanceAmount: roundMoney(Number(r.advance_amount || 0)),
           status: String(r.status || 'contabilizado'),
           notes: String(r.notes || ''),
         };
       });
+
+    const filteredByConcept =
+      selectedConceptId === 'ALL'
+        ? baseList
+        : baseList.filter(item => {
+            const targetKey = `cid_${selectedConceptId}`;
+            return Math.abs(roundMoney(item.appliedByConcept[targetKey] || 0)) >= 0.005;
+          });
+
+    const columns: ConceptColumnDef[] = Array.from(colMetaMap.values())
+      .filter(col => {
+        if (selectedConceptId !== 'ALL' && col.conceptId !== selectedConceptId) {
+          return false;
+        }
+        return filteredByConcept.some(
+          item => Math.abs(roundMoney(item.appliedByConcept[col.key] || 0)) >= 0.005
+        );
+      })
+      .sort((a, b) => a.label.localeCompare(b.label));
+
+    const sortedRows = [...filteredByConcept].sort((a, b) => {
+      if (sortReceiptsByDate) {
+        const dCmp = a.paymentDate.localeCompare(b.paymentDate);
+        if (dCmp !== 0) return dCmp;
+      }
+      return a.receiptNumber.localeCompare(b.receiptNumber, undefined, {
+        numeric: true,
+        sensitivity: 'base',
+      });
+    });
+
+    const conceptTotals: Record<string, number> = {};
+    columns.forEach(col => {
+      conceptTotals[col.key] = roundMoney(
+        sortedRows.reduce((sum, r) => sum + (r.appliedByConcept[col.key] || 0), 0)
+      );
+    });
+
+    const totals = {
+      totalAmount: roundMoney(sortedRows.reduce((s, r) => s + r.totalAmount, 0)),
+      appliedAmount: roundMoney(sortedRows.reduce((s, r) => s + r.appliedAmount, 0)),
+      conceptTotals,
+      discountAmount: roundMoney(sortedRows.reduce((s, r) => s + r.discountAmount, 0)),
+      advanceAmount: roundMoney(sortedRows.reduce((s, r) => s + r.advanceAmount, 0)),
+    };
+
+    return {
+      columns,
+      rows: sortedRows,
+      totals,
+    };
   }, [
     receipts,
     allocsByReceiptId,
@@ -1651,7 +1743,12 @@ export function PortfolioReportsTab() {
     unitMap,
     tpMap,
     pmMap,
+    conceptMap,
+    selectedConceptId,
+    sortReceiptsByDate,
   ]);
+
+  const receiptRows = receiptsReportData.rows;
 
   // 6. Recaudo por Fecha o Medio de Pago
   const collectionSummaryRows = useMemo(() => {
@@ -2063,33 +2160,47 @@ export function PortfolioReportsTab() {
         ])
       );
     } else if (activeReport === 'receipts_list') {
-      downloadCsv(
-        `relacion-recibos-${stamp}.csv`,
-        [
-          'RECIBO',
-          'FECHA PAGO',
-          'FECHA CONTABLE',
-          'INMUEBLE',
-          ...(includeNames ? ['NOMBRE'] : []),
-          'MEDIO PAGO',
-          'TOTAL',
-          'APLICADO',
-          'ANTICIPO',
-          'ESTADO',
-        ],
-        receiptRows.map(r => [
-          r.receiptNumber,
-          r.paymentDate,
-          r.accountingDate,
-          r.unitLabel,
-          ...(includeNames ? [r.ownerName] : []),
-          r.paymentMethod,
-          r.totalAmount,
-          r.appliedAmount,
-          r.advanceAmount,
-          r.status,
-        ])
-      );
+      const headers = [
+        'RECIBO',
+        'FECHA PAGO',
+        'INMUEBLE',
+        ...(includeNames ? ['NOMBRE'] : []),
+        'MEDIO PAGO',
+        'TOTAL',
+        ...receiptsReportData.columns.map(c => c.label.toUpperCase()),
+        'DESCUENTO',
+        'ANTICIPO',
+        'ESTADO',
+      ];
+      const csvRows: (string | number)[][] = receiptRows.map(r => [
+        r.receiptNumber,
+        r.paymentDate,
+        r.unitLabel,
+        ...(includeNames ? [r.ownerName] : []),
+        r.paymentMethod,
+        r.totalAmount,
+        ...receiptsReportData.columns.map(c => r.appliedByConcept[c.key] || 0),
+        r.discountAmount,
+        r.advanceAmount,
+        r.status,
+      ]);
+      if (receiptRows.length > 0) {
+        csvRows.push([
+          'TOTALES',
+          '',
+          '',
+          ...(includeNames ? [''] : []),
+          '',
+          receiptsReportData.totals.totalAmount,
+          ...receiptsReportData.columns.map(
+            c => receiptsReportData.totals.conceptTotals[c.key] || 0
+          ),
+          receiptsReportData.totals.discountAmount,
+          receiptsReportData.totals.advanceAmount,
+          '',
+        ]);
+      }
+      downloadCsv(`relacion-recibos-${stamp}.csv`, headers, csvRows);
     } else if (activeReport === 'collection_summary') {
       downloadCsv(
         `recaudo-fecha-medio-${stamp}.csv`,
@@ -2357,25 +2468,52 @@ export function PortfolioReportsTab() {
         ...(includeNames ? ['Nombre'] : []),
         'Medio',
         'Total',
-        'Aplicado',
+        ...receiptsReportData.columns.map(c => c.label),
+        'Descuento',
         'Anticipo',
         'Estado',
       ];
-      tableRowsHtml = receiptRows
-        .map(
-          r => `<tr>
+      const bodyHtml = receiptRows
+        .map(r => {
+          const conceptCells = receiptsReportData.columns
+            .map(c => {
+              const v = roundMoney(r.appliedByConcept[c.key] || 0);
+              return `<td class="num">${escapeHtml(formatCOP(v))}</td>`;
+            })
+            .join('');
+          return `<tr>
             <td>${escapeHtml(r.receiptNumber)}</td>
             <td>${escapeHtml(r.paymentDate)}</td>
             <td>${escapeHtml(r.unitLabel)}</td>
             ${includeNames ? `<td>${escapeHtml(r.ownerName)}</td>` : ''}
             <td>${escapeHtml(r.paymentMethod)}</td>
-            <td class="num">${escapeHtml(formatCOP(r.totalAmount))}</td>
-            <td class="num">${escapeHtml(formatCOP(r.appliedAmount))}</td>
+            <td class="num"><strong>${escapeHtml(formatCOP(r.totalAmount))}</strong></td>
+            ${conceptCells}
+            <td class="num">${escapeHtml(formatCOP(r.discountAmount))}</td>
             <td class="num">${escapeHtml(formatCOP(r.advanceAmount))}</td>
             <td>${escapeHtml(r.status)}</td>
-          </tr>`
-        )
+          </tr>`;
+        })
         .join('');
+
+      const totalsRowHtml =
+        receiptRows.length > 0
+          ? `<tr class="final-row">
+              <td colspan="${includeNames ? 5 : 4}"><strong>Totales</strong></td>
+              <td class="num"><strong>${escapeHtml(formatCOP(receiptsReportData.totals.totalAmount))}</strong></td>
+              ${receiptsReportData.columns
+                .map(c => {
+                  const v = roundMoney(receiptsReportData.totals.conceptTotals[c.key] || 0);
+                  return `<td class="num"><strong>${escapeHtml(formatCOP(v))}</strong></td>`;
+                })
+                .join('')}
+              <td class="num"><strong>${escapeHtml(formatCOP(receiptsReportData.totals.discountAmount))}</strong></td>
+              <td class="num"><strong>${escapeHtml(formatCOP(receiptsReportData.totals.advanceAmount))}</strong></td>
+              <td></td>
+            </tr>`
+          : '';
+
+      tableRowsHtml = bodyHtml + totalsRowHtml;
     } else if (activeReport === 'collection_summary') {
       tableHeaders = ['Fecha', 'Medio de Pago', 'Recibos', 'Total Recaudo', 'Aplicado', 'Anticipo'];
       tableRowsHtml = collectionSummaryRows
@@ -2659,48 +2797,71 @@ export function PortfolioReportsTab() {
             </Select>
           </div>
 
-          <div className="flex flex-wrap items-center gap-5 pt-2 border-t border-gray-100">
-            <label className="inline-flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={includeNames}
-                onChange={e => setIncludeNames(e.target.checked)}
-                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-              />
-              Incluir nombres
-            </label>
+          <div className="flex flex-wrap items-center justify-between gap-4 pt-2 border-t border-gray-100">
+            <div className="flex flex-wrap items-center gap-5">
+              <label className="inline-flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={includeNames}
+                  onChange={e => setIncludeNames(e.target.checked)}
+                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                Incluir nombres
+              </label>
 
-            {activeReport === 'by_concept' && (
-              <>
+              {activeReport === 'by_concept' && (
+                <>
+                  <label className="inline-flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={excludeAdvancesInConcept}
+                      onChange={e => {
+                        const checked = e.target.checked;
+                        setExcludeAdvancesInConcept(checked);
+                        if (checked) setOnlyAdvancesInConcept(false);
+                      }}
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    No incluir anticipos / saldos a favor
+                  </label>
+
+                  <label className="inline-flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={onlyAdvancesInConcept}
+                      onChange={e => {
+                        const checked = e.target.checked;
+                        setOnlyAdvancesInConcept(checked);
+                        if (checked) setExcludeAdvancesInConcept(false);
+                      }}
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    Solo los Anticipos / Saldo a Favor
+                  </label>
+                </>
+              )}
+
+              {activeReport === 'receipts_list' && (
                 <label className="inline-flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer select-none">
                   <input
                     type="checkbox"
-                    checked={excludeAdvancesInConcept}
-                    onChange={e => {
-                      const checked = e.target.checked;
-                      setExcludeAdvancesInConcept(checked);
-                      if (checked) setOnlyAdvancesInConcept(false);
-                    }}
+                    checked={sortReceiptsByDate}
+                    onChange={e => setSortReceiptsByDate(e.target.checked)}
                     className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                   />
-                  No incluir anticipos / saldos a favor
+                  Ordenar por fecha
                 </label>
+              )}
+            </div>
 
-                <label className="inline-flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={onlyAdvancesInConcept}
-                    onChange={e => {
-                      const checked = e.target.checked;
-                      setOnlyAdvancesInConcept(checked);
-                      if (checked) setExcludeAdvancesInConcept(false);
-                    }}
-                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                  />
-                  Solo los Anticipos / Saldo a Favor
-                </label>
-              </>
-            )}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleClearFilters}
+            >
+              <RotateCcw className="w-3.5 h-3.5 mr-1" /> Borrar filtro
+            </Button>
           </div>
         </div>
       </Card>
@@ -3141,7 +3302,12 @@ export function PortfolioReportsTab() {
                     {includeNames && <th className="px-3 py-2.5">Nombre</th>}
                     <th className="px-3 py-2.5">Medio Pago</th>
                     <th className="px-3 py-2.5 text-right">Total</th>
-                    <th className="px-3 py-2.5 text-right">Aplicado</th>
+                    {receiptsReportData.columns.map(col => (
+                      <th key={col.key} className="px-3 py-2.5 text-right">
+                        {col.label}
+                      </th>
+                    ))}
+                    <th className="px-3 py-2.5 text-right">Descuento</th>
                     <th className="px-3 py-2.5 text-right">Anticipo</th>
                     <th className="px-3 py-2.5">Estado</th>
                   </tr>
@@ -3149,7 +3315,12 @@ export function PortfolioReportsTab() {
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {receiptRows.length === 0 ? (
                     <tr>
-                      <td colSpan={includeNames ? 9 : 8} className="px-4 py-8 text-center text-gray-500">
+                      <td
+                        colSpan={
+                          (includeNames ? 8 : 7) + receiptsReportData.columns.length
+                        }
+                        className="px-4 py-8 text-center text-gray-500"
+                      >
                         No hay recibos de caja con los filtros seleccionados.
                       </td>
                     </tr>
@@ -3166,8 +3337,19 @@ export function PortfolioReportsTab() {
                         <td className="px-3 py-2 text-right font-mono font-bold">
                           {formatCOP(r.totalAmount)}
                         </td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          {formatCOP(r.appliedAmount)}
+                        {receiptsReportData.columns.map(col => {
+                          const v = roundMoney(r.appliedByConcept[col.key] || 0);
+                          return (
+                            <td
+                              key={col.key}
+                              className="px-3 py-2 text-right font-mono text-gray-900"
+                            >
+                              {formatCOP(v)}
+                            </td>
+                          );
+                        })}
+                        <td className="px-3 py-2 text-right font-mono text-amber-700">
+                          {formatCOP(r.discountAmount)}
                         </td>
                         <td className="px-3 py-2 text-right font-mono text-blue-700">
                           {formatCOP(r.advanceAmount)}
@@ -3177,6 +3359,42 @@ export function PortfolioReportsTab() {
                     ))
                   )}
                 </tbody>
+                {receiptRows.length > 0 && (
+                  <tfoot className="bg-gray-100 border-t-2 border-gray-300 text-xs">
+                    <tr>
+                      <td
+                        colSpan={includeNames ? 5 : 4}
+                        className="px-3 py-2.5 font-bold text-gray-800 uppercase"
+                      >
+                        Totales
+                      </td>
+                      <td className="px-3 py-2.5" />
+                      <td className="px-3 py-2.5 text-right font-mono font-bold text-gray-900">
+                        {formatCOP(receiptsReportData.totals.totalAmount)}
+                      </td>
+                      {receiptsReportData.columns.map(col => {
+                        const v = roundMoney(
+                          receiptsReportData.totals.conceptTotals[col.key] || 0
+                        );
+                        return (
+                          <td
+                            key={col.key}
+                            className="px-3 py-2.5 text-right font-mono font-bold text-gray-900"
+                          >
+                            {formatCOP(v)}
+                          </td>
+                        );
+                      })}
+                      <td className="px-3 py-2.5 text-right font-mono font-bold text-amber-700">
+                        {formatCOP(receiptsReportData.totals.discountAmount)}
+                      </td>
+                      <td className="px-3 py-2.5 text-right font-mono font-bold text-blue-700">
+                        {formatCOP(receiptsReportData.totals.advanceAmount)}
+                      </td>
+                      <td className="px-3 py-2.5" />
+                    </tr>
+                  </tfoot>
+                )}
               </table>
             </div>
           ) : activeReport === 'collection_summary' ? (
