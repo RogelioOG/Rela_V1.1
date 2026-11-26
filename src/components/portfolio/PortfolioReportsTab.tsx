@@ -656,7 +656,6 @@ export function PortfolioReportsTab() {
       else row.otros = roundMoney(row.otros + amount);
     };
 
-    // 1.1 Cuentas de cobro originales
     invoices
       .filter(
         inv =>
@@ -680,7 +679,6 @@ export function PortfolioReportsTab() {
         });
       });
 
-    // 1.2 Cuotas sin factura asociada
     dues
       .filter(
         d =>
@@ -711,7 +709,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // 1.3 Pagos / Recibos de caja (pagos efectivos y descuento por pronto pago por separado)
     receipts
       .filter(
         r =>
@@ -759,7 +756,6 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // 1.4 Ajustes por Notas (NC, ND, NT) en su propia columna AJUSTES
     noteLines.forEach(ln => {
       const parent = noteByIdMap.get(String(ln.note_id));
       if (!parent || !isStatusAllowed(parent.status)) return;
@@ -835,9 +831,7 @@ export function PortfolioReportsTab() {
         rows: [] as any[],
         finalTotalDoc: 0,
         finalConceptTotals: {} as Record<string, number>,
-        finalDiscountTotal: 0,
         finalBalance: 0,
-        hasAnyDiscount: false,
       };
     }
 
@@ -915,7 +909,7 @@ export function PortfolioReportsTab() {
         }
       });
 
-    // 2.2 Recibos de caja: totalDoc = valor pagado (-117.000), discountApplied = descuento (-10.000)
+    // 2.2 Recibos de caja
     receipts
       .filter(
         r =>
@@ -1043,11 +1037,8 @@ export function PortfolioReportsTab() {
       rawEvents.some(ev => Math.abs(roundMoney(ev.byConceptKey[col.key] || 0)) > 0.005)
     );
 
-    const hasAnyDiscount = rawEvents.some(ev => Math.abs(roundMoney(ev.discountApplied)) >= 0.005);
-
     let runningSaldo = 0;
     let finalTotalDoc = 0;
-    let finalDiscountTotal = 0;
     const finalConceptTotals: Record<string, number> = {};
     columns.forEach(col => {
       finalConceptTotals[col.key] = 0;
@@ -1055,10 +1046,9 @@ export function PortfolioReportsTab() {
 
     const rows = rawEvents.map(ev => {
       const disc = roundMoney(ev.discountApplied || 0);
-      runningSaldo = roundMoney(runningSaldo + ev.totalDoc + disc);
-      finalTotalDoc = roundMoney(finalTotalDoc + ev.totalDoc);
-      finalDiscountTotal = roundMoney(finalDiscountTotal + disc);
-
+      const netDocImpact = roundMoney(ev.totalDoc + disc);
+      runningSaldo = roundMoney(runningSaldo + netDocImpact);
+      finalTotalDoc = roundMoney(finalTotalDoc + netDocImpact);
       const conceptValues: Record<string, number> = {};
       columns.forEach(col => {
         const v = roundMoney(ev.byConceptKey[col.key] || 0);
@@ -1084,9 +1074,7 @@ export function PortfolioReportsTab() {
       rows,
       finalTotalDoc,
       finalConceptTotals,
-      finalDiscountTotal,
       finalBalance: runningSaldo,
-      hasAnyDiscount,
     };
   }, [
     selectedUnitId,
@@ -1570,24 +1558,26 @@ export function PortfolioReportsTab() {
       ]);
       downloadCsv(`estado-cuenta-resumido-${stamp}.csv`, headers, rows);
     } else if (activeReport === 'statement_detailed') {
-      const csvRows: (string | number)[][] = detailedStatementData.rows.map(r => [
-        r.date,
-        r.doc,
-        r.detail,
-        r.totalDoc,
-        ...(detailedStatementData.hasAnyDiscount ? [r.discountApplied] : []),
-        ...detailedStatementData.columns.map(c => r.conceptValues[c.key] || 0),
-        r.balance,
-      ]);
+      const csvRows: (string | number)[][] = detailedStatementData.rows.map(r => {
+        const docText =
+          Math.abs(roundMoney(r.discountApplied || 0)) >= 0.005
+            ? `${r.totalDoc} (Descuento aplicado: ${r.discountApplied})`
+            : r.totalDoc;
+        return [
+          r.date,
+          r.doc,
+          r.detail,
+          docText,
+          ...detailedStatementData.columns.map(c => r.conceptValues[c.key] || 0),
+          r.balance,
+        ];
+      });
       if (detailedStatementData.rows.length > 0) {
         csvRows.push([
           '',
           'SALDO FINAL',
           'Saldo final por concepto',
           detailedStatementData.finalTotalDoc,
-          ...(detailedStatementData.hasAnyDiscount
-            ? [detailedStatementData.finalDiscountTotal]
-            : []),
           ...detailedStatementData.columns.map(
             c => detailedStatementData.finalConceptTotals[c.key] || 0
           ),
@@ -1601,7 +1591,6 @@ export function PortfolioReportsTab() {
           'DOCUMENTO',
           'DETALLE',
           'TOTAL DOCUMENTO',
-          ...(detailedStatementData.hasAnyDiscount ? ['DESCUENTO APLICADO'] : []),
           ...detailedStatementData.columns.map(c => c.label.toUpperCase()),
           'SALDO',
         ],
@@ -1774,7 +1763,6 @@ export function PortfolioReportsTab() {
         'Documento',
         'Detalle',
         'Total Documento',
-        ...(detailedStatementData.hasAnyDiscount ? ['Descuento Aplicado'] : []),
         ...detailedStatementData.columns.map(c => c.label),
         'Saldo',
       ];
@@ -1786,15 +1774,15 @@ export function PortfolioReportsTab() {
               return `<td class="num ${v < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(v))}</td>`;
             })
             .join('');
-          const discCell = detailedStatementData.hasAnyDiscount
-            ? `<td class="num ${r.discountApplied < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(r.discountApplied))}</td>`
-            : '';
+          const hasDisc = Math.abs(roundMoney(r.discountApplied || 0)) >= 0.005;
+          const totalDocHtml = hasDisc
+            ? `<div>${escapeHtml(formatCOP(r.totalDoc))}</div><div class="sub-disc">${escapeHtml(formatCOP(r.discountApplied))}</div>`
+            : escapeHtml(formatCOP(r.totalDoc));
           return `<tr>
             <td>${escapeHtml(r.date || '—')}</td>
             <td>${escapeHtml(r.doc)}</td>
             <td>${escapeHtml(r.detail)}</td>
-            <td class="num ${r.totalDoc < 0 ? 'neg' : ''}">${escapeHtml(formatCOP(r.totalDoc))}</td>
-            ${discCell}
+            <td class="num ${r.totalDoc < 0 ? 'neg' : ''}">${totalDocHtml}</td>
             ${conceptCells}
             <td class="num ${r.balance < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(r.balance))}</strong></td>
           </tr>`;
@@ -1806,11 +1794,6 @@ export function PortfolioReportsTab() {
           ? `<tr class="final-row">
               <td colspan="3"><strong>SALDO FINAL POR CONCEPTO</strong></td>
               <td class="num ${detailedStatementData.finalTotalDoc < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(detailedStatementData.finalTotalDoc))}</strong></td>
-              ${
-                detailedStatementData.hasAnyDiscount
-                  ? `<td class="num ${detailedStatementData.finalDiscountTotal < 0 ? 'neg' : ''}"><strong>${escapeHtml(formatCOP(detailedStatementData.finalDiscountTotal))}</strong></td>`
-                  : ''
-              }
               ${detailedStatementData.columns
                 .map(c => {
                   const v = roundMoney(detailedStatementData.finalConceptTotals[c.key] || 0);
@@ -1894,6 +1877,7 @@ export function PortfolioReportsTab() {
       th { background: #f3f4f6; font-weight: 700; }
       .num { text-align: right; font-variant-numeric: tabular-nums; }
       .neg { color: #b91c1c; }
+      .sub-disc { color: #b91c1c; font-size: 10px; }
       .final-row td { background: #f9fafb; border-top: 2px solid #374151; }
     </style></head><body>
       <h1>${escapeHtml(activeOrg?.name || 'Copropiedad')} — ${escapeHtml(reportTitle)}</h1>
@@ -2237,9 +2221,6 @@ export function PortfolioReportsTab() {
                       <th className="px-3 py-2.5">Documento</th>
                       <th className="px-3 py-2.5">Detalle</th>
                       <th className="px-3 py-2.5 text-right">Total Documento</th>
-                      {detailedStatementData.hasAnyDiscount && (
-                        <th className="px-3 py-2.5 text-right">Descuento Aplicado</th>
-                      )}
                       {detailedStatementData.columns.map(col => (
                         <th key={col.key} className="px-3 py-2.5 text-right">
                           {col.label}
@@ -2252,62 +2233,57 @@ export function PortfolioReportsTab() {
                     {detailedStatementData.rows.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={
-                            5 +
-                            detailedStatementData.columns.length +
-                            (detailedStatementData.hasAnyDiscount ? 1 : 0)
-                          }
+                          colSpan={5 + detailedStatementData.columns.length}
                           className="px-4 py-8 text-center text-gray-500"
                         >
                           Sin movimientos detallados con los filtros seleccionados.
                         </td>
                       </tr>
                     ) : (
-                      detailedStatementData.rows.map((r, idx) => (
-                        <tr key={`${r.doc}-${idx}`} className="hover:bg-gray-50">
-                          <td className="px-3 py-2 font-mono">{r.date || '—'}</td>
-                          <td className="px-3 py-2 font-mono font-semibold text-blue-700">
-                            {r.doc}
-                          </td>
-                          <td className="px-3 py-2">{r.detail}</td>
-                          <td
-                            className={`px-3 py-2 text-right font-mono font-semibold ${
-                              r.totalDoc < 0 ? 'text-red-600' : 'text-gray-900'
-                            }`}
-                          >
-                            {formatCOP(r.totalDoc)}
-                          </td>
-                          {detailedStatementData.hasAnyDiscount && (
+                      detailedStatementData.rows.map((r, idx) => {
+                        const hasDisc = Math.abs(roundMoney(r.discountApplied || 0)) >= 0.005;
+                        return (
+                          <tr key={`${r.doc}-${idx}`} className="hover:bg-gray-50">
+                            <td className="px-3 py-2 font-mono">{r.date || '—'}</td>
+                            <td className="px-3 py-2 font-mono font-semibold text-blue-700">
+                              {r.doc}
+                            </td>
+                            <td className="px-3 py-2">{r.detail}</td>
                             <td
-                              className={`px-3 py-2 text-right font-mono ${
-                                r.discountApplied < 0 ? 'text-red-600' : 'text-gray-900'
+                              className={`px-3 py-2 text-right font-mono font-semibold ${
+                                r.totalDoc < 0 ? 'text-red-600' : 'text-gray-900'
                               }`}
                             >
-                              {formatCOP(r.discountApplied)}
+                              <div>{formatCOP(r.totalDoc)}</div>
+                              {hasDisc && (
+                                <div className="text-[11px] font-medium text-red-600">
+                                  {formatCOP(r.discountApplied)}
+                                </div>
+                              )}
                             </td>
-                          )}
-                          {detailedStatementData.columns.map(col => {
-                            const v = roundMoney(r.conceptValues[col.key] || 0);
-                            return (
-                              <td
-                                key={col.key}
-                                className={`px-3 py-2 text-right font-mono ${
-                                  v < 0 ? 'text-red-600' : 'text-gray-900'
-                                }`}
-                              >
-                                {formatCOP(v)}
-                              </td>
-                            );
-                          })}
-                          <td
-                            className={`px-3 py-2 text-right font-mono font-bold ${
-                              r.balance < 0 ? 'text-red-600' : 'text-gray-900'
-                            }`}
-                          >
-                            {formatCOP(r.balance)}
-                          </td>
-                        </tr>
-                      ))
+                            {detailedStatementData.columns.map(col => {
+                              const v = roundMoney(r.conceptValues[col.key] || 0);
+                              return (
+                                <td
+                                  key={col.key}
+                                  className={`px-3 py-2 text-right font-mono ${
+                                    v < 0 ? 'text-red-600' : 'text-gray-900'
+                                  }`}
+                                >
+                                  {formatCOP(v)}
+                                </td>
+                              );
+                            })}
+                            <td
+                              className={`px-3 py-2 text-right font-mono font-bold ${
+                                r.balance < 0 ? 'text-red-600' : 'text-gray-900'
+                              }`}
+                            >
+                              {formatCOP(r.balance)}
+                            </td>
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                   {detailedStatementData.rows.length > 0 && (
@@ -2325,17 +2301,6 @@ export function PortfolioReportsTab() {
                         >
                           {formatCOP(detailedStatementData.finalTotalDoc)}
                         </td>
-                        {detailedStatementData.hasAnyDiscount && (
-                          <td
-                            className={`px-3 py-2.5 text-right font-mono font-bold ${
-                              detailedStatementData.finalDiscountTotal < 0
-                                ? 'text-red-600'
-                                : 'text-gray-900'
-                            }`}
-                          >
-                            {formatCOP(detailedStatementData.finalDiscountTotal)}
-                          </td>
-                        )}
                         {detailedStatementData.columns.map(col => {
                           const v = roundMoney(
                             detailedStatementData.finalConceptTotals[col.key] || 0
